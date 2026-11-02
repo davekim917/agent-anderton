@@ -93,7 +93,8 @@ Anderton, not you. It answers what it can, brings you the decisions that are you
 PR, and deploys what passes.
 
 **Requirements:** Claude Code with background sessions (`claude --bg`, `claude agents`), built and
-tested on 2.1.312; `git`, `jq` and `gh`; and herdr or tmux. It runs on Linux and on macOS, including macOS's stock bash 3.2.
+tested on 2.1.312; `git`, `jq` and `gh`; and herdr or tmux. It runs on Linux and on macOS,
+including macOS's stock bash 3.2.
 
 ## Questions
 
