@@ -93,8 +93,7 @@ PR, and deploys what passes.
 
 **Requirements:** Claude Code with background sessions (`claude --bg`, `claude agents`), built and
 tested on 2.1.312; `git`, `jq` and `gh`; herdr or tmux, highly recommended, for workers in visible
-tabs. It
-runs on Linux and on macOS, including macOS's stock bash 3.2.
+tabs. It runs on Linux and on macOS, including macOS's stock bash 3.2.
 
 ## Questions
 
