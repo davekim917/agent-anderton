@@ -34,8 +34,8 @@ set up a separate supervisor. Type `/anderton` and that session takes over.
 - **Starts real sessions, not sub-agents.** Each task gets a full Claude Code session in its own git
   worktree, started from `origin/HEAD`. It loads your user settings and the repo's committed config
   (CLAUDE.md, skills, hooks, plugins) and shares the repo's auto memory. Inside
-  [herdr](https://herdr.dev) or tmux it opens in a tab you can watch and type into; elsewhere it
-  runs in the background.
+  [herdr](https://herdr.dev) or tmux it opens in a tab you can watch and type into; without either it
+  can only run in the background.
 - **Has workers report to it.** Each brief tells the worker to message the Anderton by name with
   questions, blockers and the finished PR, and not to deploy. You don't have to check each worker's
   tab for questions.
@@ -71,9 +71,10 @@ Install the plugin:
 /plugin install anderton@anderton
 ```
 
-Run Claude Code inside [herdr](https://herdr.dev) or tmux. It's highly recommended: workers open in
-tabs you can watch and type into, and you can answer their permission prompts from the Anderton.
-Without one, workers can only run in the background.
+Run Claude Code inside [herdr](https://herdr.dev) or tmux. Anderton needs one to work properly:
+workers open in tabs you can watch and type into, and you can answer their permission prompts from
+the Anderton. Without one, workers can only run in the background, where you can't watch them or
+answer their prompts from here.
 
 In the session you want in charge, give it a name (workers report to it by name), then start it:
 
@@ -92,8 +93,7 @@ Anderton, not you. It answers what it can, brings you the decisions that are you
 PR, and deploys what passes.
 
 **Requirements:** Claude Code with background sessions (`claude --bg`, `claude agents`), built and
-tested on 2.1.312; `git`, `jq` and `gh`; herdr or tmux, highly recommended, for workers in visible
-tabs. It runs on Linux and on macOS, including macOS's stock bash 3.2.
+tested on 2.1.312; `git`, `jq` and `gh`; and herdr or tmux. It runs on Linux and on macOS, including macOS's stock bash 3.2.
 
 ## Questions
 
