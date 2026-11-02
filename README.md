@@ -71,6 +71,10 @@ Install the plugin:
 /plugin install anderton@anderton
 ```
 
+Run Claude Code inside [herdr](https://herdr.dev) or tmux. It's highly recommended: workers open in
+tabs you can watch and type into, and you can answer their permission prompts from the Anderton.
+Without one, workers can only run in the background.
+
 In the session you want in charge, give it a name (workers report to it by name), then start it:
 
 ```
@@ -88,7 +92,8 @@ Anderton, not you. It answers what it can, brings you the decisions that are you
 PR, and deploys what passes.
 
 **Requirements:** Claude Code with background sessions (`claude --bg`, `claude agents`), built and
-tested on 2.1.312; `git`, `jq` and `gh`; optionally herdr or tmux for workers in visible tabs. It
+tested on 2.1.312; `git`, `jq` and `gh`; herdr or tmux, highly recommended, for workers in visible
+tabs. It
 runs on Linux and on macOS, including macOS's stock bash 3.2.
 
 ## Questions
