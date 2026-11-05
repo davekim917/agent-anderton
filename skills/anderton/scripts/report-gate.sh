@@ -34,6 +34,10 @@ EOF
     { read -r target && read -r sum; } < "$pending/$id" 2>/dev/null || exit 0
     rm -f "$pending/$id"
     [ -n "$target" ] && [ -n "$sum" ] || exit 0
+    # SendMessage reports a failed delivery as a normal result whose body says "success": false, so PostToolUse runs
+    # for it too. That body comes as an object, or as JSON inside the result's text.
+    if printf '%s' "$input" | jq -e '.tool_response | if type == "object" and has("success") then .success == false
+      else tostring | test("\\\\*\"success\\\\*\"\\s*:\\s*false") end' >/dev/null 2>&1; then exit 0; fi
     printf '%s %s\n' "$(date +%s)" "$sum" >| "$target" 2>/dev/null
     exit 0
   fi

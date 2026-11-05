@@ -472,7 +472,9 @@ gate() { # gate <session id> <cwd> <to> <message JSON value> [event, default Pre
   if [ "${5:-PreToolUse}" = PreToolUse ]; then calls=$((calls + 1)); call="toolu_test$calls"; fi
   set +e
   out=$(jq -nc --arg sid "$1" --arg cwd "$2" --arg to "$3" --argjson msg "$4" --arg ev "${5:-PreToolUse}" --arg id "$call" \
-    '{session_id: $sid, cwd: $cwd, hook_event_name: $ev, tool_name: "SendMessage", tool_use_id: $id, tool_input: {to: $to, message: $msg}}' |
+    --argjson response "${GATE_RESPONSE:-null}" \
+    '{session_id: $sid, cwd: $cwd, hook_event_name: $ev, tool_name: "SendMessage", tool_use_id: $id, tool_input: {to: $to, message: $msg}}
+      + if $response == null then {} else {tool_response: $response} end' |
     "$scripts/report-gate.sh" 2>&1)
   status=$?
   set -e
@@ -512,6 +514,20 @@ gate worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: CI cannot reach the r
 check "lets a retry through when the first send never completed" [ "$status" -eq 0 ]
 ANDERTON_REPEAT_WINDOW=0 send worker-1 "$work/wt-fix-login" lead-session '"\n**QUESTION:** keep the old cookie name? I recommend yes."'
 check "lets a repeat through once its window has passed" [ "$status" -eq 0 ]
+# SendMessage reports a failed delivery as a result whose body says "success": false, as an object or inside its text.
+GATE_RESPONSE='[{"type":"text","text":"{\"success\":false,\"message\":\"Failed to send: ENOENT\"}"}]' \
+  send worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: the build cache is full; clearing it would unblock me"'
+check "a send whose delivery failed is let through" [ "$status" -eq 0 ]
+send worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: the build cache is full; clearing it would unblock me"'
+check "and its retry is not a repeat, since it was never delivered" [ "$status" -eq 0 ]
+GATE_RESPONSE='{"success":false,"message":"no such peer"}' \
+  send worker-1 "$work/wt-fix-login" lead-session '"RESULT: cache cleared, the build passes"'
+send worker-1 "$work/wt-fix-login" lead-session '"RESULT: cache cleared, the build passes"'
+check "nor after a failure reported as an object" [ "$status" -eq 0 ]
+GATE_RESPONSE='[{"type":"text","text":"{\"success\":true,\"message\":\"sent\"}"}]' \
+  send worker-1 "$work/wt-fix-login" lead-session '"RESULT: the deploy note is written"'
+send worker-1 "$work/wt-fix-login" lead-session '"RESULT: the deploy note is written"'
+check "a send reported as delivered is recorded, so its repeat is held" [ "$status" -eq 2 ]
 send worker-1 "$work/wt-fix-login" lead-session '"ANSWER: yes"'
 send worker-1 "$work/wt-fix-login" lead-session '"ANSWER: yes"'
 check "lets the same short answer through twice: answers to two questions can match" [ "$status" -eq 0 ]
