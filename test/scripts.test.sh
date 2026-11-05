@@ -457,10 +457,57 @@ check "in a new worktree beside the repository" [ "$(sed -n 1p "$FAKE_LOG.bg")" 
 check "that worktree belongs to the repository" [ "$(project_root "$work/wt-fix-login")" = "$alpha" ]
 check "named, in the caller's permission mode" grep -qx -- "acceptEdits" "$FAKE_LOG.bg"
 check "with the brief" grep -qF "Fix the login redirect." "$FAKE_LOG.bg"
-check "telling it to report to the caller by name" grep -qF 'Tell "lead-session" by SendMessage' "$FAKE_LOG.bg"
+check "telling it to report to the caller by name" grep -qF 'Message "lead-session" by SendMessage only when it changes what they do' "$FAKE_LOG.bg"
+check "with the four kinds a report opens with" eval 'for k in RESULT: QUESTION: BLOCKED: ANSWER:; do grep -q "^  $k" "$FAKE_LOG.bg" || exit 1; done'
+check "and no acknowledgements or waiting notes" grep -qF 'Never send acknowledgements, "still waiting"' "$FAKE_LOG.bg"
+check "telling it to give each sub-agent an explicit effort" grep -qF 'Give every sub-agent you start an explicit effort' "$FAKE_LOG.bg"
 check "recording its id, which claude stop and rm take" [ "$(jq -r .id "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.json")" = a1b2c3d4 ]
 check "at the effort it was given" [ "$(grep -A1 -x -- --effort "$FAKE_LOG.bg" | tail -n 1)" = high ]
 check "on Opus when no model is named" [ "$(grep -A1 -x -- --model "$FAKE_LOG.bg" | tail -n 1)" = opus ]
+
+# report-gate.sh: the worker's messages to its lead must be a result, question, blocker or answer.
+spawn; p_worker=$pid; session "$p_worker" worker-1 "$work/wt-fix-login" fix-login
+gate() { # gate <session id> <cwd> <to> <message JSON value>: sets $out and $status
+  set +e
+  out=$(jq -nc --arg sid "$1" --arg cwd "$2" --arg to "$3" --argjson msg "$4" \
+    '{session_id: $sid, cwd: $cwd, hook_event_name: "PreToolUse", tool_name: "SendMessage", tool_input: {to: $to, message: $msg}}' |
+    "$scripts/report-gate.sh" 2>&1)
+  status=$?
+  set -e
+}
+gate worker-1 "$work/wt-fix-login" lead-session '"Got it, starting now."'
+check "report-gate blocks an acknowledgement to the lead" [ "$status" -eq 2 ]
+check "and tells the worker the four kinds" contains "RESULT: a milestone done"
+gate worker-1 "$work/wt-fix-login/src" lead-session '"Still holding for the merge."'
+check "from a subdirectory of the worker's worktree too" [ "$status" -eq 2 ]
+gate worker-1 "$work/wt-fix-login" "lead-session [a1b2c3]" '"FYI: tests are running."'
+check "to the lead named with its listing ref too" [ "$status" -eq 2 ]
+gate worker-1 "$work/wt-fix-login" "uds:/run/user/1000/cc-socks/$p_lead.sock" '"Thanks!"'
+check "to the lead's socket address, as a reply copies it" [ "$status" -eq 2 ]
+gate worker-1 "$work/wt-fix-login" "uds:/run/user/1000/cc-socks/$p_lead.sock" '"ANSWER: yes, the redirect test is the one."'
+check "lets an answer through to the socket address" [ "$status" -eq 0 ] && [ -z "$out" ]
+gate worker-1 "$work/wt-fix-login" lead-session '"RESULT: PR ready https://example.invalid/pr/1, redirect test passes"'
+check "lets a result through, printing nothing" [ "$status" -eq 0 ] && [ -z "$out" ]
+gate worker-1 "$work/wt-fix-login" lead-session '"RESULT: PR ready https://example.invalid/pr/1, redirect test passes\nmore"'
+check "blocks a report whose first line repeats the last one" [ "$status" -eq 2 ]
+check "saying so" contains "repeats your last message"
+gate worker-1 "$work/wt-fix-login" lead-session '"\n**QUESTION:** keep the old cookie name? I recommend yes."'
+check "lets a question through after blank lines and markdown" [ "$status" -eq 0 ]
+gate worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: CI cannot reach the registry; a rerun would unblock it"'
+check "lets a blocker through" [ "$status" -eq 0 ]
+gate worker-1 "$work/wt-fix-login" someone-else '"Got it."'
+check "leaves a message to anyone else alone" [ "$status" -eq 0 ] && [ -z "$out" ]
+gate worker-1 "$work/wt-fix-login" lead-session '""'
+check "leaves a pure idle subscription alone" [ "$status" -eq 0 ]
+gate worker-1 "$work/wt-fix-login" lead-session '{"type":"shutdown_response","request_id":"r1","approve":true}'
+check "leaves a structured protocol reply alone" [ "$status" -eq 0 ]
+gate lead-1 "$alpha" fix-login '"Got it."'
+check "leaves a session that is not a worker alone" [ "$status" -eq 0 ] && [ -z "$out" ]
+set +e
+out=$(printf 'not json' | "$scripts/report-gate.sh" 2>&1)
+status=$?
+set -e
+check "exits 0 silently on input it cannot read" [ "$status" -eq 0 ] && [ -z "$out" ]
 run "$scripts/spawn.sh" --effort high --model fable named-model <<'BRIEF'
 Task.
 BRIEF
@@ -569,6 +616,7 @@ run "$scripts/retire.sh" fix-login
 check "it retires a clean worker" [ "$status" -eq 0 ]
 check "removing its worktree" [ ! -e "$work/wt-fix-login" ]
 check "and its record" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.json" ]
+check "and its last report, so a later worker of that name starts clean" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.last-report" ]
 check "and the session, by id" grep -qx "rm a1b2c3d4" "$FAKE_LOG.life"
 run "$scripts/retire.sh" never-started
 check "it refuses a worker spawn.sh did not start" [ "$status" -eq 1 ]
@@ -586,7 +634,7 @@ check "labelled with its name" grep -qx -- "tab-worker" "$FAKE_LOG.tab"
 check "passing on the caller's Claude home, which the tab would not inherit" grep -qx -- "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR" "$FAKE_LOG.tab"
 check "running claude in that tab's pane" [ "$(tr '\n' ' ' < "$FAKE_LOG.start")" = "agent start tab-worker --kind claude --pane w9:p5 --timeout 120000 -- -n tab-worker --permission-mode acceptEdits --effort high --model opus " ]
 check "given the brief" grep -qF "Tidy the README." "$FAKE_LOG.prompt"
-check "and told to report to the caller by name" grep -qF 'Tell "lead-session" by SendMessage' "$FAKE_LOG.prompt"
+check "and told to report to the caller by name" grep -qF 'Message "lead-session" by SendMessage only when' "$FAKE_LOG.prompt"
 check "not started in the background" [ ! -e "$FAKE_LOG.bg" ]
 check "recording its tab and herdr server, which retire.sh closes it in" [ "$(jq -r '"\(.launcher) \(.tab) \(.socket)"' "$CLAUDE_CONFIG_DIR/anderton/workers/tab-worker.json")" = "herdr w9:t5 $work/herdr.sock" ]
 
@@ -647,7 +695,7 @@ BRIEF
 check "inside tmux, spawn.sh starts the worker" [ "$status" -eq 0 ]
 check "in a new window, detached, named for it, on its worktree, running claude in the caller's mode" \
   [ "$(head -n 20 "$FAKE_LOG.window" | tr '\n' ' ')" = "new-window -d -P -F #{window_id} -n tmux-worker -c $work/wt-tmux-worker -e CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR claude -n tmux-worker --permission-mode acceptEdits --effort high --model opus " ]
-check "with the brief and its report-by-name rule as one argument" grep -qF 'Tell "lead-session" by SendMessage' "$FAKE_LOG.window"
+check "with the brief and its report-by-name rule as one argument" grep -qF 'Message "lead-session" by SendMessage only when' "$FAKE_LOG.window"
 check "not started in the background" [ ! -e "$FAKE_LOG.bg" ]
 check "recording its window and tmux server, which retire.sh kills it in" [ "$(jq -r '"\(.launcher) \(.tab) \(.socket)"' "$CLAUDE_CONFIG_DIR/anderton/workers/tmux-worker.json")" = "tmux @7 /tmp/fake-tmux" ]
 run env TMUX=/tmp/fake-tmux,1,0 "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t8 "$scripts/spawn.sh" --effort high both-muxes <<'BRIEF'
