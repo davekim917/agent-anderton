@@ -236,14 +236,18 @@ name, even when the holder is idle. The next `Stop` starts it again. The alert c
 blocked session's text. The hook can't answer a prompt: a background hook can't return a decision.
 While a woken holder is mid-turn no watch runs, so a block in that turn is reported when the turn ends.
 
-**`report-gate.sh`** is a `PreToolUse` hook on `SendMessage`. It holds a message to an Anderton unless
-the message's first line opens with `RESULT:`, `QUESTION:`, `BLOCKED:` or `ANSWER:`, and holds one whose
-first line repeats the sender's last report. It judges two kinds of message: a worker's to the session
-`spawn.sh` started it from, and any session's to its project's holder, named in the claim file and
-addressed by name, by name with a listing ref, or by socket. A scope's holder relays asks from its own
-channels, so its messages to the project's holder are held only when they repeat. The sender sees why and
-keeps working. The project's holder, messages to anyone else, and sessions in other projects pass
-untouched. It only blocks: it prints no decision, so it can't approve a call.
+**`report-gate.sh`** is a hook on `SendMessage`, run before and after each send. It judges two kinds of
+message: a worker's to the session `spawn.sh` started it from, and any session's to its project's holder,
+named in the claim file, checked to be the live process the record names, and addressed by name, by name
+with a listing ref, or by socket. It holds a message whose first line doesn't open with `RESULT:`,
+`QUESTION:`, `BLOCKED:` or `ANSWER:` (any session other than a worker also has `DIRECTION:`, for passing
+on a person's instruction), and one that repeats, word for word, the sender's last message to that
+recipient within 30 minutes (`ANDERTON_REPEAT_WINDOW`, in seconds). A message counts as sent only once the
+send succeeds, so a failed or denied send can be retried. A scope's holder relays asks from its own
+channels, so its messages are held only when they repeat. The project's holder, messages to anyone else,
+and sessions in other projects pass untouched, and the project is the one the session started in. It only
+blocks: it prints no decision, so it can't approve a call, and it allows whenever it can't tell, a crash
+included.
 
 **`prompt.sh <name> [yes|no <fingerprint>]`** lets you answer a permission prompt from the Anderton
 session. It reads the prompt from the session's herdr tab or tmux pane and prints it with a

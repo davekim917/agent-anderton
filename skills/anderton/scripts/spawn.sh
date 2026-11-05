@@ -96,7 +96,6 @@ if ! (set -C && : > "$record") 2>/dev/null; then
 fi
 reserved=1
 trap '[ -z "$reserved" ] || rm -f "$record"' EXIT
-rm -f "$holders/workers/$name.last-report"
 if claude agents --json 2>/dev/null | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null; then
   echo "A live session is already named '$name'; pick another name." >&2
   exit 1

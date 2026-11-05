@@ -74,5 +74,5 @@ if [ "$launcher" = bg ] && ! claude rm "$id" >/dev/null 2>&1; then
   echo "Stopped '$name' and removed its worktree, but claude rm $id failed; kept the record. Rerun to finish." >&2
   exit 1
 fi
-rm -f "$record" "$holders/workers/$name.last-report"
+rm -f "$record"
 echo "Retired '$name'."

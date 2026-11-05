@@ -131,7 +131,8 @@ run on Opus, and you pass `--model` only when the user named another model.
 After starting a worker:
 - It messages you only with a `RESULT:`, `QUESTION:`, `BLOCKED:` or `ANSWER:`, one per
   milestone; a hook holds anything else, and holds the same from any other session in the
-  project that messages the project's holder (a scope's holder only on repeats). Every message you send it is one it may answer,
+  project that messages the project's holder, which may also send `DIRECTION:` to pass on
+  a person's instruction (a scope's holder is held only on repeats). Every message you send it is one it may answer,
   so send only direction, never an acknowledgement.
 - Subscribe with `notify_when_idle` only when you expect a milestone and the worker might
   stop without reporting it. Subscribe once: the notice fires on any turn end, so when it

@@ -30,11 +30,14 @@ done
 # A background hook cannot return a decision, and the reporting gate only blocks, so the plugin can never answer a
 # permission prompt.
 hooks="$root/hooks/hooks.json"
-[ "$(jq -c '.hooks | keys' "$hooks")" = '["PreToolUse","Stop"]' ] || fail "hooks.json must hook only Stop and PreToolUse"
-[ "$(jq '[.hooks[][].hooks[]] | length' "$hooks")" = 2 ] || fail "hooks.json must have two handlers"
-jq -e '.hooks.PreToolUse | length == 1 and .[0].matcher == "SendMessage"
-  and (.[0].hooks[0].command | endswith("/skills/anderton/scripts/report-gate.sh\""))' "$hooks" >/dev/null ||
-  fail "the PreToolUse hook must run report-gate.sh on SendMessage only"
+[ "$(jq -c '.hooks | keys' "$hooks")" = '["PostToolUse","PreToolUse","Stop"]' ] ||
+  fail "hooks.json must hook only Stop, PreToolUse and PostToolUse"
+[ "$(jq '[.hooks[][].hooks[]] | length' "$hooks")" = 3 ] || fail "hooks.json must have three handlers"
+for event in PreToolUse PostToolUse; do
+  jq -e --arg e "$event" '.hooks[$e] | length == 1 and .[0].matcher == "SendMessage"
+    and (.[0].hooks[0].command | endswith("/skills/anderton/scripts/report-gate.sh\""))' "$hooks" >/dev/null ||
+    fail "the $event hook must run report-gate.sh on SendMessage only"
+done
 # A PreToolUse hook that printed a decision could allow a call; the gate's only verdict is exit 2.
 ! grep -q 'permissionDecision\|"decision"\|"allow"' "$root/skills/anderton/scripts/report-gate.sh" ||
   fail "report-gate.sh must not print a hook decision"
