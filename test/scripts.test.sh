@@ -467,47 +467,91 @@ check "on Opus when no model is named" [ "$(grep -A1 -x -- --model "$FAKE_LOG.bg
 
 # report-gate.sh: the worker's messages to its lead must be a result, question, blocker or answer.
 spawn; p_worker=$pid; session "$p_worker" worker-1 "$work/wt-fix-login" fix-login
-gate() { # gate <session id> <cwd> <to> <message JSON value>: sets $out and $status
+calls=0
+gate() { # gate <session id> <cwd> <to> <message JSON value> [event, default PreToolUse]: sets $out, $status and $call
+  if [ "${5:-PreToolUse}" = PreToolUse ]; then calls=$((calls + 1)); call="toolu_test$calls"; fi
   set +e
-  out=$(jq -nc --arg sid "$1" --arg cwd "$2" --arg to "$3" --argjson msg "$4" \
-    '{session_id: $sid, cwd: $cwd, hook_event_name: "PreToolUse", tool_name: "SendMessage", tool_input: {to: $to, message: $msg}}' |
+  out=$(jq -nc --arg sid "$1" --arg cwd "$2" --arg to "$3" --argjson msg "$4" --arg ev "${5:-PreToolUse}" --arg id "$call" \
+    '{session_id: $sid, cwd: $cwd, hook_event_name: $ev, tool_name: "SendMessage", tool_use_id: $id, tool_input: {to: $to, message: $msg}}' |
     "$scripts/report-gate.sh" 2>&1)
   status=$?
   set -e
 }
+send() { # send <session id> <cwd> <to> <message JSON value>: the hook before the send and, when it allows, after it
+  gate "$@"
+  local s=$status o=$out
+  if [ "$s" -eq 0 ]; then gate "$1" "$2" "$3" "$4" PostToolUse; fi
+  status=$s out=$o
+}
 gate worker-1 "$work/wt-fix-login" lead-session '"Got it, starting now."'
 check "report-gate blocks an acknowledgement to the lead" [ "$status" -eq 2 ]
 check "and tells the worker the four kinds" contains "RESULT: a milestone done"
+check "a worker is not offered DIRECTION" eval '! contains "DIRECTION:"'
 gate worker-1 "$work/wt-fix-login/src" lead-session '"Still holding for the merge."'
 check "from a subdirectory of the worker's worktree too" [ "$status" -eq 2 ]
 gate worker-1 "$work/wt-fix-login" "lead-session [a1b2c3]" '"FYI: tests are running."'
 check "to the lead named with its listing ref too" [ "$status" -eq 2 ]
 gate worker-1 "$work/wt-fix-login" "uds:/run/user/1000/cc-socks/$p_lead.sock" '"Thanks!"'
 check "to the lead's socket address, as a reply copies it" [ "$status" -eq 2 ]
-gate worker-1 "$work/wt-fix-login" "uds:/run/user/1000/cc-socks/$p_lead.sock" '"ANSWER: yes, the redirect test is the one."'
-check "lets an answer through to the socket address" [ "$status" -eq 0 ] && [ -z "$out" ]
-gate worker-1 "$work/wt-fix-login" lead-session '"RESULT: PR ready https://example.invalid/pr/1, redirect test passes"'
-check "lets a result through, printing nothing" [ "$status" -eq 0 ] && [ -z "$out" ]
-gate worker-1 "$work/wt-fix-login" lead-session '"RESULT: PR ready https://example.invalid/pr/1, redirect test passes\nmore"'
-check "blocks a report whose first line repeats the last one" [ "$status" -eq 2 ]
-check "saying so" contains "repeats your last message"
-gate worker-1 "$work/wt-fix-login" lead-session '"\n**QUESTION:** keep the old cookie name? I recommend yes."'
+send worker-1 "$work/wt-fix-login" "uds:/run/user/1000/cc-socks/$p_lead.sock" '"ANSWER: yes, the redirect test is the one."'
+check "lets an answer through to the socket address" [ "$status" -eq 0 ]
+check "printing nothing" [ -z "$out" ]
+send worker-1 "$work/wt-fix-login" lead-session '"RESULT: PR ready https://example.invalid/pr/1, redirect test passes"'
+check "lets a result through" [ "$status" -eq 0 ]
+check "printing nothing when it allows" [ -z "$out" ]
+send worker-1 "$work/wt-fix-login" lead-session '"RESULT: PR ready https://example.invalid/pr/1, redirect test passes"'
+check "holds the same report sent again" [ "$status" -eq 2 ]
+check "saying so" contains "repeats, word for word"
+send worker-1 "$work/wt-fix-login" lead-session '"RESULT: PR ready https://example.invalid/pr/1, redirect test passes\nand the follow-up fix is in"'
+check "lets a report with the same first line and new text through" [ "$status" -eq 0 ]
+send worker-1 "$work/wt-fix-login" lead-session '"\n**QUESTION:** keep the old cookie name? I recommend yes."'
 check "lets a question through after blank lines and markdown" [ "$status" -eq 0 ]
 gate worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: CI cannot reach the registry; a rerun would unblock it"'
 check "lets a blocker through" [ "$status" -eq 0 ]
+gate worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: CI cannot reach the registry; a rerun would unblock it"'
+check "lets a retry through when the first send never completed" [ "$status" -eq 0 ]
+ANDERTON_REPEAT_WINDOW=0 send worker-1 "$work/wt-fix-login" lead-session '"\n**QUESTION:** keep the old cookie name? I recommend yes."'
+check "lets a repeat through once its window has passed" [ "$status" -eq 0 ]
+send worker-1 "$work/wt-fix-login" lead-session '"ANSWER: yes"'
+send worker-1 "$work/wt-fix-login" lead-session '"ANSWER: yes"'
+check "lets the same short answer through twice: answers to two questions can match" [ "$status" -eq 0 ]
+mkdir -p "$work/nosed"
+printf '#!/bin/sh\nexit 1\n' > "$work/nosed/sed"
+chmod +x "$work/nosed/sed"
+PATH="$work/nosed:$PATH" gate worker-1 "$work/wt-fix-login" lead-session '"Got it."'
+check "allows a message when it cannot read its kind" [ "$status" -eq 0 ]
+send worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: the staging database is down; a restart would unblock it"'
+two_days_ago=$(date -r $((now_s - 172800)) +%Y%m%d%H%M 2>/dev/null || date -d "@$((now_s - 172800))" +%Y%m%d%H%M)
+find "$CLAUDE_CONFIG_DIR/anderton/reports" -maxdepth 1 -type f -newer "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.json" \
+  -exec touch -t "$two_days_ago" {} +
+ANDERTON_REPEAT_WINDOW=259200 send worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: the staging database is down; a restart would unblock it"'
+check "keeps a record for as long as a window longer than a day" [ "$status" -eq 2 ]
 gate worker-1 "$work/wt-fix-login" someone-else '"Got it."'
-check "leaves a message to anyone else alone" [ "$status" -eq 0 ] && [ -z "$out" ]
+check "leaves a message to anyone else alone" [ "$status" -eq 0 ]
+check "silently" [ -z "$out" ]
 gate worker-1 "$work/wt-fix-login" lead-session '""'
 check "leaves a pure idle subscription alone" [ "$status" -eq 0 ]
 gate worker-1 "$work/wt-fix-login" lead-session '{"type":"shutdown_response","request_id":"r1","approve":true}'
 check "leaves a structured protocol reply alone" [ "$status" -eq 0 ]
 gate lead-1 "$alpha" fix-login '"Got it."'
-check "leaves a session that is not a worker alone" [ "$status" -eq 0 ] && [ -z "$out" ]
+check "leaves a session that is not a worker alone" [ "$status" -eq 0 ]
+check "without a word" [ -z "$out" ]
 set +e
 out=$(printf 'not json' | "$scripts/report-gate.sh" 2>&1)
 status=$?
 set -e
-check "exits 0 silently on input it cannot read" [ "$status" -eq 0 ] && [ -z "$out" ]
+check "exits 0 on input it cannot read" [ "$status" -eq 0 ]
+check "and prints nothing" [ -z "$out" ]
+# A crash must not read as a block, though bash itself exits 2 on a builtin's misuse.
+mkdir -p "$work/broken"
+cp "$scripts/report-gate.sh" "$work/broken/"
+printf 'exit 2\n' > "$work/broken/session-lib.sh"
+set +e
+out=$(jq -nc '{session_id: "worker-1", cwd: "/", hook_event_name: "PreToolUse", tool_input: {to: "lead-session", message: "Got it."}}' |
+  "$work/broken/report-gate.sh" 2>&1)
+status=$?
+set -e
+check "a body that dies with status 2 allows the message" [ "$status" -eq 0 ]
 run "$scripts/spawn.sh" --effort high --model fable named-model <<'BRIEF'
 Task.
 BRIEF
@@ -612,11 +656,12 @@ check "it keeps a worktree with commits no remote has" [ "$status" -eq 3 ]
 git -C "$work/wt-fix-login" reset -q --hard HEAD~1
 run env FAKE_RM_FAIL=1 "$scripts/retire.sh" fix-login
 check "a failed claude rm keeps the record, to rerun" [ "$status" -eq 1 ] && [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.json" ]
+: > "$CLAUDE_CONFIG_DIR/anderton/workers/old-worker.last-report"
 run "$scripts/retire.sh" fix-login
 check "it retires a clean worker" [ "$status" -eq 0 ]
+check "clearing the last-report files earlier versions left" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/old-worker.last-report" ]
 check "removing its worktree" [ ! -e "$work/wt-fix-login" ]
 check "and its record" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.json" ]
-check "and its last report, so a later worker of that name starts clean" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.last-report" ]
 check "and the session, by id" grep -qx "rm a1b2c3d4" "$FAKE_LOG.life"
 run "$scripts/retire.sh" never-started
 check "it refuses a worker spawn.sh did not start" [ "$status" -eq 1 ]
@@ -860,6 +905,86 @@ check "and records nothing for the scope" [ ! -e "$(holder_path "$epsilon" fleet
 claim_status eea-1 "$p_ea" --take-over
 check "a scope's holder is refused the project role, --take-over included" [ "$status" -eq 3 ]
 check "that refusal names its scope" contains "already holds scope fleet-a"
+
+# report-gate.sh: any session in a project messaging the project's holder; a scope's holder is held only on repeats.
+gate eeo-1 "$epsilon" epsilon-host '"Got it, on it."'
+check "report-gate holds an acknowledgement to the project's holder from a session that is not a worker" [ "$status" -eq 2 ]
+check "and names the holder in the kinds" contains 'Not sent. Message "epsilon-host" only when'
+check "offering such a session DIRECTION" contains "DIRECTION: a person's instruction"
+gate eeo-1 "$epsilon" "epsilon-host [e1h2]" '"Still waiting on CI."'
+check "to the holder named with its listing ref" [ "$status" -eq 2 ]
+gate eeo-1 "$epsilon" "uds:/run/user/1000/cc-socks/$p_eh.sock" '"Thanks!"'
+check "to the holder's socket address" [ "$status" -eq 2 ]
+send eeo-1 "$epsilon" epsilon-host '"DIRECTION: Dave says hold off merging the cache change."'
+check "lets a person's direction through" [ "$status" -eq 0 ]
+send eeo-1 "$epsilon" epsilon-host '"QUESTION: merge the cache change today? I recommend yes."'
+check "lets a question to the holder through" [ "$status" -eq 0 ]
+check "printing nothing" [ -z "$out" ]
+send eeo-1 "$epsilon" epsilon-host '"QUESTION: merge the cache change today? I recommend yes."'
+check "holds the same question sent again" [ "$status" -eq 2 ]
+check "saying it repeats" contains "repeats, word for word"
+send eeo-1 "$epsilon" epsilon-host '"QUESTION:\nmerge the export change too?"'
+send eeo-1 "$epsilon" epsilon-host '"QUESTION:\nand the cache change, now that CI is green?"'
+check "lets a second question through that shares only its first line" [ "$status" -eq 0 ]
+gate eeo-1 "$epsilon" epsilon-fleet-a '"Got it."'
+check "leaves a message to a scope's holder alone" [ "$status" -eq 0 ]
+send eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nDave asks: can the export run tonight?"'
+check "lets a scope's holder relay to the project's holder without a kind" [ "$status" -eq 0 ]
+check "silently" [ -z "$out" ]
+send eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nDave asks: and the backfill after it?"'
+check "lets its next relay under the same header through" [ "$status" -eq 0 ]
+send eea-1 "$epsilon" "uds:/run/user/1000/cc-socks/$p_eh.sock" '"Relay from #fleet:\nDave asks: and the backfill after it?"'
+check "but holds the same relay sent again" [ "$status" -eq 2 ]
+send eeb-1 "$epsilon" epsilon-host '"Relay from #fleet:\nDave asks: and the backfill after it?"'
+check "another scope's holder keeps its own record" [ "$status" -eq 0 ]
+gate eeh-1 "$epsilon" epsilon-other '"Got it."'
+check "leaves the project's holder alone" [ "$status" -eq 0 ]
+check "without a word" [ -z "$out" ]
+gate eeo-1 "$beta" epsilon-host '"Got it."'
+check "judges a session by the directory it started in, not the one it reports now" [ "$status" -eq 2 ]
+spawn; p_far=$pid; session "$p_far" far-1 "$beta" far-session
+gate far-1 "$beta" epsilon-host '"Got it."'
+check "leaves a session in another project alone" [ "$status" -eq 0 ]
+
+# A worker the scope's holder started, reporting to it and to the project's holder.
+spawn; p_ew=$pid; session "$p_ew" eew-1 "$epsilon" eps-worker
+jq -nc --arg d "$epsilon" '{name: "eps-worker", dir: $d, spawner: "epsilon-fleet-a"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/eps-worker.json"
+send eew-1 "$epsilon" epsilon-fleet-a '"RESULT: export fixed, PR https://example.invalid/pr/2"'
+check "a worker reports to the scope's holder that started it" [ "$status" -eq 0 ]
+send eew-1 "$epsilon" epsilon-host '"RESULT: export fixed, PR https://example.invalid/pr/2"'
+check "and the same report to the project's holder is not a repeat" [ "$status" -eq 0 ]
+send eew-1 "$epsilon" epsilon-host '"RESULT: export fixed, PR https://example.invalid/pr/2"'
+check "though sending it there twice is" [ "$status" -eq 2 ]
+gate eew-1 "$epsilon" epsilon-host '"DIRECTION: ship it."'
+check "a worker writing to the project's holder still has only the four kinds" [ "$status" -eq 2 ]
+
+# A holder that is also recorded as a worker is judged as a holder.
+jq -nc --arg d "$epsilon" '{name: "epsilon-host", dir: $d, spawner: "epsilon-other"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-host.json"
+gate eeh-1 "$epsilon" epsilon-other '"Got it."'
+check "the project's holder recorded as a worker is still never held" [ "$status" -eq 0 ]
+jq -nc --arg d "$epsilon" '{name: "epsilon-fleet-a", dir: $d, spawner: "epsilon-host"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
+send eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nDave asks: is the dashboard back?"'
+check "a scope's holder recorded as a worker keeps its relays free of a kind" [ "$status" -eq 0 ]
+rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-host.json" "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
+
+# Without ps, a holder cannot be proven live, so nothing is held; a scope's holder needs no ps to be exempt.
+mkdir -p "$work/nops"
+printf '#!/bin/sh\nexit 1\n' > "$work/nops/ps"
+chmod +x "$work/nops/ps"
+PATH="$work/nops:$PATH" gate eeo-1 "$epsilon" epsilon-host '"Got it."'
+check "without ps, a message to the holder is allowed" [ "$status" -eq 0 ]
+PATH="$work/nops:$PATH" send eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nDave asks: one more?"'
+check "without ps, a scope's holder's relay is allowed" [ "$status" -eq 0 ]
+
+# A holder record whose process has gone, and whose pid a later session now has, names no holder.
+holder_file=$(holder_path "$epsilon")
+cp "$holder_file" "$work/epsilon-holder.bak"
+jq -c '.startedAt = 1' "$holder_file" > "$holder_file.tmp" && mv "$holder_file.tmp" "$holder_file"
+gate eeo-1 "$epsilon" epsilon-host '"Got it."'
+check "a stale holder record holds nothing" [ "$status" -eq 0 ]
+gate eeo-1 "$epsilon" "uds:/run/user/1000/cc-socks/$p_eh.sock" '"Got it."'
+check "by socket either" [ "$status" -eq 0 ]
+mv "$work/epsilon-holder.bak" "$holder_file"
 claim_status eeo-1 "$p_eo" --scope
 check "--scope without a name is a usage error" [ "$status" -eq 2 ]
 
