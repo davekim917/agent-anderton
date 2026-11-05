@@ -242,7 +242,8 @@ named in the claim file, checked to be the live process the record names, and ad
 with a listing ref, or by socket. It holds a message whose first line doesn't open with `RESULT:`,
 `QUESTION:`, `BLOCKED:` or `ANSWER:` (any session other than a worker also has `DIRECTION:`, for passing
 on a person's instruction), and one that repeats, word for word, the sender's last message to that
-recipient within 30 minutes (`ANDERTON_REPEAT_WINDOW`, in seconds). A message counts as sent only once the
+recipient within 30 minutes (`ANDERTON_REPEAT_WINDOW`, in seconds); an `ANSWER:` is never a repeat,
+since two questions can have the same short answer. A message counts as sent only once the
 send succeeds, so a failed or denied send can be retried. A scope's holder relays asks from its own
 channels, so its messages are held only when they repeat. The project's holder, messages to anyone else,
 and sessions in other projects pass untouched, and the project is the one the session started in. It only

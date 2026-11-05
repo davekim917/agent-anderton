@@ -512,6 +512,20 @@ gate worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: CI cannot reach the r
 check "lets a retry through when the first send never completed" [ "$status" -eq 0 ]
 ANDERTON_REPEAT_WINDOW=0 send worker-1 "$work/wt-fix-login" lead-session '"\n**QUESTION:** keep the old cookie name? I recommend yes."'
 check "lets a repeat through once its window has passed" [ "$status" -eq 0 ]
+send worker-1 "$work/wt-fix-login" lead-session '"ANSWER: yes"'
+send worker-1 "$work/wt-fix-login" lead-session '"ANSWER: yes"'
+check "lets the same short answer through twice: answers to two questions can match" [ "$status" -eq 0 ]
+mkdir -p "$work/nosed"
+printf '#!/bin/sh\nexit 1\n' > "$work/nosed/sed"
+chmod +x "$work/nosed/sed"
+PATH="$work/nosed:$PATH" gate worker-1 "$work/wt-fix-login" lead-session '"Got it."'
+check "allows a message when it cannot read its kind" [ "$status" -eq 0 ]
+send worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: the staging database is down; a restart would unblock it"'
+two_days_ago=$(date -r $((now_s - 172800)) +%Y%m%d%H%M 2>/dev/null || date -d "@$((now_s - 172800))" +%Y%m%d%H%M)
+find "$CLAUDE_CONFIG_DIR/anderton/reports" -maxdepth 1 -type f -newer "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.json" \
+  -exec touch -t "$two_days_ago" {} +
+ANDERTON_REPEAT_WINDOW=259200 send worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: the staging database is down; a restart would unblock it"'
+check "keeps a record for as long as a window longer than a day" [ "$status" -eq 2 ]
 gate worker-1 "$work/wt-fix-login" someone-else '"Got it."'
 check "leaves a message to anyone else alone" [ "$status" -eq 0 ]
 check "silently" [ -z "$out" ]
@@ -642,8 +656,10 @@ check "it keeps a worktree with commits no remote has" [ "$status" -eq 3 ]
 git -C "$work/wt-fix-login" reset -q --hard HEAD~1
 run env FAKE_RM_FAIL=1 "$scripts/retire.sh" fix-login
 check "a failed claude rm keeps the record, to rerun" [ "$status" -eq 1 ] && [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.json" ]
+: > "$CLAUDE_CONFIG_DIR/anderton/workers/old-worker.last-report"
 run "$scripts/retire.sh" fix-login
 check "it retires a clean worker" [ "$status" -eq 0 ]
+check "clearing the last-report files earlier versions left" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/old-worker.last-report" ]
 check "removing its worktree" [ ! -e "$work/wt-fix-login" ]
 check "and its record" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.json" ]
 check "and the session, by id" grep -qx "rm a1b2c3d4" "$FAKE_LOG.life"

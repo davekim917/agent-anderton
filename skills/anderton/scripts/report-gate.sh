@@ -82,10 +82,11 @@ EOF
   fi
   [ -n "$recipient" ] || exit 0
 
+  local kind=""
   if [ -z "$scope" ]; then
-    local kinds="RESULT|QUESTION|BLOCKED|ANSWER" kind
+    local kinds="RESULT|QUESTION|BLOCKED|ANSWER"
     [ -n "$worker" ] || kinds="$kinds|DIRECTION"
-    kind=$(printf '%s' "$first" | sed -E 's/^[[:space:]*_#>`-]*//' | sed -nE "s/^($kinds):.*/\\1/p")
+    kind=$(printf '%s' "$first" | sed -nE -e 's/^[[:space:]*_#>`-]*//' -e "s/^($kinds):.*/\\1/p") || exit 0
     if [ -z "$kind" ]; then
       {
         echo "Not sent. Message \"$recipient\" only when it changes what they do, with the kind as the first word:"
@@ -101,9 +102,13 @@ EOF
     fi
   fi
 
-  local state at sum window=${ANDERTON_REPEAT_WINDOW:-1800}
+  # Two answers can be the same short word to different questions.
+  [ "$kind" != ANSWER ] || exit 0
+  local state at sum window=${ANDERTON_REPEAT_WINDOW:-1800} keep=1440
+  case $window in '' | *[!0-9]*) exit 0 ;; esac
+  [ $((window / 60 + 1)) -le "$keep" ] || keep=$((window / 60 + 1))
   mkdir -p "$pending" 2>/dev/null || exit 0
-  find "$holders/reports" -type f -mmin +1440 -exec rm -f {} + 2>/dev/null
+  find "$holders/reports" -type f -mmin +"$keep" -exec rm -f {} + 2>/dev/null
   hash=$(printf '%s' "$input" | jq -j '.tool_input.message' 2>/dev/null | cksum | tr -s ' ' '-')
   state="$holders/reports/$(printf '%s\n%s' "$sid" "$rkey" | cksum | cut -d' ' -f1)"
   if [ -f "$state" ] && read -r at sum 2>/dev/null < "$state" && [ "$sum" = "$hash" ] && [ $(($(date +%s) - at)) -lt "$window" ]; then
