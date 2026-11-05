@@ -860,6 +860,32 @@ check "and records nothing for the scope" [ ! -e "$(holder_path "$epsilon" fleet
 claim_status eea-1 "$p_ea" --take-over
 check "a scope's holder is refused the project role, --take-over included" [ "$status" -eq 3 ]
 check "that refusal names its scope" contains "already holds scope fleet-a"
+
+# report-gate.sh: any session in a project messaging the project's holder; a scope's holder is held only on repeats.
+gate eeo-1 "$epsilon" epsilon-host '"Got it, on it."'
+check "report-gate holds an acknowledgement to the project's holder from a session that is not a worker" [ "$status" -eq 2 ]
+check "and names the holder in the four kinds" contains 'Not sent. Message "epsilon-host" only when'
+gate eeo-1 "$epsilon" "epsilon-host [e1h2]" '"Still waiting on CI."'
+check "to the holder named with its listing ref" [ "$status" -eq 2 ]
+gate eeo-1 "$epsilon" "uds:/run/user/1000/cc-socks/$p_eh.sock" '"Thanks!"'
+check "to the holder's socket address" [ "$status" -eq 2 ]
+gate eeo-1 "$epsilon" epsilon-host '"QUESTION: merge the cache change today? I recommend yes."'
+check "lets a question to the holder through, printing nothing" [ "$status" -eq 0 ] && [ -z "$out" ]
+check "keeping that sender's last report under its session id" [ "$(cat "$CLAUDE_CONFIG_DIR/anderton/reports/eeo-1")" = "QUESTION: merge the cache change today? I recommend yes." ]
+gate eeo-1 "$epsilon" epsilon-host '"QUESTION: merge the cache change today? I recommend yes."'
+check "holds the same question sent again" [ "$status" -eq 2 ] && contains "repeats your last message"
+gate eeo-1 "$epsilon" epsilon-fleet-a '"Got it."'
+check "leaves a message to a scope's holder alone" [ "$status" -eq 0 ]
+gate eea-1 "$epsilon" epsilon-host '"Dave asks from the fleet channel: can the export run tonight?"'
+check "lets a scope's holder relay to the project's holder without a kind" [ "$status" -eq 0 ] && [ -z "$out" ]
+gate eea-1 "$epsilon" "uds:/run/user/1000/cc-socks/$p_eh.sock" '"Dave asks from the fleet channel: can the export run tonight?"'
+check "but holds the same relay sent again" [ "$status" -eq 2 ]
+gate eeb-1 "$epsilon" epsilon-host '"Dave asks from the fleet channel: can the export run tonight?"'
+check "another scope's holder keeps its own last report" [ "$status" -eq 0 ]
+gate eeh-1 "$epsilon" epsilon-other '"Got it."'
+check "leaves the project's holder alone" [ "$status" -eq 0 ] && [ -z "$out" ]
+gate eeo-1 "$beta" epsilon-host '"Got it."'
+check "leaves a session in another project alone" [ "$status" -eq 0 ]
 claim_status eeo-1 "$p_eo" --scope
 check "--scope without a name is a usage error" [ "$status" -eq 2 ]
 

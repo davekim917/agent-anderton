@@ -1,5 +1,5 @@
 {
-  "description": "In the session holding a project's Anderton role, wakes it when another session in the project blocks on a person. In a worker it started, holds a message to it that is not a result, question, blocker or answer. Neither hook can approve anything.",
+  "description": "In the session holding a project's Anderton role, wakes it when another session in the project blocks on a person. Holds a message to an Anderton, from its workers or from another session in the project, that is not a result, question, blocker or answer, or that repeats the last. Neither hook can approve anything.",
   "hooks": {
     "Stop": [
       {

@@ -36,10 +36,11 @@ set up a separate supervisor. Type `/anderton` and that session takes over.
   (CLAUDE.md, skills, hooks, plugins) and shares the repo's auto memory. Inside
   [herdr](https://herdr.dev) or tmux it opens in a tab you can watch and type into; without either it
   can only run in the background.
-- **Has workers report to it, and only when it matters.** Each brief tells the worker to message the
+- **Has sessions report to it, and only when it matters.** Each brief tells the worker to message the
   Anderton by name with a result, a question, a blocker or an answer, and not to deploy. A hook holds
-  any other message (acknowledgements, "still waiting"), since each one wakes the Anderton and re-reads
-  its whole context. You don't have to check each worker's tab for questions.
+  any other message to the Anderton (acknowledgements, "still waiting"), from its workers and from any
+  other session in the repo, since each one wakes the Anderton and re-reads its whole context. You don't
+  have to check each worker's tab for questions.
 - **Shows you what's waiting on you.** Before every status report it lists the sessions in the repo
   that have stopped for a person: a finished reply, a permission prompt, a multiple-choice question,
   a tool call stuck for over a minute, a blocked background session. Its own workers report to it
@@ -235,11 +236,14 @@ name, even when the holder is idle. The next `Stop` starts it again. The alert c
 blocked session's text. The hook can't answer a prompt: a background hook can't return a decision.
 While a woken holder is mid-turn no watch runs, so a block in that turn is reported when the turn ends.
 
-**`report-gate.sh`** is a `PreToolUse` hook on `SendMessage`. In a worker `spawn.sh` started, it
-blocks a message to the session that started it unless the message's first line opens with `RESULT:`,
-`QUESTION:`, `BLOCKED:` or `ANSWER:`, and blocks one whose first line repeats the worker's last report.
-The worker sees why and keeps working. Messages to anyone else, and every other session, pass untouched.
-It only blocks: it prints no decision, so it can't approve a call.
+**`report-gate.sh`** is a `PreToolUse` hook on `SendMessage`. It holds a message to an Anderton unless
+the message's first line opens with `RESULT:`, `QUESTION:`, `BLOCKED:` or `ANSWER:`, and holds one whose
+first line repeats the sender's last report. It judges two kinds of message: a worker's to the session
+`spawn.sh` started it from, and any session's to its project's holder, named in the claim file and
+addressed by name, by name with a listing ref, or by socket. A scope's holder relays asks from its own
+channels, so its messages to the project's holder are held only when they repeat. The sender sees why and
+keeps working. The project's holder, messages to anyone else, and sessions in other projects pass
+untouched. It only blocks: it prints no decision, so it can't approve a call.
 
 **`prompt.sh <name> [yes|no <fingerprint>]`** lets you answer a permission prompt from the Anderton
 session. It reads the prompt from the session's herdr tab or tmux pane and prints it with a
