@@ -129,9 +129,13 @@ Say your pick in one line so the user can overrule it. You choose effort only: w
 run on Opus, and you pass `--model` only when the user named another model.
 
 After starting a worker:
-- SendMessage the worker with `notify_when_idle`. The notice fires on every turn end,
-  not only when the task is done, so check the PR or worktree before you believe it,
-  and subscribe again after each notice.
+- It messages you only with a `RESULT:`, `QUESTION:`, `BLOCKED:` or `ANSWER:`, one per
+  milestone; a hook holds anything else. Every message you send it is one it may answer,
+  so send only direction, never an acknowledgement.
+- Subscribe with `notify_when_idle` only when you expect a milestone and the worker might
+  stop without reporting it. Subscribe once: the notice fires on any turn end, so when it
+  comes, check the PR or the worktree instead of subscribing again. Each notice wakes you
+  and re-reads your whole context.
 - The user can open a background worker with `claude attach <name>` or from their phone.
 - When its PR is merged or the work is dropped, run `scripts/retire.sh <name>`. It
   stops the session and removes the worktree, unless the worktree holds work no

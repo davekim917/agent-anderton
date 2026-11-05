@@ -96,6 +96,7 @@ if ! (set -C && : > "$record") 2>/dev/null; then
 fi
 reserved=1
 trap '[ -z "$reserved" ] || rm -f "$record"' EXIT
+rm -f "$holders/workers/$name.last-report"
 if claude agents --json 2>/dev/null | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null; then
   echo "A live session is already named '$name'; pick another name." >&2
   exit 1
@@ -131,7 +132,13 @@ brief="$brief
 
 ---
 You are a worker the Anderton session \"$me\" started for the task above, in $dir.
-- Tell \"$me\" by SendMessage the moment you have a question or a blocker, with your recommendation, and when you finish: the PR link and what you verified. Nobody reads this session, so a question left only in your reply is never answered.
+- Message \"$me\" by SendMessage only when it changes what they do, one message per milestone, the kind as its first word:
+  RESULT: a milestone done (PR ready, task finished), with its link and what you verified.
+  QUESTION: a decision you need, with your recommendation.
+  BLOCKED: what stops you and what would unblock it.
+  ANSWER: a reply to something \"$me\" asked you.
+  Never send acknowledgements, \"still waiting\" or \"holding\", restated instructions, or FYIs that change nothing: each message wakes \"$me\" and re-reads its whole context. A hook holds any message to \"$me\" without one of those four kinds, or one that repeats your last. Nobody reads this session, so a question left only in your reply is never answered.
+- Give every sub-agent you start an explicit effort that fits its task (low for lookups and mechanical edits). Prefer a one-shot sub-agent that returns its result over a named one you keep alive and message for days. /orchestrate, if installed, does both.
 - Do not deploy, restart a service, or message anyone off this machine unless the task says to; \"$me\" owns those."
 
 write_record() {

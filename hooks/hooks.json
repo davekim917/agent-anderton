@@ -1,5 +1,5 @@
 {
-  "description": "In the session holding a project's Anderton role, wakes it when another session in the project blocks on a person. It only reports.",
+  "description": "In the session holding a project's Anderton role, wakes it when another session in the project blocks on a person. In a worker it started, holds a message to it that is not a result, question, blocker or answer. Neither hook can approve anything.",
   "hooks": {
     "Stop": [
       {
@@ -9,6 +9,18 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/skills/anderton/scripts/watch.sh\"",
             "asyncRewake": true,
             "timeout": 1209600
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "SendMessage",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/skills/anderton/scripts/report-gate.sh\"",
+            "timeout": 10
           }
         ]
       }
