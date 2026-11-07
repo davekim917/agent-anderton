@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# List the live Claude Code sessions in the caller's project (every project with --all) that are
+# List the live Claude Code sessions in the caller's repository (every repository with --all) that are
 # waiting on a person: their turn ended with Claude talking, or it is blocked on a prompt. The
-# sessions holding an Anderton role in the caller's project, its own or a scope's, are left out, and
-# so are the workers spawn.sh started, which report to them, unless one is blocked on a prompt: a
-# session held there cannot send a report. Only the project's holder always stays out. With --blocked,
-# for watch.sh, it prints one header line per session blocked on a person. Then come the You Should Know
-# notes not yet reported.
+# sessions holding an Anderton role in the caller's repository, its own or a named project's, are left out,
+# and so are the workers spawn.sh started, which report to them, unless one is blocked on a prompt: a
+# session held there cannot send a report. Only the repository's holder always stays out. Called from a
+# session holding a role, it lists only the sessions that role answers for. With --blocked, for watch.sh,
+# it prints one header line per session blocked on a person. Then come the You Should Know notes not yet
+# reported.
 # Portable to macOS's bash 3.2 and BSD userland: jq does the date arithmetic, not date -d.
 set -euo pipefail
 # shellcheck source=SCRIPTDIR/session-lib.sh
@@ -27,6 +28,40 @@ judged=""
 root=$(invoking_root)
 project=$(holder_record "$root")
 records=$(project_holders "$root")
+
+# The role the caller holds, if any. A named project's Anderton answers only for the workers it started; the
+# repository's answers for every other session, and for a project's workers once that project's Anderton is gone.
+caller="${CLAUDE_PID:-}"
+if [ -z "$caller" ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then caller=$(session_pid "$CLAUDE_CODE_SESSION_ID"); fi
+mine=""
+if [ -n "$caller" ]; then
+  while IFS= read -r r; do
+    if [ -n "$r" ] && is_holder "$sessions/$caller.json" "$r"; then mine=$r; fi
+  done <<EOF
+$records
+EOF
+fi
+answering_role() { # answering_role <session name> <cwd>: the record of the role that answers for that session
+  local spawner r hp
+  if is_worker "$1" "$2"; then
+    spawner=$(jq -r '.spawner // empty' "$holders/workers/$1.json" 2>/dev/null || true)
+    while IFS= read -r r; do
+      if [ -z "$r" ] || [ "$r" = "$project" ] || [ -z "$spawner" ]; then continue; fi
+      hp=$(jq -r '.pid // empty' "$r" 2>/dev/null || true)
+      if [ -n "$hp" ] && [ "$(jq -r '.name // empty' "$sessions/$hp.json" 2>/dev/null || true)" = "$spawner" ] &&
+        is_holder "$sessions/$hp.json" "$r"; then
+        printf '%s\n' "$r"
+        return
+      fi
+    done <<EOF
+$records
+EOF
+  fi
+  printf '%s\n' "$project"
+}
+answers_for() { # answers_for <session name> <cwd>: true when the caller's role answers for that session
+  [ -z "$mine" ] || [ "$(answering_role "$1" "$2")" = "$mine" ]
+}
 
 for s in "$sessions"/*.json; do
   [ -e "$s" ] || continue
@@ -54,6 +89,7 @@ EOF
   fi
   registered_alive "$pid" "$start" || continue
   judged="$judged $sid"
+  answers_for "$name" "$cwd" || continue
 
   transcript=""
   for t in "$home"/projects/*/"$sid".jsonl; do
@@ -158,6 +194,7 @@ claude agents --json 2>/dev/null |
     if [ -z "$all" ] && { [ -z "$cwd" ] || [ "$(project_root "$cwd")" != "$root" ]; }; then
       continue
     fi
+    answers_for "$name" "$cwd" || continue
     for t in "$home"/projects/*/"$sid".jsonl; do
       [ -e "$t" ] || continue
       tail -n 400 "$t" | jq -nrR --arg name "${name:-${sid%%-*}}${tag}" --arg cwd "$cwd" --arg state "$state" --arg blocked "$blocked" '

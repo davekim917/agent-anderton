@@ -909,18 +909,25 @@ check "the project role's record is untouched" [ "$(jq -r .sessionId "$(holder_p
 claim_status eeb-1 "$p_eb" --scope fleet-a
 check "a second session is refused a held scope" [ "$status" -eq 3 ]
 check "the refusal names the scope and its holder" \
-  contains "Anderton for $epsilon, scope fleet-a is held by live session 'epsilon-fleet-a'"
+  contains "Anderton for $epsilon, project fleet-a is held by live session 'epsilon-fleet-a'"
 claim_status eeb-1 "$p_eb" --scope fleet-b
 check "another scope in the same project is claimed" [ "$status" -eq 0 ]
 claim_status eea-1 "$p_ea" --scope fleet-a
 check "a scope's holder re-claims its scope" [ "$status" -eq 0 ]
 claim_status eeh-1 "$p_eh" --scope fleet-c
 check "the project role's holder is refused a scope" [ "$status" -eq 3 ]
-check "that refusal names the role it holds" contains "already holds the project role"
+check "that refusal names the role it holds" contains "already holds the repository role"
 check "and records nothing for the scope" [ ! -e "$(holder_path "$epsilon" fleet-c)" ]
 claim_status eea-1 "$p_ea" --take-over
 check "a scope's holder is refused the project role, --take-over included" [ "$status" -eq 3 ]
-check "that refusal names its scope" contains "already holds scope fleet-a"
+check "that refusal names its scope" contains "already holds project fleet-a"
+spawn; p_ep=$pid; session "$p_ep" eep-1 "$epsilon" epsilon-fleet-p
+claim_status eep-1 "$p_ep" --project fleet-p
+check "--project claims a named project, as --scope did" [ "$status" -eq 0 ]
+check "and says so" contains "Anderton for $epsilon, project fleet-p claimed"
+check "keeping the record where --scope put it" [ "$(jq -r .scope "$(holder_path "$epsilon" fleet-p)")" = fleet-p ]
+claim_status eeo-1 "$p_eo" --project
+check "--project without a name is a usage error" [ "$status" -eq 2 ]
 
 # report-gate.sh: any session in a project messaging the project's holder; a scope's holder is held only on repeats.
 gate eeo-1 "$epsilon" epsilon-host '"Got it, on it."'
@@ -1205,6 +1212,29 @@ check "plain waiting.sh shows what a blocked scope holder is asking" contains "=
 out=$(cd "$watched" && env CLAUDE_PID="$p_wa" "$scripts/waiting.sh" --blocked)
 check "--blocked never lists the project's holder" eval '! contains "=== holder "'
 registry "$p_wb" idle
+
+# A named project's Anderton hears about the workers it started; the repository's hears about them only once it is gone.
+spawn; p_ww=$pid; session "$p_ww" ww-1 "$watched" lead-worker
+jq -nc --arg d "$watched" '{name: "lead-worker", dir: $d, spawner: "scope-lead"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/lead-worker.json"
+transcript ww-1 "$recent" asking "Before the worker's question."
+registry "$p_ww" waiting "permission prompt"
+watch_run wb-1
+check "a named project's Anderton runs its own watch, which wakes it for its blocked worker" [ "$status" -eq 2 ]
+check "naming that worker" contains "=== lead-worker (worker)  $watched  (waiting: permission prompt"
+out=$(cd "$watched" && env CLAUDE_PID="$p_wb" "$scripts/waiting.sh" --blocked)
+check "its list leaves out sessions the repository's Anderton answers for" eval '! contains "=== other "'
+out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
+check "the repository's Anderton no longer hears about that worker" eval '! contains "lead-worker"'
+check "but still hears about every other session" contains "=== other  $watched"
+scope_file=$(holder_path "$(project_root "$watched")" lead)
+cp "$scope_file" "$work/scope-holder.bak"
+jq -c '.startedAt = 1' "$scope_file" > "$scope_file.tmp" && mv "$scope_file.tmp" "$scope_file"
+out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
+check "once the project's Anderton is gone, its worker reaches the repository's" contains "=== lead-worker (worker)"
+mv "$work/scope-holder.bak" "$scope_file"
+out=$(cd "$watched" && env CLAUDE_PID="$p_wa" "$scripts/waiting.sh" --blocked)
+check "a session holding no role still sees every blocked session" contains "=== lead-worker (worker)"
+registry "$p_ww" idle
 
 # Everywhere but the holder, and on any failure, it exits 0 and prints nothing.
 watch_run wa-1

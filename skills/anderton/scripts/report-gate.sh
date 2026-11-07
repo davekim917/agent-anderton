@@ -5,9 +5,9 @@
 # so an acknowledgement or a "still waiting" costs as much as a result. After a send succeeds (PostToolUse) it records
 # the message, so a send that failed or was denied is never counted as sent.
 # It judges a message from a worker spawn.sh started to the session that started it, and a message from any session
-# in a project to that project's live holder. A worker has four kinds; any other session also has DIRECTION:, for
-# passing on a person's direction. A scope's holder relays asks from its own channels, so its messages are held only
-# when they repeat. The project's holder is never held.
+# in a repository to that repository's live Anderton. A worker has four kinds; any other session also has DIRECTION:, for
+# passing on a person's direction. A named project's Anderton passes along what it has gathered, so its messages are
+# held only when they repeat. The repository's Anderton is never held.
 # It only ever blocks (exit 2, the reason on stderr) and never prints a decision, so it cannot approve anything. The
 # body runs in a subshell that reports a block as 10, so a crash, which bash may report as 2, is read as allow. On any
 # failure it exits 0 and prints nothing.
@@ -55,7 +55,7 @@ EOF
   [ -z "$home_dir" ] || cwd=$home_dir
   [ -n "$cwd" ] || exit 0
 
-  # Who the sender is comes first: the project's holder is never held, and a scope's holder only on repeats.
+  # Who the sender is comes first: the repository's Anderton is never held, and a project's only on repeats.
   root=$(project_root "$cwd")
   project=$(holder_record "$root")
   if [ -n "$project" ] && names_sender "$project"; then exit 0; fi

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# The plugin's Stop hook, which Claude Code runs in the background in every session. In the session holding its
-# project's Anderton role it keeps running, and exits 2 when another session in the project newly blocks on a
-# person: Claude Code then wakes the holder with this script's stderr, and the next Stop runs it again. It only
-# reports. waiting.sh --blocked decides what counts as blocked, and nothing here can answer a prompt. Anywhere
-# else, and on any failure, it exits 0 and prints nothing.
+# The plugin's Stop hook, which Claude Code runs in the background in every session. In a session holding an
+# Anderton role, the repository's or a named project's, it keeps running, and exits 2 when a session that role
+# answers for newly blocks on a person: Claude Code then wakes the holder with this script's stderr, and the next
+# Stop runs it again. It only reports. waiting.sh --blocked decides what counts as blocked and which role answers
+# for it, and nothing here can answer a prompt. Anywhere else, and on any failure, it exits 0 and prints nothing.
 # shellcheck source=SCRIPTDIR/session-lib.sh
 . "$(dirname "$0")/session-lib.sh"
 
@@ -12,14 +12,20 @@ sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
 cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null) || exit 0
 if [ -z "$sid" ] || [ -z "$cwd" ]; then exit 0; fi
 
-record=$(holder_record "$(project_root "$cwd")")
-[ -n "$record" ] || exit 0
 # The registry, not the record, says which session the holder's process runs now: /clear gives it a new id.
-pid=$(jq -r '.pid // empty' "$record" 2>/dev/null)
-[ -n "$pid" ] || exit 0
-reg="$sessions/$pid.json"
-[ "$(jq -r '.sessionId // empty' "$reg" 2>/dev/null)" = "$sid" ] || exit 0
-is_holder "$reg" "$record" || exit 0
+record="" pid="" reg=""
+while IFS= read -r r; do
+  [ -n "$r" ] || continue
+  p=$(jq -r '.pid // empty' "$r" 2>/dev/null)
+  [ -n "$p" ] || continue
+  if [ "$(jq -r '.sessionId // empty' "$sessions/$p.json" 2>/dev/null)" = "$sid" ] && is_holder "$sessions/$p.json" "$r"; then
+    record=$r pid=$p reg="$sessions/$p.json"
+    break
+  fi
+done <<EOF
+$(project_holders "$(project_root "$cwd")")
+EOF
+[ -n "$record" ] || exit 0
 
 key=$(basename "$record" .json)
 watcher="$holders/$key.watch"
@@ -72,7 +78,7 @@ while is_holder "$reg" "$record"; do
     printf '%s\n' "$new" >> "$reported"
     tail -n "$reported_keep" "$reported" > "$reported.tmp" && mv "$reported.tmp" "$reported"
     {
-      echo "Anderton watch: another session in this project is blocked on a person. Nothing has been answered or approved."
+      echo "Anderton watch: a session you answer for is blocked on a person. Nothing has been answered or approved."
       printf '%s\n' "$new"
       echo "Run waiting.sh to see what each one is asking."
     } >&2

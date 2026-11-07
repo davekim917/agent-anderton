@@ -61,7 +61,7 @@ set up a separate supervisor. Type `/anderton` and that session takes over.
 - **Cleans up.** Retiring a worker stops its session, closes its tab and removes its worktree. A
   worktree with uncommitted or unpushed work is kept; gitignored files are not.
 
-The scripts enforce one Anderton per repo and do the starting, listing and cleanup. Reviewing,
+The scripts enforce one deploying Anderton per repo and do the starting, listing and cleanup. Reviewing,
 routing and deploying are instructions the Anderton follows, not a sandbox.
 
 ## Quick start
@@ -149,12 +149,15 @@ distro: it runs from its own directory, supports many harnesses and backends, ad
 and has a watcher process that notices a stalled crewmate by itself. Anderton is a lighter take for
 people who live in Claude Code: one skill and seven shell scripts inside the setup you already have.
 It has no separate process to run: workers report in at each milestone, and a hook wakes the
-Anderton when a session in the project blocks on a person.
+Anderton when a session it answers for blocks on a person.
 
 **Can I have more than one?**
 
-One per repository deploys. A named scope gives a second lead its own lock beside it, for example a
-session leading a separate stream of work (`claim.sh --scope <name>`). One session holds one role.
+Yes, one per project. Open an Anderton for each thing you're working on in the same repo
+(`claim.sh --project <name>`, or invoke the skill and name the project). Each starts and reviews its
+own workers, and hears when they block. Only one per repository deploys, though: the others send
+their deploys to it, since two sessions that both ship is the problem this exists to stop. One
+session holds one role.
 
 <details>
 <summary><b>How it works</b></summary>
@@ -163,21 +166,25 @@ The skill is [`skills/anderton/SKILL.md`](skills/anderton/SKILL.md); the bar it 
 [`references/good-code.md`](skills/anderton/references/good-code.md). Seven scripts do the
 mechanical parts.
 
-**What a project is.** The session's repository, named by its main checkout (or, for a bare
-repository, its git dir), so every worktree of it belongs to one project. Outside a repository, it
-is the session's directory.
+**What a repository is.** The session's repository, named by its main checkout (or, for a bare
+repository, its git dir), so every worktree of it belongs to one repository. Outside a repository,
+it is the session's directory. A project is a name within a repository, with its own Anderton.
 
-**`claim.sh`** records the claiming session as the project's holder in
-`~/.claude/anderton/<key>.json`. The key is `git hash-object` of the project root, which the
-record also holds. It exits 3 while another live session holds that project; `--take-over`
-replaces it. `--scope <name>` claims a named scope within the project instead, with its own holder
-and a key hashed from the root and the name. One session holds one role per project: a session
-holding the project or another scope is refused (exit 3), `--take-over` included. The role belongs
+**`claim.sh`** records the claiming session as the repository's Anderton in
+`~/.claude/anderton/<key>.json`. The key is `git hash-object` of the repository root, which the
+record also holds. It exits 3 while another live session holds that role; `--take-over`
+replaces it. `--project <name>` claims a named project within the repository instead, with its own
+Anderton and a key hashed from the root and the name (`--scope`, its earlier name, still works).
+One session holds one role per repository: a session holding the repository's role or another
+project's is refused (exit 3), `--take-over` included. The role belongs
 to a Claude Code process (its pid plus its registry start time), not a session id, so it survives
 `/clear`.
 
-**`waiting.sh`** lists the live sessions in the caller's project (`--all`: every project) that wait
-on a person, leaving out every holder in the caller's project, the project's and each scope's:
+**`waiting.sh`** lists the live sessions in the caller's repository (`--all`: every repository) that
+wait on a person, leaving out every Anderton in the caller's repository, the repository's and each
+project's. Run by an Anderton, it lists only the sessions that role answers for: a project's
+Anderton, the workers it started; the repository's, every other session, and a project's workers
+once that project's Anderton is gone. It lists a session when:
 
 - the turn ended with Claude's text;
 - the registry's `status` says the session is blocked on a permission prompt or an
@@ -228,25 +235,27 @@ worktree when the worktree has uncommitted changes, or commits since it started 
 branch has. Gitignored files don't count as changes.
 
 **`watch.sh`** is a background `Stop` hook. It runs in every session and exits
-at once, in about 50 ms, in any session that isn't its project's holder. In the holder it keeps
-running and checks `waiting.sh --blocked` every 30 seconds, about 0.8 seconds of work on a project of
-a dozen sessions. When another session newly blocks on a permission prompt or `AskUserQuestion`,
+at once, in about 50 ms, in any session that holds no Anderton role. In an Anderton, the
+repository's or a project's, it keeps running and checks `waiting.sh --blocked` every 30 seconds,
+about 0.8 seconds of work on a repository of a dozen sessions. When a session it answers for newly
+blocks on a permission prompt or `AskUserQuestion`,
 sub-agents included, it exits 2 and Claude Code's `asyncRewake` wakes the holder with the session's
 name, even when the holder is idle. The next `Stop` starts it again. The alert carries none of the
 blocked session's text. The hook can't answer a prompt: a background hook can't return a decision.
 While a woken holder is mid-turn no watch runs, so a block in that turn is reported when the turn ends.
 
 **`report-gate.sh`** is a hook on `SendMessage`, run before and after each send. It judges two kinds of
-message: a worker's to the session `spawn.sh` started it from, and any session's to its project's holder,
+message: a worker's to the session `spawn.sh` started it from, and any session's to its repository's Anderton,
 named in the claim file, checked to be the live process the record names, and addressed by name, by name
 with a listing ref, or by socket. It holds a message whose first line doesn't open with `RESULT:`,
 `QUESTION:`, `BLOCKED:` or `ANSWER:` (any session other than a worker also has `DIRECTION:`, for passing
 on a person's instruction), and one that repeats, word for word, the sender's last message to that
 recipient within 30 minutes (`ANDERTON_REPEAT_WINDOW`, in seconds); an `ANSWER:` is never a repeat,
 since two questions can have the same short answer. A message counts as sent only once the
-send succeeds, so a failed or denied send can be retried. A scope's holder relays asks from its own
-channels, so its messages are held only when they repeat. The project's holder, messages to anyone else,
-and sessions in other projects pass untouched, and the project is the one the session started in. It only
+send succeeds, so a failed or denied send can be retried. A project's Anderton passes along what it has
+gathered, so its messages to the repository's Anderton are held only when they repeat. The repository's
+Anderton, messages to anyone else, and sessions in other repositories pass untouched, and the repository
+is the one the session started in. It only
 blocks: it prints no decision, so it can't approve a call, and it allows whenever it can't tell, a crash
 included.
 
@@ -260,7 +269,7 @@ the full text from the transcripts of the session and its sub-agents and workflo
 only if exactly one waiting Bash call ends with the lines still on screen, and no call of another
 kind is waiting, since a clipped dialog hides its title. It shows the reason a permission rule or hook
 gave, from the screen. A hook that rewrites a command above those lines
-wouldn't show. Any other dialog taller than its screen is refused. Only a session holding an Anderton role in the target's project can run it. That your
+wouldn't show. Any other dialog taller than its screen is refused. Only a session holding an Anderton role in the target's repository can run it. That your
 word triggers it is an instruction to the Anderton, not something the script can prove, and a
 session running without permission checks can press keys by other means: this prevents mistakes
 and isn't a security boundary. It sees what the terminal draws, so what a terminal doesn't draw, such
@@ -270,7 +279,7 @@ All six honour `CLAUDE_CONFIG_DIR` and need `jq`, `git` and a POSIX `ps`.
 
 **Tests.** `bash test/structure.test.sh` and `bash test/scripts.test.sh`. The second drives the
 scripts against a throwaway Claude Code home, with fake `claude`, `herdr` and `tmux` commands and
-sessions in several projects. CI runs both on Linux and on macOS's own `/bin/bash`, and runs
+sessions in several repositories. CI runs both on Linux and on macOS's own `/bin/bash`, and runs
 shellcheck.
 
 </details>
