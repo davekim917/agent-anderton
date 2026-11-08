@@ -184,7 +184,9 @@ to a Claude Code process (its pid plus its registry start time), not a session i
 wait on a person, leaving out every Anderton in the caller's repository, the repository's and each
 project's. Run by an Anderton, it lists only the sessions that role answers for: a project's
 Anderton, the workers it started; the repository's, every other session, and a project's workers
-once that project's Anderton is gone. It lists a session when:
+once that project's Anderton is gone. A worker is matched to the session name it was started
+from, so renaming a project's Anderton also hands its workers to the repository's. It lists a
+session when:
 
 - the turn ended with Claude's text;
 - the registry's `status` says the session is blocked on a permission prompt or an

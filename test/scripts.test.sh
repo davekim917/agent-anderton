@@ -1221,6 +1221,13 @@ registry "$p_ww" waiting "permission prompt"
 watch_run wb-1
 check "a named project's Anderton runs its own watch, which wakes it for its blocked worker" [ "$status" -eq 2 ]
 check "naming that worker" contains "=== lead-worker (worker)  $watched  (waiting: permission prompt"
+check "and never a blocked session the repository's Anderton answers for" eval '! contains "=== other "'
+# A new block the repository's Anderton does answer for wakes its watch in the same scan as the worker's block.
+now_ms=$((now_ms + 1000))
+registry "$p_wa" waiting "input needed"
+watch_run wh-1
+check "the repository's Anderton's watch, woken in that scan" [ "$status" -eq 2 ] && contains "=== other  $watched"
+check "never names the project's worker" eval '! contains "lead-worker"'
 out=$(cd "$watched" && env CLAUDE_PID="$p_wb" "$scripts/waiting.sh" --blocked)
 check "its list leaves out sessions the repository's Anderton answers for" eval '! contains "=== other "'
 out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
