@@ -16,7 +16,11 @@ command -v jq >/dev/null 2>&1 || {
 }
 
 manifest="$root/.claude-plugin/plugin.json"
-[ "$(jq -r '.name' "$manifest")" = anderton ] || fail "plugin.json name must be anderton"
+[ "$(jq -r '.name' "$manifest")" = agent-anderton ] || fail "plugin.json name must be agent-anderton"
+# The install id is <plugin>@<marketplace>, and the README gives it as agent-anderton@agent-anderton.
+marketplace="$root/.claude-plugin/marketplace.json"
+jq -e '.name == "agent-anderton" and ([.plugins[].name] == ["agent-anderton"])' "$marketplace" >/dev/null ||
+  fail "marketplace.json and its one plugin must be named agent-anderton"
 [ "$(jq -r 'has("hooks")' "$manifest")" = false ] || fail "plugin.json must not declare hooks"
 [ "$(jq -r '.skills' "$manifest")" = ./skills/ ] || fail "plugin.json skills must be ./skills/"
 # Without a version, each install and update takes the repository's latest commit.

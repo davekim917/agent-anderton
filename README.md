@@ -8,7 +8,7 @@ and is the one session that deploys.
 </p>
 
 <p align="center">
-  <a href="https://github.com/davekim917/anderton/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/davekim917/anderton/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/davekim917/agent-anderton/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/davekim917/agent-anderton/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude%20Code-plugin-d97757">
   <img alt="macOS and Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue"></a>
@@ -69,9 +69,15 @@ routing and deploying are instructions the Anderton follows, not a sandbox.
 Install the plugin:
 
 ```
-/plugin marketplace add davekim917/anderton
-/plugin install anderton@anderton
+/plugin marketplace add davekim917/agent-anderton
+/plugin install agent-anderton@agent-anderton
 ```
+
+Installed before the rename, as `anderton@anderton`? Run the two lines above, then
+`/plugin disable anderton@anderton`, and restart your running sessions. Only then run
+`/plugin uninstall anderton@anderton` and `/plugin marketplace remove anderton`, since running
+sessions load their hooks from the old install. The role and worker records in `~/.claude/anderton/`
+carry over.
 
 Run Claude Code inside [herdr](https://herdr.dev) or tmux. Anderton needs one to work properly:
 workers open in tabs you can watch and type into, and you can answer their permission prompts from
@@ -134,7 +140,7 @@ sent while no session had that name may not have arrived.
 
 Ask the Anderton to retire its workers. From a plain shell, `retire.sh <name>` does the same; it
 lives in the plugin's `skills/anderton/scripts/` folder under `~/.claude/plugins/cache/`. Then
-`/plugin uninstall anderton@anderton`. Uninstalling leaves `~/.claude/anderton/` (the role and
+`/plugin uninstall agent-anderton@agent-anderton`. Uninstalling leaves `~/.claude/anderton/` (the role and
 worker records) and any worktree that was kept for unpushed work; delete those by hand.
 
 **Does it work with Codex or other agents?**
@@ -288,8 +294,8 @@ shellcheck.
 
 ## Built with it
 
-Anderton runs the development of [Anderton Agent](https://github.com/davekim917/anderton-agent), a
-personal fleet of AI agents in Slack and Discord, where it is the one session that deploys.
+Anderton runs the development of [AxisClaw](https://github.com/davekim917/axisclaw), an AI
+workforce run from Slack and Discord, where it is the one session that deploys.
 
 ## Credits
 
