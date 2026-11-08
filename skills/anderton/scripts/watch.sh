@@ -25,6 +25,29 @@ while IFS= read -r r; do
 done <<EOF
 $(project_holders "$(project_root "$cwd")")
 EOF
+# The record follows the session, not only its process: after /clear the process has a new session id,
+# and after a resume or restart the session has a new process or start time. claim.sh --rebind brings
+# the record up to date under the claim lock, and never takes a role from a live holder or another session.
+rebind() { # rebind <record>: as this session; true once this session's process holds it
+  local p scope args
+  p=$(session_pid "$sid")
+  [ -n "$p" ] || return 1
+  scope=$(jq -r '.scope // empty' "$1" 2>/dev/null) || return 1
+  args=(--rebind)
+  if [ -n "$scope" ]; then args+=(--project "$scope"); fi
+  (cd "$cwd" && CLAUDE_CODE_SESSION_ID="$sid" CLAUDE_PID="$p" "$(dirname "$0")/claim.sh" "${args[@]}") >/dev/null 2>&1 &&
+    is_holder "$sessions/$p.json" "$1" && record=$1 pid=$p reg="$sessions/$p.json"
+}
+if [ -n "$record" ]; then
+  if [ "$(jq -r '.sessionId // empty' "$record" 2>/dev/null)" != "$sid" ]; then rebind "$record" || true; fi
+else
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    if [ "$(jq -r '.sessionId // empty' "$r" 2>/dev/null)" = "$sid" ] && rebind "$r"; then break; fi
+  done <<EOF
+$(project_holders "$(project_root "$cwd")")
+EOF
+fi
 [ -n "$record" ] || exit 0
 
 key=$(basename "$record" .json)

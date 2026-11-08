@@ -182,9 +182,12 @@ record also holds. It exits 3 while another live session holds that role; `--tak
 replaces it. `--project <name>` claims a named project within the repository instead, with its own
 Anderton and a key hashed from the root and the name (`--scope`, its earlier name, still works).
 One session holds one role per repository: a session holding the repository's role or another
-project's is refused (exit 3), `--take-over` included. The role belongs
-to a Claude Code process (its pid plus its registry start time), not a session id, so it survives
-`/clear`.
+project's is refused (exit 3), `--take-over` included. The record names a Claude Code process (its
+pid plus its registry start time) and the session it runs, and the watch keeps both current, so the
+role survives `/clear` (same process, new session id), `--resume` (same session, new process) and
+`/restart` (same process, new start time). The watch takes a role back only for the session that
+held it, and never from a live holder; any other session still claims it explicitly, with
+`--take-over` while its holder is live.
 
 **`waiting.sh`** lists the live sessions in the caller's repository (`--all`: every repository) that
 wait on a person, leaving out every Anderton in the caller's repository, the repository's and each

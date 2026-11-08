@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Claim the Anderton role for the calling Claude Code session, in that session's repository, or with
 # --project <name> the role for one named project within it, which has its own Anderton. --scope is the
-# earlier name of --project and still works.
+# earlier name of --project and still works. --rebind, which watch.sh runs, only takes back a role this
+# session already had: it refuses unless the record names this process, or names this session's id and a
+# holder that is no longer live (a resumed session runs as a new process; a restarted one has a new start time).
 # Exit 0: claimed (or already held by this session). Exit 3: held by another live session, or this
 # session already holds another role in the repository.
 # Portable to macOS's bash 3.2 and BSD userland.
@@ -12,16 +14,17 @@ set -euo pipefail
 require_tools claim.sh
 
 sid="${CLAUDE_CODE_SESSION_ID:?not running inside a Claude Code session}"
-force="" scope=""
+force="" scope="" rebind=""
 while [ $# -gt 0 ]; do
   case $1 in
     --take-over) force=1 ;;
+    --rebind) rebind=1 ;;
     --project | --scope)
-      if [ -z "${2:-}" ]; then echo "usage: claim.sh [--project <name>] [--take-over]" >&2; exit 2; fi
+      if [ -z "${2:-}" ]; then echo "usage: claim.sh [--project <name>] [--take-over | --rebind]" >&2; exit 2; fi
       scope=$2
       shift
       ;;
-    *) echo "usage: claim.sh [--project <name>] [--take-over]" >&2; exit 2 ;;
+    *) echo "usage: claim.sh [--project <name>] [--take-over | --rebind]" >&2; exit 2 ;;
   esac
   shift
 done
@@ -90,6 +93,18 @@ while IFS= read -r other; do
 done <<EOF
 $(project_holders "$root")
 EOF
+
+if [ -n "$rebind" ]; then
+  rpid=$(jq -r '.pid // empty' "${record:-/dev/null}" 2>/dev/null || true)
+  if [ -z "$record" ]; then
+    exit 3
+  elif is_holder "$sessions/$pid.json" "$record"; then
+    : # This process holds it; the record takes its current session id.
+  elif [ "$(jq -r '.sessionId // empty' "$record" 2>/dev/null || true)" != "$sid" ] ||
+    { [ -n "$rpid" ] && is_holder "$sessions/$rpid.json" "$record"; }; then
+    exit 3
+  fi
+fi
 
 if [ -n "$record" ] && [ -z "$force" ]; then
   hpid=$(jq -r '.pid // empty' "$record" 2>/dev/null || true)

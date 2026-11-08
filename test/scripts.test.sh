@@ -591,7 +591,7 @@ set +e
 out=$(cd "$work/elsewhere" && echo "Task." | env CLAUDE_CODE_SESSION_ID=lead-1 CLAUDE_PID="$p_lead" ANDERTON_WORKTREES=../workers "$scripts/spawn.sh" --effort high rel-worker 2>&1)
 status=$?
 set -e
-check "a relative ANDERTON_WORKTREES is resolved from the caller's directory" [ "$status" -eq 0 ] && [ "$(sed -n 1p "$FAKE_LOG.bg")" = "$work/workers/wt-rel-worker" ]
+check "a relative ANDERTON_WORKTREES is resolved from the caller's directory" eval '[ "$status" -eq 0 ] && [ "$(sed -n 1p "$FAKE_LOG.bg")" = "$work/workers/wt-rel-worker" ]'
 run "$scripts/retire.sh" rel-worker
 run "$scripts/spawn.sh" --effort high fix-login <<'BRIEF'
 Again.
@@ -608,7 +608,7 @@ set +e
 out=$(echo "Task." | env CLAUDE_CODE_SESSION_ID=lead-1 CLAUDE_PID="$p_lead" FAKE_BG_FAIL=1 "$scripts/spawn.sh" --effort high fail-start 2>&1)
 status=$?
 set -e
-check "a worker that fails to start releases its name" [ "$status" -eq 1 ] && [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/fail-start.json" ]
+check "a worker that fails to start releases its name" eval '[ "$status" -eq 1 ] && [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/fail-start.json" ]'
 check "and its worktree" [ ! -e "$work/wt-fail-start" ]
 echo '[{"kind":"background","name":"busy-name","sessionId":"x","cwd":"/","state":"working"}]' > "$FAKE_AGENTS"
 run "$scripts/spawn.sh" --effort high busy-name <<'BRIEF'
@@ -657,12 +657,12 @@ echo '[]' > "$FAKE_AGENTS"
 
 echo '[{"kind":"background","name":"fix-login","id":"a1b2c3d4","sessionId":"bg-3","cwd":"/","state":"working"}]' > "$FAKE_AGENTS"
 run env FAKE_STOP_FAIL=1 "$scripts/retire.sh" fix-login
-check "retire.sh keeps the worktree of a worker it could not stop" [ "$status" -eq 1 ] && [ -d "$work/wt-fix-login" ]
+check "retire.sh keeps the worktree of a worker it could not stop" eval '[ "$status" -eq 1 ] && [ -d "$work/wt-fix-login" ]'
 check "and its record" [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.json" ]
 echo '[]' > "$FAKE_AGENTS"
 echo "work" > "$work/wt-fix-login/notes.txt"
 run "$scripts/retire.sh" fix-login
-check "retire.sh keeps a worktree with uncommitted work" [ "$status" -eq 3 ] && [ -d "$work/wt-fix-login" ]
+check "retire.sh keeps a worktree with uncommitted work" eval '[ "$status" -eq 3 ] && [ -d "$work/wt-fix-login" ]'
 check "and says why" contains "uncommitted changes"
 check "it stops the worker by id" grep -qx "stop a1b2c3d4" "$FAKE_LOG.life"
 rm "$work/wt-fix-login/notes.txt"
@@ -671,7 +671,7 @@ run "$scripts/retire.sh" fix-login
 check "it keeps a worktree with commits no remote has" [ "$status" -eq 3 ]
 git -C "$work/wt-fix-login" reset -q --hard HEAD~1
 run env FAKE_RM_FAIL=1 "$scripts/retire.sh" fix-login
-check "a failed claude rm keeps the record, to rerun" [ "$status" -eq 1 ] && [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.json" ]
+check "a failed claude rm keeps the record, to rerun" eval '[ "$status" -eq 1 ] && [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.json" ]'
 : > "$CLAUDE_CONFIG_DIR/anderton/workers/old-worker.last-report"
 run "$scripts/retire.sh" fix-login
 check "it retires a clean worker" [ "$status" -eq 0 ]
@@ -702,7 +702,7 @@ check "recording its tab and herdr server, which retire.sh closes it in" [ "$(jq
 run env "${herdr_env[@]}" "$scripts/spawn.sh" --effort high --bg bg-in-herdr <<'BRIEF'
 Task.
 BRIEF
-check "--bg starts it in the background even inside herdr" [ "$status" -eq 0 ] && [ "$(sed -n 1p "$FAKE_LOG.bg")" = "$work/wt-bg-in-herdr" ]
+check "--bg starts it in the background even inside herdr" eval '[ "$status" -eq 0 ] && [ "$(sed -n 1p "$FAKE_LOG.bg")" = "$work/wt-bg-in-herdr" ]'
 echo '[]' > "$FAKE_AGENTS"
 run "$scripts/retire.sh" bg-in-herdr
 
@@ -731,7 +731,7 @@ check "removing that worktree" [ ! -e "$work/wt-live-stuck" ]
 : > "$FAKE_LOG.life"
 echo '[{"kind":"interactive","name":"tab-worker","id":null,"cwd":"/","status":"busy"}]' > "$FAKE_AGENTS"
 run "$scripts/retire.sh" tab-worker
-check "retire.sh keeps a tab worker that is still running after its tab closed" [ "$status" -eq 1 ] && [ -d "$work/wt-tab-worker" ]
+check "retire.sh keeps a tab worker that is still running after its tab closed" eval '[ "$status" -eq 1 ] && [ -d "$work/wt-tab-worker" ]'
 check "and its record" [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/tab-worker.json" ]
 : > "$FAKE_LOG.closed-socket"
 echo '[]' > "$FAKE_AGENTS"
@@ -741,7 +741,7 @@ check "retire.sh keeps a tab worker whose tab did not close, listed or not" [ "$
 check "its worktree" [ -d "$work/wt-tab-worker" ]
 echo '[{"kind":"interactive","name":"tab-worker","id":null,"cwd":"/","status":"busy"}]' > "$FAKE_AGENTS"
 run env FAKE_HERDR_CLOSE_ENDS=1 HERDR_SOCKET_PATH=/elsewhere/herdr.sock "$scripts/retire.sh" tab-worker
-check "it retires a tab worker by closing its tab" [ "$status" -eq 0 ] && grep -qx "w9:t5" "$FAKE_LOG.closed"
+check "it retires a tab worker by closing its tab" eval '[ "$status" -eq 0 ] && grep -qx "w9:t5" "$FAKE_LOG.closed"'
 check "in the herdr server it was opened in, not the caller's" grep -qx "$work/herdr.sock" "$FAKE_LOG.closed-socket"
 check "removing its worktree" [ ! -e "$work/wt-tab-worker" ]
 check "and its record" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/tab-worker.json" ]
@@ -782,7 +782,7 @@ check "and removing its worktree" [ ! -e "$work/wt-dead-window" ]
 run env TMUX=/tmp/fake-tmux,1,0 FAKE_TMUX_WINDOW=@8 ANDERTON_START_WAIT=1 "$scripts/spawn.sh" --effort high slow-window <<'BRIEF'
 Task.
 BRIEF
-check "a tmux worker still unregistered with its window open is kept" [ "$status" -eq 0 ] && [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/slow-window.json" ]
+check "a tmux worker still unregistered with its window open is kept" eval '[ "$status" -eq 0 ] && [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/slow-window.json" ]'
 check "with a note that it may wait at a startup prompt" contains "may be waiting at a startup prompt"
 run env FAKE_TMUX_KILL_FAIL=1 "$scripts/retire.sh" slow-window
 check "retire.sh keeps an unregistered tmux worker whose window did not close" [ "$status" -eq 1 ]
@@ -1093,11 +1093,11 @@ watch_start wh-1
 sleep 1
 check "a block already reported does not end the watch" [ -s "$watcher_file" ]
 watch_run wh-1
-check "a second watch for the same holder leaves at once" [ "$status" -eq 0 ] && [ -z "$out" ] && [ -s "$watcher_file" ]
+check "a second watch for the same holder leaves at once" eval '[ "$status" -eq 0 ] && [ -z "$out" ] && [ -s "$watcher_file" ]'
 now_ms=$((now_ms + 1000))
 registry "$p_wa" waiting "input needed"
 set +e; wait "$watcher_pid"; status=$?; set -e
-check "the same session blocking again wakes the holder" [ "$status" -eq 2 ] && grep -qF "(waiting: input needed" "$work/watch.out"
+check "the same session blocking again wakes the holder" eval '[ "$status" -eq 2 ] && grep -qF "(waiting: input needed" "$work/watch.out"'
 
 watch_gone() { # watch_gone <pid>: true once the watch has left, within three seconds
   for _ in $(seq 1 30); do
@@ -1190,7 +1190,7 @@ kill_wrapper
 now_ms=$((now_ms + 1000))
 registry "$p_wa" waiting "permission prompt"
 watch_run wh-1
-check "the next Stop replaces it, so the holder still hears a new block" [ "$status" -eq 2 ] && [ -n "$out" ]
+check "the next Stop replaces it, so the holder still hears a new block" eval '[ "$status" -eq 2 ] && [ -n "$out" ]'
 check "and it leaves too" watch_gone "$watcher_pid"
 
 # The reported list is capped, and the newest block survives the cap.
@@ -1226,7 +1226,7 @@ check "and never a blocked session the repository's Anderton answers for" eval '
 now_ms=$((now_ms + 1000))
 registry "$p_wa" waiting "input needed"
 watch_run wh-1
-check "the repository's Anderton's watch, woken in that scan" [ "$status" -eq 2 ] && contains "=== other  $watched"
+check "the repository's Anderton's watch, woken in that scan" eval '[ "$status" -eq 2 ] && contains "=== other  $watched"'
 check "never names the project's worker" eval '! contains "lead-worker"'
 out=$(cd "$watched" && env CLAUDE_PID="$p_wb" "$scripts/waiting.sh" --blocked)
 check "its list leaves out sessions the repository's Anderton answers for" eval '! contains "=== other "'
@@ -1245,15 +1245,15 @@ registry "$p_ww" idle
 
 # Everywhere but the holder, and on any failure, it exits 0 and prints nothing.
 watch_run wa-1
-check "another session's hook exits 0 with no output" [ "$status" -eq 0 ] && [ -z "$out" ]
+check "another session's hook exits 0 with no output" eval '[ "$status" -eq 0 ] && [ -z "$out" ]'
 check "and starts no watch" [ ! -e "$watcher_file" ]
 set +e; out=$(printf 'not json' | "$scripts/watch.sh" 2>&1); status=$?; set -e
-check "input it cannot read exits 0 with no output" [ "$status" -eq 0 ] && [ -z "$out" ]
+check "input it cannot read exits 0 with no output" eval '[ "$status" -eq 0 ] && [ -z "$out" ]'
 unclaimed="$work/unclaimed"
 mkdir -p "$unclaimed"
 git -C "$unclaimed" init -q
 set +e; out=$(watch_in wa-1 "$unclaimed" | "$scripts/watch.sh" 2>&1); status=$?; set -e
-check "a project with no holder exits 0 with no output" [ "$status" -eq 0 ] && [ -z "$out" ]
+check "a project with no holder exits 0 with no output" eval '[ "$status" -eq 0 ] && [ -z "$out" ]'
 
 # /clear keeps the holder's process and gives it a new session id; the id in the record goes stale.
 jq -c '.sessionId = "wh-2"' "$CLAUDE_CONFIG_DIR/sessions/$p_wh.json" > "$work/reg.tmp"
@@ -1272,7 +1272,7 @@ check "a watch file left by a dead process does not stop the next watch" [ "$sta
 watch_start wh-2
 mv "$holder_file" "$holder_file.gone"
 set +e; wait "$watcher_pid"; status=$?; set -e
-check "the watch ends with no output once the session stops holding the role" [ "$status" -eq 0 ] && [ ! -s "$work/watch.out" ]
+check "the watch ends with no output once the session stops holding the role" eval '[ "$status" -eq 0 ] && [ ! -s "$work/watch.out" ]'
 mv "$holder_file.gone" "$holder_file"
 
 # A take-over during the old holder's watch: the new holder's watch outlasts it rather than leaving to it.
@@ -1297,6 +1297,67 @@ watch_run wh-2
 check "a legacy holder with no anderton directory is still watched" [ "$status" -eq 2 ]
 rm -rf "$CLAUDE_CONFIG_DIR/anderton" "$CLAUDE_CONFIG_DIR/anderton.json"
 mv "$work/anderton.aside" "$CLAUDE_CONFIG_DIR/anderton"
+unset ANDERTON_WATCH_TICK
+
+# The role follows the session: a resume runs it as a new process, a restart gives it a new start time,
+# and /clear gives its process a new session id. Only the session that held the role takes it back.
+export ANDERTON_WATCH_TICK=0.05
+now_ms="$(date +%s)000"
+resumed="$work/resumed"
+mkdir -p "$resumed"
+git -C "$resumed" init -q
+resumed_record=$(holder_path "$(project_root "$resumed")")
+spawn dead; p_old=$pid; session "$p_old" rs-1 "$resumed" resumer
+spawn; p_rb=$pid; session "$p_rb" rb-1 "$resumed" asker
+spawn; p_rx=$pid; session "$p_rx" rx-1 "$resumed" bystander
+for id in rb-1 rx-1; do transcript "$id" "$recent" asking "Before the question."; done
+(cd "$resumed" && env CLAUDE_PID="$p_old" CLAUDE_CODE_SESSION_ID=rs-1 "$scripts/claim.sh" >/dev/null)
+registry "$p_rb" waiting "permission prompt"
+resume_run() { # resume_run <session id>: sets $out and $status
+  set +e
+  out=$(watch_in "$1" "$resumed" | "$scripts/watch.sh" 2>&1)
+  status=$?
+  set -e
+}
+resume_run rx-1
+check "another session's watch does not take a role whose holder is gone" eval '[ "$status" -eq 0 ] && [ -z "$out" ]'
+check "and leaves the record naming that holder" [ "$(jq -r .pid "$resumed_record")" = "$p_old" ]
+
+spawn; p_new=$pid; session "$p_new" rs-1 "$resumed" resumer
+resume_run rs-1
+check "a resumed holder's watch takes its role back" [ "$(jq -r .pid "$resumed_record")" = "$p_new" ]
+check "and wakes it for a session blocked on a person" eval '[ "$status" -eq 2 ] && contains "=== asker  $resumed"'
+
+spawn; p_dup=$pid; session "$p_dup" rs-1 "$resumed" resumer
+set +e
+(cd "$resumed" && env CLAUDE_PID="$p_dup" CLAUDE_CODE_SESSION_ID=rs-1 "$scripts/claim.sh" --rebind >/dev/null 2>&1)
+status=$?
+set -e
+check "a live holder's role is not rebound, even to a process with its session id" [ "$status" -eq 3 ]
+check "and its record is untouched" [ "$(jq -r .pid "$resumed_record")" = "$p_new" ]
+rm -f "$CLAUDE_CONFIG_DIR/sessions/$p_dup.json"
+
+session "$p_new" rs-1 "$resumed" resumer $((now_ms + 5000))
+now_ms=$((now_ms + 1000))
+registry "$p_rb" waiting "input needed"
+resume_run rs-1
+check "a restarted holder's watch takes its role back" [ "$(jq -r .startedAt "$resumed_record")" = $((now_ms + 4000)) ]
+check "and wakes it" eval '[ "$status" -eq 2 ] && contains "=== asker  $resumed"'
+
+session "$p_new" rs-2 "$resumed" resumer $((now_ms + 4000))
+now_ms=$((now_ms + 1000))
+registry "$p_rb" waiting "permission prompt"
+resume_run rs-2
+check "after /clear the holder's watch still wakes it" [ "$status" -eq 2 ]
+check "and the record takes the new session id" [ "$(jq -r .sessionId "$resumed_record")" = rs-2 ]
+kill "$p_new" 2>/dev/null || true
+wait "$p_new" 2>/dev/null || true
+spawn; p_new2=$pid; session "$p_new2" rs-2 "$resumed" resumer
+now_ms=$((now_ms + 1000))
+registry "$p_rb" waiting "input needed"
+resume_run rs-2
+check "so a resume after /clear takes the role back too" eval '[ "$(jq -r .pid "$resumed_record")" = "$p_new2" ] && [ "$status" -eq 2 ]'
+registry "$p_rb" idle
 unset ANDERTON_WATCH_TICK
 
 # A background session Claude Code also registers is one session, not two.
