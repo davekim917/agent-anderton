@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Claim the Anderton role for the calling Claude Code session, in that session's project, or with
-# --scope <name> the role for one named scope within it, which has its own holder.
+# Claim the Anderton role for the calling Claude Code session, in that session's repository, or with
+# --project <name> the role for one named project within it, which has its own Anderton. --scope is the
+# earlier name of --project and still works.
 # Exit 0: claimed (or already held by this session). Exit 3: held by another live session, or this
-# session already holds another role in the project.
+# session already holds another role in the repository.
 # Portable to macOS's bash 3.2 and BSD userland.
 set -euo pipefail
 # shellcheck source=SCRIPTDIR/session-lib.sh
@@ -15,12 +16,12 @@ force="" scope=""
 while [ $# -gt 0 ]; do
   case $1 in
     --take-over) force=1 ;;
-    --scope)
-      if [ -z "${2:-}" ]; then echo "usage: claim.sh [--scope <name>] [--take-over]" >&2; exit 2; fi
+    --project | --scope)
+      if [ -z "${2:-}" ]; then echo "usage: claim.sh [--project <name>] [--take-over]" >&2; exit 2; fi
       scope=$2
       shift
       ;;
-    *) echo "usage: claim.sh [--scope <name>] [--take-over]" >&2; exit 2 ;;
+    *) echo "usage: claim.sh [--project <name>] [--take-over]" >&2; exit 2 ;;
   esac
   shift
 done
@@ -32,10 +33,10 @@ if [ -z "$pid" ]; then
 fi
 root=$(invoking_root)
 role="Anderton for $root"
-if [ -n "$scope" ]; then role="$role, scope $scope"; fi
+if [ -n "$scope" ]; then role="$role, project $scope"; fi
 state=$(holder_path "$root" "$scope")
 mkdir -p "$holders"
-# One lock per project, scopes included: the one-role check reads every role's record in it.
+# One lock per repository, its projects included: the one-role check reads every role's record in it.
 lock="$(holder_path "$root").lock"
 
 # The claim lock is flock where the system has it: the kernel releases it when the claim exits, so it
@@ -47,7 +48,7 @@ take_lock() {
   if command -v flock >/dev/null 2>&1; then
     exec 9>>"$lock.flock"
     if ! flock -w 10 9; then
-      echo "Could not take $lock.flock within 10 seconds: another claim in this project is running." >&2
+      echo "Could not take $lock.flock within 10 seconds: another claim in this repository is running." >&2
       exit 1
     fi
     return
@@ -82,7 +83,7 @@ record=$(holder_record "$root" "$scope")
 while IFS= read -r other; do
   if [ -n "$other" ] && [ "$other" != "$state" ] && [ "$other" != "$record" ] &&
     is_holder "$sessions/$pid.json" "$other"; then
-    held=$(jq -r 'if .scope then "scope \(.scope)" else "the project role" end' "$other" 2>/dev/null || true)
+    held=$(jq -r 'if .scope then "project \(.scope)" else "the repository role" end' "$other" 2>/dev/null || true)
     echo "This session already holds ${held:-another role} in $root. One session holds one role."
     exit 3
   fi
