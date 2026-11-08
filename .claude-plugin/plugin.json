@@ -1,10 +1,10 @@
 {
-  "name": "anderton",
+  "name": "agent-anderton",
   "description": "The /anderton skill: make one Claude Code session the operator that owns a project's line to production, watches the project's other live sessions and PRs, holds the engineering bar, and turns repeated corrections into structure. Invoke-only; host sessions only.",
   "author": {
     "name": "David Kim"
   },
-  "repository": "https://github.com/davekim917/anderton",
+  "repository": "https://github.com/davekim917/agent-anderton",
   "license": "MIT",
   "skills": "./skills/"
 }

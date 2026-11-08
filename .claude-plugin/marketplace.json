@@ -1,11 +1,11 @@
 {
-  "name": "anderton",
+  "name": "agent-anderton",
   "owner": {
     "name": "David Kim"
   },
   "plugins": [
     {
-      "name": "anderton",
+      "name": "agent-anderton",
       "source": "./",
       "description": "One Claude Code session that runs all the others: it starts worker sessions, tracks every one, reviews their work, and is the only one that ships."
     }
