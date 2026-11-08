@@ -73,9 +73,11 @@ Install the plugin:
 /plugin install agent-anderton@agent-anderton
 ```
 
-Installed before the rename, as `anderton@anderton`? Run `/plugin uninstall anderton@anderton` and
-`/plugin marketplace remove anderton`, then the two lines above. The role and worker records in
-`~/.claude/anderton/` carry over.
+Installed before the rename, as `anderton@anderton`? Run the two lines above, then
+`/plugin disable anderton@anderton`, and restart your running sessions. Only then run
+`/plugin uninstall anderton@anderton` and `/plugin marketplace remove anderton`, since running
+sessions load their hooks from the old install. The role and worker records in `~/.claude/anderton/`
+carry over.
 
 Run Claude Code inside [herdr](https://herdr.dev) or tmux. Anderton needs one to work properly:
 workers open in tabs you can watch and type into, and you can answer their permission prompts from
