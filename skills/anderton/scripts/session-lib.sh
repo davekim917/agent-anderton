@@ -49,16 +49,23 @@ sessions="$home/sessions"
 holders="$home/anderton"
 legacy_holder="$home/anderton.json"
 
-# The pid of the session whose id is $1, from its registration file, or nothing.
+# The pid of the session whose id is $1, from its registration file, or nothing. A resumed session
+# runs as a new process under the same id, and a crashed one's file can outlive it, so a live entry wins.
 session_pid() {
-  local f
+  local f p first=""
   for f in "$sessions"/*.json; do
     [ -e "$f" ] || continue
     if [ "$(jq -r '.sessionId // empty' "$f" 2>/dev/null)" = "$1" ]; then
-      jq -r '.pid // empty' "$f"
-      return
+      p=$(jq -r '.pid // empty' "$f" 2>/dev/null)
+      [ -n "$p" ] || continue
+      if registered_alive "$p" "$(jq -r '.startedAt // empty | floor' "$f" 2>/dev/null)"; then
+        echo "$p"
+        return
+      fi
+      [ -n "$first" ] || first=$p
     fi
   done
+  if [ -n "$first" ]; then echo "$first"; fi
 }
 
 # The project directory $1 belongs to: its repository, named by the main checkout or, for a bare
