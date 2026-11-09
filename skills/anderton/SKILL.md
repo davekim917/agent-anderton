@@ -149,7 +149,10 @@ After starting a worker:
 caller's usage. That decision is yours even when the build is not.
 
 Never block on the user for reversible work. Ask only at real gates: merge policy,
-restart, production data, outward messages, public repos, spending.
+restart, production data, outward messages, public repos, spending. That covers how to
+do work already given, not whether to start new work. A question a session addresses
+to the user, and a decision a brief reserves for them, go to the user even when the work
+is reversible: relay it in your next report, and never answer it yourself.
 
 ### 3a. Domain knowledge
 
