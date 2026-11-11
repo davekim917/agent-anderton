@@ -217,7 +217,8 @@ starts a worker: a full Claude Code session named `<name>`, in a new git worktre
 `origin/HEAD`, else `origin/main`, `origin/master` or `HEAD`.
 
 - Inside herdr (`HERDR_ENV=1`), the worker opens in a new tab of the caller's workspace, labelled
-  `<name>`, or `<caller>/<name>` when the caller is a named project's Anderton (`herdr tab create`, `herdr agent start --kind claude`, then `herdr agent prompt` with
+  `<name>`, or `<caller>/<name>` when the caller is a named project's Anderton, its name folded to
+  lowercase letters, digits and hyphens (`herdr tab create`, `herdr agent start --kind claude`, then `herdr agent prompt` with
   the brief). If Claude Code stops at a startup prompt there, the spawn shows the screen, closes the
   tab and fails, unless the session cannot be confirmed stopped, when it keeps the worktree and
   record for `retire.sh`.
@@ -248,7 +249,10 @@ branch has. Gitignored files don't count as changes.
 
 **`adopt.sh <name>`** makes the calling Anderton answer for a live session the user opened in its
 repository, as for a worker it started: it writes a worker record naming the caller, so the session's
-messages to it are judged as a worker's and its blocks wake the caller. It refuses a caller holding no
+messages to it are judged as a worker's and its blocks wake the caller. The record keeps the session's
+id and pid, and the session counts as adopted only while one of them still matches (`/clear` keeps the
+pid, a resume keeps the id), so a later session that reuses the name gains nothing; renaming it, or a
+`/clear` followed by a resume, releases it. It refuses a caller holding no
 role, another Anderton, and a session another Anderton already answers for. The Anderton then tells
 the session by SendMessage that it reports there. `retire.sh <name>` releases an adopted session
 without stopping it.

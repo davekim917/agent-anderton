@@ -219,13 +219,17 @@ worker_gone() { # worker_gone <launcher> <socket> <tab> <name> [server] [label]:
   [ "$(place_state "$1" "$2" "$3" "$label" "${5:-}")" = absent ] && session_gone "$4"
 }
 
-# True when the session named $1, running in directory $2, is a worker spawn.sh started: the worker record of
-# that name exists and the session runs in its worktree. A worker reports to its spawner, not the user.
+# True when the session named $1, running in directory $2, is a worker spawn.sh started or adopt.sh adopted: the
+# worker record of that name exists and the session runs in its directory. An adopted session shares its directory
+# with the user's other sessions, so it must also be the session adopted: its session id $3 or its pid $4 as
+# recorded (/clear keeps the pid, a resume keeps the session id). A worker reports to its spawner, not the user.
 is_worker() {
   local f="$holders/workers/$1.json" dir
   if [ -z "$1" ] || [ ! -f "$f" ]; then return 1; fi
   dir=$(jq -r '.dir // empty' "$f" 2>/dev/null || true)
   [ -n "$dir" ] || return 1
-  case $2 in "$dir" | "$dir"/*) return 0 ;; esac
-  return 1
+  case $2 in "$dir" | "$dir"/*) ;; *) return 1 ;; esac
+  [ "$(jq -r '.adopted // false' "$f" 2>/dev/null || true)" = true ] || return 0
+  jq -e --arg sid "${3:-}" --arg pid "${4:-}" \
+    '($sid != "" and .sessionId == $sid) or ($pid != "" and (.pid | tostring) == $pid)' "$f" >/dev/null 2>&1
 }

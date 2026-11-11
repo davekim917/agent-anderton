@@ -156,11 +156,12 @@ failed() {
   exit 1
 }
 
-# A named project's Anderton puts its own name on its workers' tabs, so the user can tell whose they are.
+# A named project's Anderton puts its own name on its workers' tabs, so the user can tell whose they are. herdr and
+# tmux report a label as one whitespace-free field, so the name is folded to a-z, 0-9 and hyphens.
 label=$name
 while IFS= read -r r; do
   if [ -n "$r" ] && [ -n "$(jq -r '.scope // empty' "$r" 2>/dev/null)" ] && is_holder "$sessions/$pid.json" "$r"; then
-    label="$me/$name"
+    label="$(printf '%s' "$me" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9-' '-' | sed 's/^-*//; s/-*$//')/$name"
   fi
 done <<EOF
 $(project_holders "$root")

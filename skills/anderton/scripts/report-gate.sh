@@ -65,7 +65,7 @@ EOF
   done <<EOF
 $(project_holders "$root")
 EOF
-  if is_worker "$name" "$cwd"; then worker=1; fi
+  if is_worker "$name" "$cwd" "$sid" "$pid"; then worker=1; fi
 
   # The project's holder, only while it is the live process its record names; when that is uncertain, allow.
   if [ -n "$project" ]; then

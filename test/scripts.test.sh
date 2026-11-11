@@ -183,7 +183,7 @@ spawn() {
     pid=$!
     wait "$pid"
   else
-    sleep 300 >/dev/null 2>&1 &
+    sleep 900 >/dev/null 2>&1 &
     pid=$!
     sleepers="$sleepers $pid"
   fi
@@ -704,11 +704,15 @@ check "recording its tab and herdr server, which retire.sh closes it in" [ "$(jq
 
 # A named project's Anderton puts its own name on its workers' tabs, and retire.sh still finds and closes them.
 (cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project tabs >/dev/null)
+lead_reg="$CLAUDE_CONFIG_DIR/sessions/$p_lead.json"
+cp "$lead_reg" "$work/lead-reg.bak"
+jq -c '.name = "Lead Session"' "$work/lead-reg.bak" > "$lead_reg"
 run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t7 "$scripts/spawn.sh" --effort high proj-worker <<'BRIEF'
 Task.
 BRIEF
 check "a project's Anderton opens its worker in a tab" [ "$status" -eq 0 ]
-check "labelled with the project Anderton's name and the worker's" grep -qx -- "lead-session/proj-worker" "$FAKE_LOG.tab"
+check "labelled with the project Anderton's name, folded to one field, and the worker's" grep -qx -- "lead-session/proj-worker" "$FAKE_LOG.tab"
+check "while the brief still names the caller as it is" grep -qF 'Message "Lead Session" by SendMessage' "$FAKE_LOG.prompt"
 check "and records that label" [ "$(jq -r .label "$CLAUDE_CONFIG_DIR/anderton/workers/proj-worker.json")" = "lead-session/proj-worker" ]
 agents_before=$(cat "$FAKE_AGENTS")
 echo '[]' > "$FAKE_AGENTS"
@@ -716,6 +720,7 @@ echo '[]' > "$FAKE_AGENTS"
 run "$scripts/retire.sh" proj-worker
 check "retire.sh closes the labelled tab" eval '[ "$status" -eq 0 ] && grep -qx "w9:t7" "$FAKE_LOG.closed"'
 printf '%s\n' "$agents_before" > "$FAKE_AGENTS"
+mv "$work/lead-reg.bak" "$lead_reg"
 rm -f "$(holder_path "$(project_root "$alpha")" tabs)"
 
 run env "${herdr_env[@]}" "$scripts/spawn.sh" --effort high --bg bg-in-herdr <<'BRIEF'
@@ -1151,6 +1156,22 @@ out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
 check "and then hears when it blocks" contains "=== hand-tab (worker)  $watched  (waiting: permission prompt"
 adopt "$p_wb" wb-1 hand-tab
 check "a second Anderton cannot adopt it too" eval '[ "$status" -eq 1 ] && contains "already reports to holder"'
+# The adoption follows the session, not its name: /clear keeps it, and a new session of that name gains nothing.
+jq -c '.sessionId = "wt-2"' "$CLAUDE_CONFIG_DIR/sessions/$p_wt.json" > "$work/reg.tmp" && mv "$work/reg.tmp" "$CLAUDE_CONFIG_DIR/sessions/$p_wt.json"
+transcript wt-2 "$recent" asking "A question after /clear."
+out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
+check "an adopted session is still its Anderton's after /clear" contains "=== hand-tab (worker)  $watched"
+registry "$p_wt" idle
+spawn; p_im=$pid; session "$p_im" im-1 "$watched" hand-tab "$(date +%s)000"
+transcript im-1 "$recent" asking "A new session reusing the name."
+registry "$p_im" waiting "permission prompt"
+out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
+check "a new session reusing an adopted session's name is not adopted with it" eval '! contains "=== hand-tab"'
+out=$(cd "$watched" && env CLAUDE_PID="$p_wa" "$scripts/waiting.sh" --blocked)
+check "it is an ordinary session to a caller holding no role" contains "=== hand-tab  $watched"
+kill "$p_im" 2>/dev/null || true
+wait "$p_im" 2>/dev/null || true
+registry "$p_wt" waiting "permission prompt"
 set +e
 out=$(env CLAUDE_CODE_SESSION_ID=wh-1 CLAUDE_PID="$p_wh" "$scripts/retire.sh" hand-tab 2>&1)
 status=$?
@@ -1293,7 +1314,7 @@ check "nor a blocked project Anderton" eval '! contains "=== scope-lead"'
 registry "$p_wb" idle
 
 # A named project's Anderton hears about the workers it started; the repository's hears about them only once it is gone.
-spawn; p_ww=$pid; session "$p_ww" ww-1 "$watched" lead-worker
+spawn; p_ww=$pid; session "$p_ww" ww-1 "$watched" lead-worker "$(date +%s)000"
 jq -nc --arg d "$watched" '{name: "lead-worker", dir: $d, spawner: "scope-lead"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/lead-worker.json"
 transcript ww-1 "$recent" asking "Before the worker's question."
 registry "$p_ww" waiting "permission prompt"
@@ -1452,6 +1473,18 @@ unset ANDERTON_WATCH_TICK
 jq -nc --arg w "$watched" '[{kind: "background", name: "other", sessionId: "wa-1", cwd: $w, state: "blocked"}]' > "$FAKE_AGENTS"
 out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh")
 check "a registered background session is listed once" [ "$(printf '%s\n' "$out" | grep -c '^=== other ')" -eq 1 ]
+echo '[]' > "$FAKE_AGENTS"
+
+# A background session an Anderton's record names is left out like any Anderton, with no registry entry too.
+jq -nc --arg d "$watched" '{name: "bg-lead", dir: $d, spawner: "holder"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/bg-lead.json"
+transcript bgp-1 "$recent" asking "A background Anderton's question."
+jq -nc --arg w "$watched" '[{kind: "background", name: "bg-lead", sessionId: "bgp-1", cwd: $w, state: "blocked"}]' > "$FAKE_AGENTS"
+out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
+check "a blocked background worker reaches its Anderton" contains "=== bg-lead (worker)"
+jq -nc --arg r "$(project_root "$watched")" '{root: $r, scope: "bg-proj", pid: 1, sessionId: "bgp-1"}' > "$(holder_path "$(project_root "$watched")" bg-proj)"
+out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
+check "but not once it holds an Anderton role of its own" eval '! contains "bg-lead"'
+rm -f "$(holder_path "$(project_root "$watched")" bg-proj)" "$CLAUDE_CONFIG_DIR/anderton/workers/bg-lead.json"
 echo '[]' > "$FAKE_AGENTS"
 
 # The You Should Know plugin's store is a private format, read only when it has the shape expected.

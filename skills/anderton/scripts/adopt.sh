@@ -54,6 +54,7 @@ if ! (set -C && : > "$record") 2>/dev/null; then
   refuse "$name already reports to $(jq -r '.spawner // "another Anderton"' "$record" 2>/dev/null); that Anderton releases it with retire.sh $name first."
 fi
 jq -nc --arg name "$name" --arg dir "$cwd" --arg root "$root" --arg spawner "$me" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --slurpfile reg "$found" \
   '{name: $name, launcher: "adopted", dir: $dir, root: $root, worktree: false, adopted: true, spawner: $spawner,
-    startedAt: $at}' >| "$record"
+    sessionId: $reg[0].sessionId, pid: $reg[0].pid, startedAt: $at}' >| "$record"
 echo "Adopted '$name': it now reports to $me, and $me hears when it blocks. Tell it so by SendMessage."

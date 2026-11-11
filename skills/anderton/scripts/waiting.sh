@@ -42,9 +42,9 @@ if [ -n "$caller" ]; then
 $records
 EOF
 fi
-answering_role() { # answering_role <session name> <cwd>: the record of the role that answers for that session, if any
+answering_role() { # answering_role <name> <cwd> [session id] [pid]: the record of the role that answers for it, if any
   local spawner r hp
-  is_worker "$1" "$2" || return 0
+  is_worker "$1" "$2" "${3:-}" "${4:-}" || return 0
   spawner=$(jq -r '.spawner // empty' "$holders/workers/$1.json" 2>/dev/null || true)
   while IFS= read -r r; do
     if [ -z "$r" ] || [ "$r" = "$project" ] || [ -z "$spawner" ]; then continue; fi
@@ -59,8 +59,17 @@ $records
 EOF
   printf '%s\n' "$project"
 }
-answers_for() { # answers_for <session name> <cwd>: true when the caller's role answers for that session
-  [ -z "$mine" ] || [ "$(answering_role "$1" "$2")" = "$mine" ]
+held_by() { # held_by <session id>: true when an Anderton's record names that session
+  local r
+  while IFS= read -r r; do
+    if [ -n "$r" ] && [ "$(jq -r '.sessionId // empty' "$r" 2>/dev/null)" = "$1" ]; then return 0; fi
+  done <<EOF
+$records
+EOF
+  return 1
+}
+answers_for() { # answers_for <name> <cwd> [session id] [pid]: true when the caller's role answers for that session
+  [ -z "$mine" ] || [ "$(answering_role "$@")" = "$mine" ]
 }
 
 for s in "$sessions"/*.json; do
@@ -77,9 +86,12 @@ EOF
   done <<EOF
 $records
 EOF
-  if [ -n "$held" ]; then continue; fi
+  if [ -n "$held" ]; then
+    judged="$judged $sid"
+    continue
+  fi
   tag=""
-  if is_worker "$name" "$cwd"; then
+  if is_worker "$name" "$cwd" "$sid" "$pid"; then
     [ "$status" = waiting ] || continue
     tag=" (worker)"
   fi
@@ -89,7 +101,7 @@ EOF
   fi
   registered_alive "$pid" "$start" || continue
   judged="$judged $sid"
-  answers_for "$name" "$cwd" || continue
+  answers_for "$name" "$cwd" "$sid" "$pid" || continue
 
   transcript=""
   for t in "$home"/projects/*/"$sid".jsonl; do
@@ -185,8 +197,9 @@ claude agents --json 2>/dev/null |
   while IFS=$'\x1f' read -r name sid cwd state; do
     [ -n "$sid" ] || continue
     case "$judged " in *" $sid "*) continue ;; esac
+    if held_by "$sid"; then continue; fi
     tag=""
-    if is_worker "$name" "$cwd"; then
+    if is_worker "$name" "$cwd" "$sid"; then
       [ "$state" = blocked ] || continue
       tag=" (worker)"
     fi
@@ -194,7 +207,7 @@ claude agents --json 2>/dev/null |
     if [ -z "$all" ] && { [ -z "$cwd" ] || [ "$(project_root "$cwd")" != "$root" ]; }; then
       continue
     fi
-    answers_for "$name" "$cwd" || continue
+    answers_for "$name" "$cwd" "$sid" || continue
     for t in "$home"/projects/*/"$sid".jsonl; do
       [ -e "$t" ] || continue
       tail -n 400 "$t" | jq -nrR --arg name "${name:-${sid%%-*}}${tag}" --arg cwd "$cwd" --arg state "$state" --arg blocked "$blocked" '
