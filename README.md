@@ -195,8 +195,8 @@ project's: each is a tab the user reads directly. Run by an Anderton, it lists o
 role answers for: the workers it started or adopted, and, for the repository's, a project's workers
 once that project's Anderton is gone. A session nobody started is the user's own tab, which no
 Anderton hears about until the user asks one to adopt it. A worker is matched to the session name it was started
-from, or, once renamed, to the worktree spawn.sh made for it; renaming a project's Anderton hands its
-workers to the repository's. It lists a
+from, so renaming a worker releases it like a tab the user opened, and renaming a project's Anderton
+hands its workers to the repository's. It lists a
 session when:
 
 - the turn ended with Claude's text;

@@ -220,10 +220,10 @@ worker_gone() { # worker_gone <launcher> <socket> <tab> <name> [server] [label]:
 }
 
 # The worker record of the session named $1, running in directory $2 (session id $3, pid $4, registry start $5),
-# or nothing: the record spawn.sh or adopt.sh wrote for it. A worker spawn.sh started is found by its name, or, once
-# renamed, by its worktree, which is its own. An adopted session shares its directory with the user's other sessions,
-# so it must also be the session adopted: its session id as recorded (a resume and /restart keep it), or its pid with
-# the same start (/clear keeps both), never a later process given the same pid.
+# or nothing: the record spawn.sh or adopt.sh wrote under that name. A worker is matched by the name it was started
+# under, so renaming it releases it, like a tab the user opened. An adopted session shares its directory with the
+# user's other sessions, so it must also be the session adopted: its session id as recorded (a resume and /restart
+# keep it), or its pid with the same start (/clear keeps both), never a later process given the same pid.
 worker_record() {
   local f dir
   f="$holders/workers/$1.json"
@@ -241,12 +241,6 @@ worker_record() {
         ;;
     esac
   fi
-  [ -n "$2" ] || return 0
-  set -- "$holders"/workers/*.json "$2"
-  [ -f "$1" ] || return 0
-  jq -r --arg c "${!#}" '(.dir // "") as $d
-    | select(.worktree == true and $d != "" and ($c == $d or ($c | startswith($d + "/")))) | input_filename' \
-    "${@:1:$#-1}" 2>/dev/null | head -n 1 || true
 }
 
 # True when that session is a worker: it reports to its spawner, not the user.

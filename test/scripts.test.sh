@@ -1501,17 +1501,24 @@ check "but not once it holds an Anderton role of its own" eval '! contains "bg-l
 rm -f "$(holder_path "$(project_root "$watched")" bg-proj)" "$CLAUDE_CONFIG_DIR/anderton/workers/bg-lead.json"
 echo '[]' > "$FAKE_AGENTS"
 
-# A worker renamed since it started is still found by its worktree, which is its own.
+# A worker is matched by the name it was started under. Renamed, it is released like a tab the user opened, and so
+# is any other session opened in its worktree; an Anderton can adopt either.
 mkdir -p "$watched/wt-renamed/src"
 jq -nc --arg d "$watched/wt-renamed" '{name: "first-name", dir: $d, spawner: "holder", worktree: true}' > "$CLAUDE_CONFIG_DIR/anderton/workers/first-name.json"
 spawn; p_rn=$pid; session "$p_rn" rn-1 "$watched/wt-renamed/src" second-name "$(date +%s)000"
-transcript rn-1 "$recent" asking "A renamed worker's question."
+transcript rn-1 "$recent" asking "A question from a session in a worker's worktree."
 registry "$p_rn" waiting "permission prompt"
 out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
-check "a renamed worker, started in its worktree's subfolder, still reaches the Anderton that started it" contains "=== second-name (worker)"
+check "a session in a worker's worktree under another name is not that worker" eval '! contains "second-name"'
 adopt "$p_wb" wb-1 second-name
-check "and another Anderton cannot adopt it under its new name" eval '[ "$status" -eq 1 ] && contains "already reports to holder"'
-check "recording nothing" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/second-name.json" ]
+check "an Anderton can adopt it" [ "$status" -eq 0 ]
+out=$(cd "$watched" && env CLAUDE_PID="$p_wb" "$scripts/waiting.sh" --blocked)
+check "and then hears when it blocks" contains "=== second-name (worker)"
+set +e
+out=$(env CLAUDE_CODE_SESSION_ID=wb-1 CLAUDE_PID="$p_wb" "$scripts/retire.sh" second-name 2>&1)
+status=$?
+set -e
+check "until it releases it" [ "$status" -eq 0 ]
 registry "$p_rn" idle
 rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/first-name.json"
 
