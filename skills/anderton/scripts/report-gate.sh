@@ -7,8 +7,8 @@
 # It judges a message from a worker spawn.sh started to the session that started it, and a message from any session
 # in a repository to that repository's live Anderton. A worker has four kinds; any other session also has DIRECTION:, for
 # passing on a person's direction. A named project's Anderton is a tab the user reads directly, so it reaches the
-# repository's Anderton only to ship something (DEPLOY:) or to answer it (ANSWER:). The repository's Anderton is never
-# held.
+# repository's Anderton only to ship something (DEPLOY:), to ask a fact about the host that only it can read
+# (LOOKUP:), or to answer it (ANSWER:). The repository's Anderton is never held.
 # It only ever blocks (exit 2, the reason on stderr) and never prints a decision, so it cannot approve anything. The
 # body runs in a subshell that reports a block as 10, so a crash, which bash may report as 2, is read as allow. On any
 # failure it exits 0 and prints nothing.
@@ -89,11 +89,11 @@ EOF
   fi
   [ -n "$recipient" ] || exit 0
 
-  # A project's Anderton is held to DEPLOY: and ANSWER: only toward the repository's Anderton; reporting to the session
-  # that started it, it is a worker like any other.
+  # A project's Anderton is held to DEPLOY:, LOOKUP: and ANSWER: only toward the repository's Anderton; reporting to
+  # the session that started it, it is a worker like any other.
   local kind="" kinds="RESULT|QUESTION|BLOCKED|ANSWER"
   if [ -n "$scope" ] && [ -n "$to_repo" ]; then
-    kinds="DEPLOY|ANSWER"
+    kinds="DEPLOY|LOOKUP|ANSWER"
   elif [ -z "$worker" ]; then
     kinds="$kinds|DIRECTION"
   fi
@@ -101,11 +101,13 @@ EOF
   if [ -z "$kind" ]; then
     if [ -n "$scope" ] && [ -n "$to_repo" ]; then
       {
-        echo "Not sent. A project's Anderton messages \"$recipient\" only to ship something, with the kind as the first word:"
+        echo "Not sent. A project's Anderton messages \"$recipient\" only for what only it can do, with the kind as the"
+        echo "first word:"
         echo "  DEPLOY: a change to ship (a merged PR to deploy, a restart, a host change, or a fix to shared code for a"
         echo "    host worker to build and ship), with its link"
+        echo "  LOOKUP: a fact about the host that only \"$recipient\" can read, which it answers itself"
         echo "  ANSWER: a reply to something \"$recipient\" asked you"
-        echo "Your project's results, questions and blocks, and your workers' reports, stay between you and the user, who"
+        echo "Your project's results, blocks and questions, and your workers' reports, stay between you and the user, who"
         echo "reads your tab. Anything for another project goes to that project's Anderton."
       } >&2
     else

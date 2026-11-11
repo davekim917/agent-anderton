@@ -30,9 +30,12 @@ When the user invokes you for one project in the repository, or names one, claim
 `scripts/claim.sh --project <name>` instead. A project's Anderton starts and reviews that
 project's work, hears when its own workers block, and owns the user's calls on it: the
 user reads its tab directly. It does not deploy: send every deploy to the repository's
-Anderton as `DEPLOY:`, saying what it ships. That, and `ANSWER:` to a question from it, are
-the only messages it sends there; its results, questions and blocks go to the user in its
-own tab, and a hook holds anything else. One session holds one role in a repository, and the
+Anderton as `DEPLOY:`, saying what it ships. That, `LOOKUP:` for a fact about the host
+that only the repository's Anderton can read, and `ANSWER:` to a question from it, are the
+only messages it sends there; its results, blocks and questions go to the user in its own
+tab, and a hook holds anything else. As the repository's Anderton, answer a `LOOKUP:`
+yourself; one that is really the user's decision goes back to the project's Anderton to ask
+in its own tab, never through you. One session holds one role in a repository, and the
 claim refuses a second.
 
 ## 2. The four jobs
@@ -145,7 +148,7 @@ After starting a worker:
 - It messages you only with a `RESULT:`, `QUESTION:`, `BLOCKED:` or `ANSWER:`, one per
   milestone; a hook holds anything else, and holds the same from any other session in the
   repository that messages the repository's Anderton, which may also send `DIRECTION:` to
-  pass on a person's instruction (a project's Anderton sends it only `DEPLOY:` and `ANSWER:`). Every message you send it is one it may answer,
+  pass on a person's instruction (a project's Anderton sends it only `DEPLOY:`, `LOOKUP:` and `ANSWER:`). Every message you send it is one it may answer,
   so send only direction, never an acknowledgement.
 - Subscribe with `notify_when_idle` only when you expect a milestone and the worker might
   stop without reporting it. Subscribe once: the notice fires on any turn end, so when it

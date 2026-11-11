@@ -953,8 +953,8 @@ check "keeping the record where --scope put it" [ "$(jq -r .scope "$(holder_path
 claim_status eeo-1 "$p_eo" --project
 check "--project without a name is a usage error" [ "$status" -eq 2 ]
 
-# report-gate.sh: any session in a project messaging the project's holder; a scope's holder may send it only DEPLOY:
-# and ANSWER:.
+# report-gate.sh: any session in a project messaging the project's holder; a scope's holder may send it only DEPLOY:,
+# LOOKUP: and ANSWER:.
 gate eeo-1 "$epsilon" epsilon-host '"Got it, on it."'
 check "report-gate holds an acknowledgement to the project's holder from a session that is not a worker" [ "$status" -eq 2 ]
 check "and names the holder in the kinds" contains 'Not sent. Message "epsilon-host" only when'
@@ -976,13 +976,22 @@ send eeo-1 "$epsilon" epsilon-host '"QUESTION:\nand the cache change, now that C
 check "lets a second question through that shares only its first line" [ "$status" -eq 0 ]
 gate eeo-1 "$epsilon" epsilon-fleet-a '"Got it."'
 check "leaves a message to a scope's holder alone" [ "$status" -eq 0 ]
-# A named project's Anderton reaches the project's holder only to ship something; the user reads its own tab.
+# A named project's Anderton reaches the project's holder only to ship something or to ask a host fact; the user reads
+# its own tab.
 send eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nDave asks: can the export run tonight?"'
 check "holds a scope's holder relaying to the project's holder" [ "$status" -eq 2 ]
 check "offering it DEPLOY" contains "DEPLOY: a change to ship"
-check "and not the kinds that relay its project" eval '! contains "QUESTION:" && ! contains "RESULT:"'
+check "and LOOKUP for a host fact" contains "LOOKUP: a fact about the host"
+check "and not the kinds that relay its project" eval '! contains "QUESTION:" && ! contains "RESULT:" && ! contains "BLOCKED:" && ! contains "DIRECTION:"'
+send eea-1 "$epsilon" epsilon-host '"RESULT: export fixed, PR https://example.invalid/pr/6"'
+check "holds its result: the user reads that in its tab" [ "$status" -eq 2 ]
+send eea-1 "$epsilon" epsilon-host '"BLOCKED: waiting on the owner to pick a schedule."'
+check "and its block" [ "$status" -eq 2 ]
 send eea-1 "$epsilon" epsilon-host '"QUESTION: can the export run tonight? I recommend yes."'
 check "holds its question too: its project's decisions are the user's, in its tab" [ "$status" -eq 2 ]
+send eea-1 "$epsilon" epsilon-host '"LOOKUP: does the nightly backup include session transcripts?"'
+check "lets it ask a host fact only the project's holder can read" [ "$status" -eq 0 ]
+check "without a word" [ -z "$out" ]
 send eea-1 "$epsilon" epsilon-host '"DEPLOY: ship the export fix, merged as https://example.invalid/pr/7"'
 check "lets a scope's holder ask the project's holder to deploy" [ "$status" -eq 0 ]
 check "silently" [ -z "$out" ]

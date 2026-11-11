@@ -273,11 +273,12 @@ message: a worker's to the session `spawn.sh` started it from, and any session's
 named in the claim file, checked to be the live process the record names, and addressed by name, by name
 with a listing ref, or by socket. It holds a message whose first line doesn't open with `RESULT:`,
 `QUESTION:`, `BLOCKED:` or `ANSWER:` (any session other than a worker also has `DIRECTION:`, for passing
-on a person's instruction, and a named project's Anderton has only `DEPLOY:` and `ANSWER:`), and one that repeats, word for word, the sender's last message to that
+on a person's instruction, and a named project's Anderton has only `DEPLOY:`, `LOOKUP:` and `ANSWER:`), and one that repeats, word for word, the sender's last message to that
 recipient within 30 minutes (`ANDERTON_REPEAT_WINDOW`, in seconds); an `ANSWER:` is never a repeat,
 since two questions can have the same short answer. A message counts as sent only once the
 send succeeds, so a failed or denied send can be retried. A named project's Anderton answers to the user in its own tab, so it
-messages the repository's Anderton only to ship something or to answer it. The repository's
+messages the repository's Anderton only to ship something, to ask a fact about the host that only it
+can read, or to answer it. The repository's
 Anderton, messages to anyone else, and sessions in other repositories pass untouched, and the repository
 is the one the session started in. It only
 blocks: it prints no decision, so it can't approve a call, and it allows whenever it can't tell, a crash
