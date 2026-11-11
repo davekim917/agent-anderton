@@ -244,8 +244,9 @@ worker_record() {
   [ -n "$2" ] || return 0
   set -- "$holders"/workers/*.json "$2"
   [ -f "$1" ] || return 0
-  jq -r --arg c "${!#}" 'select(.worktree == true and (.dir // "") != "" and ($c == .dir or ($c | startswith(.dir + "/"))))
-    | input_filename' "${@:1:$#-1}" 2>/dev/null | head -n 1 || true
+  jq -r --arg c "${!#}" '(.dir // "") as $d
+    | select(.worktree == true and $d != "" and ($c == $d or ($c | startswith($d + "/")))) | input_filename' \
+    "${@:1:$#-1}" 2>/dev/null | head -n 1 || true
 }
 
 # True when that session is a worker: it reports to its spawner, not the user.

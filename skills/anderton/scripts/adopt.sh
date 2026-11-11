@@ -48,6 +48,10 @@ done <<EOF
 $records
 EOF
 
+owned=$(worker_record "$name" "$cwd" "$(jq -r '.sessionId // empty' "$found")" "$(jq -r '.pid // empty' "$found")" \
+  "$(jq -r '.startedAt // empty | floor' "$found" 2>/dev/null)")
+[ -z "$owned" ] || refuse "$name already reports to $(jq -r '.spawner // "another Anderton"' "$owned" 2>/dev/null)."
+
 mkdir -p "$holders/workers"
 record="$holders/workers/$name.json"
 if ! (set -C && : > "$record") 2>/dev/null; then
