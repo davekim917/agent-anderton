@@ -388,7 +388,9 @@ check "leaves out a session whose last assistant record is a tool call" eval '! 
 check "lists a live session this shell may not signal" contains "=== unsignalled-session"
 
 out=$(env CLAUDE_PID="$p_beta" "$scripts/waiting.sh")
-check "from project beta, lists beta's sessions" contains "=== unsignalled-session  $beta"
+check "from beta's Anderton, leaves out a session it did not start" eval '! contains "=== unsignalled-session"'
+out=$(env CLAUDE_PID=1 "$scripts/waiting.sh")
+check "from a session in project beta holding no role, lists beta's sessions" contains "=== unsignalled-session  $beta"
 check "from project beta, leaves out beta's own Anderton" eval '! contains "Beta needs a decision"'
 check "from project beta, leaves out alpha" eval '! contains "alpha-session"'
 
@@ -396,7 +398,8 @@ claim_status gaaa-1 "$p_gamma_a"
 check "a worktree of a bare repository claims for the repository" [ "$status" -eq 0 ]
 claim_status gbbb-2 "$p_gamma_b"
 check "another worktree of the same bare repository is refused" [ "$status" -eq 3 ]
-out=$(env CLAUDE_PID="$p_gamma_a" "$scripts/waiting.sh")
+spawn; p_gamma_r=$pid; session "$p_gamma_r" grrr-3 "$work/gamma-a" gamma-reader
+out=$(env CLAUDE_PID="$p_gamma_r" "$scripts/waiting.sh")
 check "lists the other worktree of a bare repository as the same project" contains "Question from gamma's second worktree."
 
 check "the cleared holder re-claims under its new session id" env CLAUDE_CODE_SESSION_ID=cccc-9 "$scripts/claim.sh"
@@ -699,6 +702,22 @@ check "and told to report to the caller by name" grep -qF 'Message "lead-session
 check "not started in the background" [ ! -e "$FAKE_LOG.bg" ]
 check "recording its tab and herdr server, which retire.sh closes it in" [ "$(jq -r '"\(.launcher) \(.tab) \(.socket)"' "$CLAUDE_CONFIG_DIR/anderton/workers/tab-worker.json")" = "herdr w9:t5 $work/herdr.sock" ]
 
+# A named project's Anderton puts its own name on its workers' tabs, and retire.sh still finds and closes them.
+(cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project tabs >/dev/null)
+run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t7 "$scripts/spawn.sh" --effort high proj-worker <<'BRIEF'
+Task.
+BRIEF
+check "a project's Anderton opens its worker in a tab" [ "$status" -eq 0 ]
+check "labelled with the project Anderton's name and the worker's" grep -qx -- "lead-session/proj-worker" "$FAKE_LOG.tab"
+check "and records that label" [ "$(jq -r .label "$CLAUDE_CONFIG_DIR/anderton/workers/proj-worker.json")" = "lead-session/proj-worker" ]
+agents_before=$(cat "$FAKE_AGENTS")
+echo '[]' > "$FAKE_AGENTS"
+: > "$FAKE_LOG.closed"
+run "$scripts/retire.sh" proj-worker
+check "retire.sh closes the labelled tab" eval '[ "$status" -eq 0 ] && grep -qx "w9:t7" "$FAKE_LOG.closed"'
+printf '%s\n' "$agents_before" > "$FAKE_AGENTS"
+rm -f "$(holder_path "$(project_root "$alpha")" tabs)"
+
 run env "${herdr_env[@]}" "$scripts/spawn.sh" --effort high --bg bg-in-herdr <<'BRIEF'
 Task.
 BRIEF
@@ -929,7 +948,8 @@ check "keeping the record where --scope put it" [ "$(jq -r .scope "$(holder_path
 claim_status eeo-1 "$p_eo" --project
 check "--project without a name is a usage error" [ "$status" -eq 2 ]
 
-# report-gate.sh: any session in a project messaging the project's holder; a scope's holder is held only on repeats.
+# report-gate.sh: any session in a project messaging the project's holder; a scope's holder may send it only DEPLOY:
+# and ANSWER:.
 gate eeo-1 "$epsilon" epsilon-host '"Got it, on it."'
 check "report-gate holds an acknowledgement to the project's holder from a session that is not a worker" [ "$status" -eq 2 ]
 check "and names the holder in the kinds" contains 'Not sent. Message "epsilon-host" only when'
@@ -951,14 +971,21 @@ send eeo-1 "$epsilon" epsilon-host '"QUESTION:\nand the cache change, now that C
 check "lets a second question through that shares only its first line" [ "$status" -eq 0 ]
 gate eeo-1 "$epsilon" epsilon-fleet-a '"Got it."'
 check "leaves a message to a scope's holder alone" [ "$status" -eq 0 ]
+# A named project's Anderton reaches the project's holder only to ship something; the user reads its own tab.
 send eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nDave asks: can the export run tonight?"'
-check "lets a scope's holder relay to the project's holder without a kind" [ "$status" -eq 0 ]
+check "holds a scope's holder relaying to the project's holder" [ "$status" -eq 2 ]
+check "offering it DEPLOY" contains "DEPLOY: a change to ship"
+check "and not the kinds that relay its project" eval '! contains "QUESTION:" && ! contains "RESULT:"'
+send eea-1 "$epsilon" epsilon-host '"QUESTION: can the export run tonight? I recommend yes."'
+check "holds its question too: its project's decisions are the user's, in its tab" [ "$status" -eq 2 ]
+send eea-1 "$epsilon" epsilon-host '"DEPLOY: ship the export fix, merged as https://example.invalid/pr/7"'
+check "lets a scope's holder ask the project's holder to deploy" [ "$status" -eq 0 ]
 check "silently" [ -z "$out" ]
-send eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nDave asks: and the backfill after it?"'
-check "lets its next relay under the same header through" [ "$status" -eq 0 ]
-send eea-1 "$epsilon" "uds:/run/user/1000/cc-socks/$p_eh.sock" '"Relay from #fleet:\nDave asks: and the backfill after it?"'
-check "but holds the same relay sent again" [ "$status" -eq 2 ]
-send eeb-1 "$epsilon" epsilon-host '"Relay from #fleet:\nDave asks: and the backfill after it?"'
+send eea-1 "$epsilon" "uds:/run/user/1000/cc-socks/$p_eh.sock" '"DEPLOY: ship the export fix, merged as https://example.invalid/pr/7"'
+check "but holds the same deploy sent again" [ "$status" -eq 2 ]
+send eea-1 "$epsilon" epsilon-host '"ANSWER: yes, the backfill can wait."'
+check "and lets it answer the project's holder" [ "$status" -eq 0 ]
+send eeb-1 "$epsilon" epsilon-host '"DEPLOY: ship the export fix, merged as https://example.invalid/pr/7"'
 check "another scope's holder keeps its own record" [ "$status" -eq 0 ]
 gate eeh-1 "$epsilon" epsilon-other '"Got it."'
 check "leaves the project's holder alone" [ "$status" -eq 0 ]
@@ -986,11 +1013,11 @@ jq -nc --arg d "$epsilon" '{name: "epsilon-host", dir: $d, spawner: "epsilon-oth
 gate eeh-1 "$epsilon" epsilon-other '"Got it."'
 check "the project's holder recorded as a worker is still never held" [ "$status" -eq 0 ]
 jq -nc --arg d "$epsilon" '{name: "epsilon-fleet-a", dir: $d, spawner: "epsilon-host"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
-send eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nDave asks: is the dashboard back?"'
-check "a scope's holder recorded as a worker keeps its relays free of a kind" [ "$status" -eq 0 ]
+send eea-1 "$epsilon" epsilon-host '"DEPLOY: ship the dashboard fix, merged as https://example.invalid/pr/8"'
+check "a scope's holder recorded as a worker is still judged as a scope's holder" [ "$status" -eq 0 ]
 rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-host.json" "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
 
-# Without ps, a holder cannot be proven live, so nothing is held; a scope's holder needs no ps to be exempt.
+# Without ps, a holder cannot be proven live, so nothing is held, a scope's holder's relay included.
 mkdir -p "$work/nops"
 printf '#!/bin/sh\nexit 1\n' > "$work/nops/ps"
 chmod +x "$work/nops/ps"
@@ -1012,10 +1039,11 @@ claim_status eeo-1 "$p_eo" --scope
 check "--scope without a name is a usage error" [ "$status" -eq 2 ]
 
 out=$(env CLAUDE_PID="$p_eh" "$scripts/waiting.sh")
-check "from the project role, lists an ordinary session" contains "Ordinary epsilon question."
+check "from the project role, leaves out an ordinary session it did not start" eval '! contains "Ordinary epsilon question."'
 check "leaves out every scope's holder" eval '! contains "Fleet A Anderton question." && ! contains "Fleet B Anderton question."'
 check "leaves out the project role's holder" eval '! contains "Host Anderton question."'
 out=$(env CLAUDE_PID="$p_eo" "$scripts/waiting.sh")
+check "from an ordinary session, lists the ordinary session" contains "Ordinary epsilon question."
 check "from an ordinary session, still leaves out every holder" eval '! contains "Anderton question."'
 
 # Two claims by one session for different scopes at once: the one-role check must see the other's record.
@@ -1051,6 +1079,8 @@ session "$p_wh" wh-1 "$watched" holder
 session "$p_wa" wa-1 "$watched" other
 session "$p_wb" wb-1 "$watched" scope-lead
 for id in wh-1 wa-1 wb-1; do transcript "$id" "$recent" asking "Before the question."; done
+# "other" is a worker the repository's Anderton started; each Anderton hears only about the sessions it started.
+jq -nc --arg d "$watched" '{name: "other", dir: $d, spawner: "holder"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/other.json"
 (cd "$watched" && env CLAUDE_PID="$p_wh" CLAUDE_CODE_SESSION_ID=wh-1 "$scripts/claim.sh" >/dev/null)
 (cd "$watched" && env CLAUDE_PID="$p_wb" CLAUDE_CODE_SESSION_ID=wb-1 "$scripts/claim.sh" --scope lead >/dev/null)
 holder_file=$(jq -rn --arg d "$CLAUDE_CONFIG_DIR/anderton" --arg k "$(project_key "$(project_root "$watched")")" '"\($d)/\($k).json"')
@@ -1077,16 +1107,59 @@ registry "$p_wb" idle
 snapshot=$(cat "$CLAUDE_CONFIG_DIR/sessions/$p_wa.json")
 export ANDERTON_WATCH_TICK=0.05
 out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
-check "--blocked lists a session blocked on a person" contains "=== other  $watched  (waiting: permission prompt"
+check "--blocked lists a session blocked on a person" contains "=== other (worker)  $watched  (waiting: permission prompt"
 check "--blocked prints the header alone, not the session's text" eval '! contains "Ship it today?" && ! contains "Before the question."'
 check "--blocked leaves out a session that is not blocked" eval '! contains "scope-lead"'
 watch_run wh-1
 check "the holder's watch exits 2, which wakes it" [ "$status" -eq 2 ]
-check "and names the blocked session" contains "=== other  $watched  (waiting: permission prompt"
+check "and names the blocked session" contains "=== other (worker)  $watched  (waiting: permission prompt"
 check "and says nothing was answered" contains "Nothing has been answered or approved."
 check "and carries none of the session's text" eval '! contains "Ship it today?" && ! contains "Before the question."'
 check "it leaves the blocked session's registry entry as it was" [ "$snapshot" = "$(cat "$CLAUDE_CONFIG_DIR/sessions/$p_wa.json")" ]
 check "it removes its watch file when it exits" [ ! -e "$watcher_file" ]
+
+# A session no Anderton started is a tab the user opened and reads, so no Anderton hears about it.
+spawn; p_wt=$pid
+session "$p_wt" wt-1 "$watched" hand-tab "$(date +%s)000"
+transcript wt-1 "$recent" asking "A question in a tab the user opened."
+registry "$p_wt" waiting "permission prompt"
+out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
+check "the repository's Anderton never lists a blocked session it did not start" eval '! contains "=== hand-tab"'
+check "while still listing its own blocked worker" contains "=== other (worker)  $watched  (waiting: permission prompt"
+out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh")
+check "nor one whose turn ended with a question" eval '! contains "A question in a tab the user opened."'
+out=$(cd "$watched" && env CLAUDE_PID="$p_wt" "$scripts/waiting.sh" --blocked)
+check "a session holding no role still sees it" contains "=== hand-tab  $watched  (waiting: permission prompt"
+
+# The user can ask an Anderton to adopt a session it did not start; it then answers for it as for its own worker.
+adopt() { # adopt <caller pid> <caller session id> <name>: sets $out and $status
+  set +e
+  out=$(cd "$watched" && env CLAUDE_PID="$1" CLAUDE_CODE_SESSION_ID="$2" "$scripts/adopt.sh" "$3" 2>&1)
+  status=$?
+  set -e
+}
+adopt "$p_wt" wt-1 other
+check "a session holding no role cannot adopt one" eval '[ "$status" -eq 1 ] && contains "only a session holding an Anderton role"'
+adopt "$p_wh" wh-1 scope-lead
+check "nor can an Anderton adopt another Anderton" eval '[ "$status" -eq 1 ] && contains "holds an Anderton role of its own"'
+adopt "$p_wh" wh-1 no-such-session
+check "nor a session that is not live" eval '[ "$status" -eq 1 ] && contains "no live session is named no-such-session"'
+adopt "$p_wh" wh-1 hand-tab
+check "the repository's Anderton adopts a session the user opened" [ "$status" -eq 0 ]
+check "recorded as reporting to it" [ "$(jq -r '"\(.spawner) \(.adopted)"' "$CLAUDE_CONFIG_DIR/anderton/workers/hand-tab.json")" = "holder true" ]
+out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
+check "and then hears when it blocks" contains "=== hand-tab (worker)  $watched  (waiting: permission prompt"
+adopt "$p_wb" wb-1 hand-tab
+check "a second Anderton cannot adopt it too" eval '[ "$status" -eq 1 ] && contains "already reports to holder"'
+set +e
+out=$(env CLAUDE_CODE_SESSION_ID=wh-1 CLAUDE_PID="$p_wh" "$scripts/retire.sh" hand-tab 2>&1)
+status=$?
+set -e
+check "retire.sh releases an adopted session" eval '[ "$status" -eq 0 ] && contains "keeps running and no longer reports to holder"'
+check "removing only its record" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/hand-tab.json" ]
+out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
+check "after which no Anderton hears about it" eval '! contains "=== hand-tab"'
+registry "$p_wt" idle
 
 # A block already reported wakes no one: the watch keeps running, and a second copy leaves at once.
 watch_start wh-1
@@ -1200,17 +1273,23 @@ now_ms=$((now_ms + 1000))
 registry "$p_wa" waiting "input needed"
 watch_run wh-1
 check "the reported list stays capped" [ "$(wc -l < "$reported_file")" -le 200 ]
-check "and keeps the newest block" grep -qF "=== other  $watched  (waiting: input needed" "$reported_file"
+check "and keeps the newest block" grep -qF "=== other (worker)  $watched  (waiting: input needed" "$reported_file"
 
-# A holder in a scope is still a session the project's holder hears about.
+# A named project's Anderton is a tab the user answers directly, so no other session hears about it,
+# blocked or not.
 registry "$p_wb" waiting "permission prompt"
-watch_run wh-1
-check "the project's holder hears about a blocked scope holder" contains "=== scope-lead"
-check "and not a session it already heard about" eval '! contains "=== other "'
+watch_start wh-1
+sleep 1
+check "the repository's Anderton is not woken for a blocked project Anderton" eval 'kill -0 "$watcher_pid" 2>/dev/null && [ ! -s "$work/watch.out" ]'
+kill "$watcher_pid" 2>/dev/null || true
+wait "$watcher_pid" 2>/dev/null || true
+rm -f "$watcher_file"
 out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh")
-check "plain waiting.sh shows what a blocked scope holder is asking" contains "=== scope-lead"
+check "plain waiting.sh leaves out a blocked project Anderton" eval '! contains "=== scope-lead"'
+check "while still listing the other session waiting in the repository" contains "=== other (worker)  $watched"
 out=$(cd "$watched" && env CLAUDE_PID="$p_wa" "$scripts/waiting.sh" --blocked)
 check "--blocked never lists the project's holder" eval '! contains "=== holder "'
+check "nor a blocked project Anderton" eval '! contains "=== scope-lead"'
 registry "$p_wb" idle
 
 # A named project's Anderton hears about the workers it started; the repository's hears about them only once it is gone.
@@ -1226,13 +1305,13 @@ check "and never a blocked session the repository's Anderton answers for" eval '
 now_ms=$((now_ms + 1000))
 registry "$p_wa" waiting "input needed"
 watch_run wh-1
-check "the repository's Anderton's watch, woken in that scan" eval '[ "$status" -eq 2 ] && contains "=== other  $watched"'
+check "the repository's Anderton's watch, woken in that scan" eval '[ "$status" -eq 2 ] && contains "=== other (worker)  $watched"'
 check "never names the project's worker" eval '! contains "lead-worker"'
 out=$(cd "$watched" && env CLAUDE_PID="$p_wb" "$scripts/waiting.sh" --blocked)
 check "its list leaves out sessions the repository's Anderton answers for" eval '! contains "=== other "'
 out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
 check "the repository's Anderton no longer hears about that worker" eval '! contains "lead-worker"'
-check "but still hears about every other session" contains "=== other  $watched"
+check "but still hears about every other session" contains "=== other (worker)  $watched"
 scope_file=$(holder_path "$(project_root "$watched")" lead)
 cp "$scope_file" "$work/scope-holder.bak"
 jq -c '.startedAt = 1' "$scope_file" > "$scope_file.tmp" && mv "$scope_file.tmp" "$scope_file"
@@ -1280,12 +1359,15 @@ export ANDERTON_WATCH_TICK=2
 watch_start wh-2
 export ANDERTON_WATCH_TICK=0.05
 (cd "$watched" && env CLAUDE_PID="$p_wa" CLAUDE_CODE_SESSION_ID=wa-1 "$scripts/claim.sh" --take-over >/dev/null)
+spawn; p_tw=$pid; session "$p_tw" tw-1 "$watched" taker-worker "$(date +%s)000"
+transcript tw-1 "$recent" asking "Before the question."
+jq -nc --arg d "$watched" '{name: "taker-worker", dir: $d, spawner: "other"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/taker-worker.json"
 now_ms=$((now_ms + 1000))
-registry "$p_wb" waiting "permission prompt"
+registry "$p_tw" waiting "permission prompt"
 watch_run wa-1
 check "a new holder's watch replaces the old holder's" [ "$status" -eq 2 ]
-check "and reports to the new holder" contains "=== scope-lead"
-registry "$p_wb" idle
+check "and reports to the new holder" contains "=== taker-worker (worker)"
+registry "$p_tw" idle
 (cd "$watched" && env CLAUDE_PID="$p_wh" CLAUDE_CODE_SESSION_ID=wh-2 "$scripts/claim.sh" --take-over >/dev/null)
 unset ANDERTON_WATCH_TICK
 
@@ -1293,8 +1375,13 @@ unset ANDERTON_WATCH_TICK
 export ANDERTON_WATCH_TICK=0.05
 mv "$CLAUDE_CONFIG_DIR/anderton" "$work/anderton.aside"
 jq -c '{pid, startedAt, sessionId}' "$CLAUDE_CONFIG_DIR/sessions/$p_wh.json" > "$CLAUDE_CONFIG_DIR/anderton.json"
-watch_run wh-2
-check "a legacy holder with no anderton directory is still watched" [ "$status" -eq 2 ]
+watch_in wh-2 "$watched" | "$scripts/watch.sh" > "$work/watch.out" 2>&1 &
+watcher_pid=$!
+sleepers="$sleepers $watcher_pid"
+sleep 1
+check "a legacy holder with no anderton directory is still watched" kill -0 "$watcher_pid"
+kill "$watcher_pid" 2>/dev/null || true
+wait "$watcher_pid" 2>/dev/null || true
 rm -rf "$CLAUDE_CONFIG_DIR/anderton" "$CLAUDE_CONFIG_DIR/anderton.json"
 mv "$work/anderton.aside" "$CLAUDE_CONFIG_DIR/anderton"
 unset ANDERTON_WATCH_TICK
@@ -1311,6 +1398,7 @@ spawn dead; p_old=$pid; session "$p_old" rs-1 "$resumed" resumer
 spawn; p_rb=$pid; session "$p_rb" rb-1 "$resumed" asker
 spawn; p_rx=$pid; session "$p_rx" rx-1 "$resumed" bystander
 for id in rb-1 rx-1; do transcript "$id" "$recent" asking "Before the question."; done
+jq -nc --arg d "$resumed" '{name: "asker", dir: $d, spawner: "resumer"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/asker.json"
 (cd "$resumed" && env CLAUDE_PID="$p_old" CLAUDE_CODE_SESSION_ID=rs-1 "$scripts/claim.sh" >/dev/null)
 registry "$p_rb" waiting "permission prompt"
 resume_run() { # resume_run <session id>: sets $out and $status
@@ -1326,7 +1414,7 @@ check "and leaves the record naming that holder" [ "$(jq -r .pid "$resumed_recor
 spawn; p_new=$pid; session "$p_new" rs-1 "$resumed" resumer
 resume_run rs-1
 check "a resumed holder's watch takes its role back" [ "$(jq -r .pid "$resumed_record")" = "$p_new" ]
-check "and wakes it for a session blocked on a person" eval '[ "$status" -eq 2 ] && contains "=== asker  $resumed"'
+check "and wakes it for a session blocked on a person" eval '[ "$status" -eq 2 ] && contains "=== asker (worker)  $resumed"'
 
 spawn; p_dup=$pid; session "$p_dup" rs-1 "$resumed" resumer
 set +e
@@ -1342,7 +1430,7 @@ now_ms=$((now_ms + 1000))
 registry "$p_rb" waiting "input needed"
 resume_run rs-1
 check "a restarted holder's watch takes its role back" [ "$(jq -r .startedAt "$resumed_record")" = $((now_ms + 4000)) ]
-check "and wakes it" eval '[ "$status" -eq 2 ] && contains "=== asker  $resumed"'
+check "and wakes it" eval '[ "$status" -eq 2 ] && contains "=== asker (worker)  $resumed"'
 
 session "$p_new" rs-2 "$resumed" resumer $((now_ms + 4000))
 now_ms=$((now_ms + 1000))

@@ -142,10 +142,10 @@ You are a worker the Anderton session \"$me\" started for the task above, in $di
 
 write_record() {
   jq -nc --arg name "$name" --arg launcher "$launcher" --arg id "$id" --arg tab "$tab" --arg dir "$dir" --arg root "$root" \
-    --arg socket "$socket" --arg server "$server" --arg base "$base" --arg spawner "$me" --argjson worktree "$worktree" \
+    --arg socket "$socket" --arg server "$server" --arg base "$base" --arg spawner "$me" --arg label "$label" --argjson worktree "$worktree" \
     --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{name: $name, launcher: $launcher, id: $id, tab: $tab, socket: $socket, server: $server, dir: $dir, root: $root,
-      base: $base, worktree: $worktree, spawner: $spawner, startedAt: $at}' >| "$record"
+      base: $base, worktree: $worktree, spawner: $spawner, label: $label, startedAt: $at}' >| "$record"
   reserved=""
 }
 
@@ -156,6 +156,16 @@ failed() {
   exit 1
 }
 
+# A named project's Anderton puts its own name on its workers' tabs, so the user can tell whose they are.
+label=$name
+while IFS= read -r r; do
+  if [ -n "$r" ] && [ -n "$(jq -r '.scope // empty' "$r" 2>/dev/null)" ] && is_holder "$sessions/$pid.json" "$r"; then
+    label="$me/$name"
+  fi
+done <<EOF
+$(project_holders "$root")
+EOF
+
 set -- -n "$name" --permission-mode "$mode" --effort "$effort" --model "${model:-opus}"
 # A tab or window id is unique only within its server, so the record keeps which server it was opened in.
 id="" tab="" socket="" server=""
@@ -164,10 +174,10 @@ if [ "$launcher" = herdr ]; then
   # A tab's or window's process takes its environment from its multiplexer, not from this script: a non-default
   # Claude home is passed on, or the worker would register where neither the caller nor these scripts look.
   if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-    out=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$dir" --label "$name" --no-focus \
+    out=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$dir" --label "$label" --no-focus \
       --env "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR" 2>&1) || failed "Could not open a herdr tab: $out"
   else
-    out=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$dir" --label "$name" --no-focus 2>&1) ||
+    out=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$dir" --label "$label" --no-focus 2>&1) ||
       failed "Could not open a herdr tab: $out"
   fi
   tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null || true)
@@ -180,7 +190,7 @@ if [ "$launcher" = herdr ]; then
     ! out=$(herdr agent prompt "$name" "$brief" 2>&1); then
     screen=$(herdr agent read "$name" 2>/dev/null | tail -n 20 || true)
     herdr tab close "$tab" >/dev/null 2>&1 || true
-    if ! worker_gone herdr "$socket" "$tab" "$name"; then
+    if ! worker_gone herdr "$socket" "$tab" "$name" "" "$label"; then
       echo "Claude Code in herdr tab '$name' did not take the brief: $out
 $screen
 It is not confirmed stopped, so $dir and its record are kept: close tab $tab, then run retire.sh $name." >&2
@@ -190,14 +200,14 @@ It is not confirmed stopped, so $dir and its record are kept: close tab $tab, th
 $screen
 Rerun with --bg to start it in the background instead."
   fi
-  where="herdr tab '$name' ($tab)"
+  where="herdr tab '$label' ($tab)"
 elif [ "$launcher" = tmux ]; then
   socket="${TMUX%%,*}"
   server=$(printf '%s' "$TMUX" | cut -d, -f2)
   # Given as separate arguments, the window's command runs without a shell, so the brief needs no quoting.
   set -- claude "$@" "$brief"
   [ -z "${CLAUDE_CONFIG_DIR:-}" ] || set -- -e "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR" "$@"
-  out=$(tmux new-window -d -P -F '#{window_id}' -n "$name" -c "$dir" "$@" 2>&1) ||
+  out=$(tmux new-window -d -P -F '#{window_id}' -n "$label" -c "$dir" "$@" 2>&1) ||
     failed "Could not open a tmux window: $out"
   tab=$(printf '%s\n' "$out" | grep -E '^@[0-9]+$' | tail -n 1 || true)
   [ -n "$tab" ] || failed "tmux opened no window: $out"
@@ -209,13 +219,13 @@ elif [ "$launcher" = tmux ]; then
       listed=1
       break
     fi
-    if [ "$(place_state tmux "$socket" "$tab" "$name" "$server")" = absent ]; then
+    if [ "$(place_state tmux "$socket" "$tab" "$label" "$server")" = absent ]; then
       failed "Claude Code exited at once in tmux window '$name'."
     fi
     tries=$((tries - 1))
     sleep 0.5
   done
-  where="tmux window '$name' ($tab)"
+  where="tmux window '$label' ($tab)"
   [ -n "$listed" ] || echo "Worker '$name' has not registered yet: it may be waiting at a startup prompt in its window." >&2
 else
   out=$(cd "$dir" && claude --bg "$@" "$brief" 2>&1) || failed "$out"

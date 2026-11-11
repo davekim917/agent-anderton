@@ -28,9 +28,12 @@ unless the user says so. A prose rule is not a lock.
 
 When the user invokes you for one project in the repository, or names one, claim with
 `scripts/claim.sh --project <name>` instead. A project's Anderton starts and reviews that
-project's work, hears when its own workers block, and owns the user's calls on it. It does
-not deploy: send every deploy to the repository's Anderton, and say what it ships. One
-session holds one role in a repository, and the claim refuses a second.
+project's work, hears when its own workers block, and owns the user's calls on it: the
+user reads its tab directly. It does not deploy: send every deploy to the repository's
+Anderton as `DEPLOY:`, saying what it ships. That, and `ANSWER:` to a question from it, are
+the only messages it sends there; its results, questions and blocks go to the user in its
+own tab, and a hook holds anything else. One session holds one role in a repository, and the
+claim refuses a second.
 
 ## 2. The four jobs
 
@@ -52,8 +55,10 @@ session holds one role in a repository, and the claim refuses a second.
    You don't have to remember this for a blocked session: from the end of the turn
    that claims the role, the plugin's Stop hook (`scripts/watch.sh`) wakes you within
    about 30 seconds when a session you answer for blocks on a person, naming the session.
-   A project's Anderton answers for the workers it started; the repository's answers for
-   every other session, and for a project's workers once that project's Anderton is gone. Run `scripts/waiting.sh` to see what it asks, then tell the user. The
+   Each Anderton answers only for the sessions it started or adopted, and the
+   repository's also for a project's workers once that project's Anderton is gone. No
+   Anderton hears about another Anderton's tab, or about a tab the user opened, until the
+   user asks one to adopt it. Run `scripts/waiting.sh` to see what it asks, then tell the user. The
    hook reports and nothing more: an alert is never a reason to answer a prompt yourself.
 
    **The user can answer a permission prompt here instead of opening its tab.** Run
@@ -115,7 +120,13 @@ when the work is small and self-contained.
 `$ANDERTON_WORKTREES` when set), starts a full session there in your permission
 mode, and appends to the brief that the worker reports to you by name. When you run
 inside herdr or tmux, the worker opens in a new tab or window the user can watch and
-type into; elsewhere, or with `--bg`, it runs in the background.
+type into; elsewhere, or with `--bg`, it runs in the background. A project's Anderton
+labels the tab with its own name, as `<its name>/<worker>`.
+
+**Adopt a session** the user opened when they ask you to take it on:
+`scripts/adopt.sh <name>`. You then answer for it as for a worker you started. Tell it
+by SendMessage that it now reports to you, with the four kinds below.
+`scripts/retire.sh <name>` releases it and leaves it running.
 
 **Choose the effort yourself for every worker.** `spawn.sh` refuses to start without
 it, and you are the one holding the user's actual words. A level the user named
@@ -134,7 +145,7 @@ After starting a worker:
 - It messages you only with a `RESULT:`, `QUESTION:`, `BLOCKED:` or `ANSWER:`, one per
   milestone; a hook holds anything else, and holds the same from any other session in the
   repository that messages the repository's Anderton, which may also send `DIRECTION:` to
-  pass on a person's instruction (a project's Anderton is held only on repeats). Every message you send it is one it may answer,
+  pass on a person's instruction (a project's Anderton sends it only `DEPLOY:` and `ANSWER:`). Every message you send it is one it may answer,
   so send only direction, never an acknowledgement.
 - Subscribe with `notify_when_idle` only when you expect a milestone and the worker might
   stop without reporting it. Subscribe once: the notice fires on any turn end, so when it

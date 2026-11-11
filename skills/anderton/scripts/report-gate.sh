@@ -6,8 +6,9 @@
 # the message, so a send that failed or was denied is never counted as sent.
 # It judges a message from a worker spawn.sh started to the session that started it, and a message from any session
 # in a repository to that repository's live Anderton. A worker has four kinds; any other session also has DIRECTION:, for
-# passing on a person's direction. A named project's Anderton passes along what it has gathered, so its messages are
-# held only when they repeat. The repository's Anderton is never held.
+# passing on a person's direction. A named project's Anderton is a tab the user reads directly, so it reaches the
+# repository's Anderton only to ship something (DEPLOY:) or to answer it (ANSWER:). The repository's Anderton is never
+# held.
 # It only ever blocks (exit 2, the reason on stderr) and never prints a decision, so it cannot approve anything. The
 # body runs in a subshell that reports a block as 10, so a crash, which bash may report as 2, is read as allow. On any
 # failure it exits 0 and prints nothing.
@@ -55,7 +56,7 @@ EOF
   [ -z "$home_dir" ] || cwd=$home_dir
   [ -n "$cwd" ] || exit 0
 
-  # Who the sender is comes first: the repository's Anderton is never held, and a project's only on repeats.
+  # Who the sender is comes first: the repository's Anderton is never held.
   root=$(project_root "$cwd")
   project=$(holder_record "$root")
   if [ -n "$project" ] && names_sender "$project"; then exit 0; fi
@@ -86,12 +87,24 @@ EOF
   fi
   [ -n "$recipient" ] || exit 0
 
-  local kind=""
-  if [ -z "$scope" ]; then
-    local kinds="RESULT|QUESTION|BLOCKED|ANSWER"
-    [ -n "$worker" ] || kinds="$kinds|DIRECTION"
-    kind=$(printf '%s' "$first" | sed -nE -e 's/^[[:space:]*_#>`-]*//' -e "s/^($kinds):.*/\\1/p") || exit 0
-    if [ -z "$kind" ]; then
+  local kind="" kinds="RESULT|QUESTION|BLOCKED|ANSWER"
+  if [ -n "$scope" ]; then
+    kinds="DEPLOY|ANSWER"
+  elif [ -z "$worker" ]; then
+    kinds="$kinds|DIRECTION"
+  fi
+  kind=$(printf '%s' "$first" | sed -nE -e 's/^[[:space:]*_#>`-]*//' -e "s/^($kinds):.*/\\1/p") || exit 0
+  if [ -z "$kind" ]; then
+    if [ -n "$scope" ]; then
+      {
+        echo "Not sent. A project's Anderton messages \"$recipient\" only to ship something, with the kind as the first word:"
+        echo "  DEPLOY: a change to ship (a merged PR to deploy, a restart, a host change, or a fix to shared code for a"
+        echo "    host worker to build and ship), with its link"
+        echo "  ANSWER: a reply to something \"$recipient\" asked you"
+        echo "Your project's results, questions and blocks, and your workers' reports, stay between you and the user, who"
+        echo "reads your tab. Anything for another project goes to that project's Anderton."
+      } >&2
+    else
       {
         echo "Not sent. Message \"$recipient\" only when it changes what they do, with the kind as the first word:"
         echo "  RESULT: a milestone done (PR ready, task finished), with its link and what you verified"
@@ -102,8 +115,8 @@ EOF
         echo "Acknowledgements, \"still waiting\", restated instructions and FYIs that change nothing are not sent: each one"
         echo "wakes \"$recipient\" for nothing. If none of these fits, keep working and report at the next milestone."
       } >&2
-      exit 10
     fi
+    exit 10
   fi
 
   # Two answers can be the same short word to different questions.

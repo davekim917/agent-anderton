@@ -210,13 +210,13 @@ place_state() {
 # True once worker $4's tab or window ($1 herdr|tmux, socket $2, id $3, tmux server pid $5) is absent from its
 # server, waiting up to 5 seconds, and no session named $4 is listed. A worker held at a startup prompt never
 # registers, so the session list alone would call it gone while its tab or window still runs.
-worker_gone() {
-  local _
+worker_gone() { # worker_gone <launcher> <socket> <tab> <name> [server] [label]: the label defaults to the name
+  local _ label="${6:-$4}"
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if [ "$(place_state "$@")" = absent ]; then break; fi
+    if [ "$(place_state "$1" "$2" "$3" "$label" "${5:-}")" = absent ]; then break; fi
     sleep 0.5
   done
-  [ "$(place_state "$@")" = absent ] && session_gone "$4"
+  [ "$(place_state "$1" "$2" "$3" "$label" "${5:-}")" = absent ] && session_gone "$4"
 }
 
 # True when the session named $1, running in directory $2, is a worker spawn.sh started: the worker record of
