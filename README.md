@@ -195,7 +195,8 @@ project's: each is a tab the user reads directly. Run by an Anderton, it lists o
 role answers for: the workers it started or adopted, and, for the repository's, a project's workers
 once that project's Anderton is gone. A session nobody started is the user's own tab, which no
 Anderton hears about until the user asks one to adopt it. A worker is matched to the session name it was started
-from, so renaming a project's Anderton also hands its workers to the repository's. It lists a
+from, or, once renamed, to the worktree spawn.sh made for it; renaming a project's Anderton hands its
+workers to the repository's. It lists a
 session when:
 
 - the turn ended with Claude's text;
@@ -250,9 +251,9 @@ branch has. Gitignored files don't count as changes.
 **`adopt.sh <name>`** makes the calling Anderton answer for a live session the user opened in its
 repository, as for a worker it started: it writes a worker record naming the caller, so the session's
 messages to it are judged as a worker's and its blocks wake the caller. The record keeps the session's
-id and pid, and the session counts as adopted only while one of them still matches (`/clear` keeps the
-pid, a resume keeps the id), so a later session that reuses the name gains nothing; renaming it, or a
-`/clear` followed by a resume, releases it. It refuses a caller holding no
+id, pid and start time, and the session counts as adopted only while its id matches (a resume and
+`/restart` keep it) or its pid and start time do (`/clear` keeps both), so a later session that reuses
+the name or the pid gains nothing; renaming it, or a `/clear` followed by a resume, releases it. It refuses a caller holding no
 role, another Anderton, and a session another Anderton already answers for. The Anderton then tells
 the session by SendMessage that it reports there. `retire.sh <name>` releases an adopted session
 without stopping it.

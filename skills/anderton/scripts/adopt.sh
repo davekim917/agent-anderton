@@ -56,5 +56,5 @@ fi
 jq -nc --arg name "$name" --arg dir "$cwd" --arg root "$root" --arg spawner "$me" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --slurpfile reg "$found" \
   '{name: $name, launcher: "adopted", dir: $dir, root: $root, worktree: false, adopted: true, spawner: $spawner,
-    sessionId: $reg[0].sessionId, pid: $reg[0].pid, startedAt: $at}' >| "$record"
+    sessionId: $reg[0].sessionId, pid: $reg[0].pid, sessionStartedAt: $reg[0].startedAt, startedAt: $at}' >| "$record"
 echo "Adopted '$name': it now reports to $me, and $me hears when it blocks. Tell it so by SendMessage."

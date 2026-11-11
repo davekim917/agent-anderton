@@ -42,10 +42,11 @@ if [ -n "$caller" ]; then
 $records
 EOF
 fi
-answering_role() { # answering_role <name> <cwd> [session id] [pid]: the record of the role that answers for it, if any
-  local spawner r hp
-  is_worker "$1" "$2" "${3:-}" "${4:-}" || return 0
-  spawner=$(jq -r '.spawner // empty' "$holders/workers/$1.json" 2>/dev/null || true)
+answering_role() { # answering_role <name> <cwd> [session id] [pid] [start]: the record of the role that answers for it
+  local spawner r hp w
+  w=$(worker_record "$@")
+  [ -n "$w" ] || return 0
+  spawner=$(jq -r '.spawner // empty' "$w" 2>/dev/null || true)
   while IFS= read -r r; do
     if [ -z "$r" ] || [ "$r" = "$project" ] || [ -z "$spawner" ]; then continue; fi
     hp=$(jq -r '.pid // empty' "$r" 2>/dev/null || true)
@@ -68,7 +69,7 @@ $records
 EOF
   return 1
 }
-answers_for() { # answers_for <name> <cwd> [session id] [pid]: true when the caller's role answers for that session
+answers_for() { # answers_for <name> <cwd> [session id] [pid] [start]: true when the caller's role answers for that session
   [ -z "$mine" ] || [ "$(answering_role "$@")" = "$mine" ]
 }
 
@@ -91,7 +92,7 @@ EOF
     continue
   fi
   tag=""
-  if is_worker "$name" "$cwd" "$sid" "$pid"; then
+  if is_worker "$name" "$cwd" "$sid" "$pid" "$start"; then
     [ "$status" = waiting ] || continue
     tag=" (worker)"
   fi
@@ -101,7 +102,7 @@ EOF
   fi
   registered_alive "$pid" "$start" || continue
   judged="$judged $sid"
-  answers_for "$name" "$cwd" "$sid" "$pid" || continue
+  answers_for "$name" "$cwd" "$sid" "$pid" "$start" || continue
 
   transcript=""
   for t in "$home"/projects/*/"$sid".jsonl; do

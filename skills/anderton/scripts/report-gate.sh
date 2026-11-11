@@ -46,7 +46,7 @@ EOF
   # A pure notify_when_idle subscription and the structured protocol replies carry no text to judge.
   if [ -z "$sid" ] || [ -z "$to" ] || [ -z "$first" ]; then exit 0; fi
 
-  local pid reg name home_dir root project r scope="" hpid hname recipient="" rkey="" worker="" spawner
+  local pid reg name home_dir root project r scope="" hpid hname recipient="" rkey="" worker="" spawner wrec to_repo=""
   pid=$(sender_pid)
   [ -n "$pid" ] || exit 0
   reg="$sessions/$pid.json"
@@ -65,7 +65,8 @@ EOF
   done <<EOF
 $(project_holders "$root")
 EOF
-  if is_worker "$name" "$cwd" "$sid" "$pid"; then worker=1; fi
+  wrec=$(worker_record "$name" "$cwd" "$sid" "$pid" "$(jq -r '.startedAt // empty | floor' "$reg" 2>/dev/null)")
+  if [ -n "$wrec" ]; then worker=1; fi
 
   # The project's holder, only while it is the live process its record names; when that is uncertain, allow.
   if [ -n "$project" ]; then
@@ -75,11 +76,12 @@ EOF
       if addresses "$hpid" "$hname"; then
         recipient=${hname:-the Anderton}
         rkey="pid:$hpid"
+        to_repo=1
       fi
     fi
   fi
   if [ -z "$recipient" ] && [ -n "$worker" ]; then
-    spawner=$(jq -r '.spawner // empty' "$holders/workers/$name.json" 2>/dev/null)
+    spawner=$(jq -r '.spawner // empty' "$wrec" 2>/dev/null)
     if [ -n "$spawner" ] && addresses "" "$spawner"; then
       recipient=$spawner
       rkey="name:$spawner"
@@ -87,15 +89,17 @@ EOF
   fi
   [ -n "$recipient" ] || exit 0
 
+  # A project's Anderton is held to DEPLOY: and ANSWER: only toward the repository's Anderton; reporting to the session
+  # that started it, it is a worker like any other.
   local kind="" kinds="RESULT|QUESTION|BLOCKED|ANSWER"
-  if [ -n "$scope" ]; then
+  if [ -n "$scope" ] && [ -n "$to_repo" ]; then
     kinds="DEPLOY|ANSWER"
   elif [ -z "$worker" ]; then
     kinds="$kinds|DIRECTION"
   fi
   kind=$(printf '%s' "$first" | sed -nE -e 's/^[[:space:]*_#>`-]*//' -e "s/^($kinds):.*/\\1/p") || exit 0
   if [ -z "$kind" ]; then
-    if [ -n "$scope" ]; then
+    if [ -n "$scope" ] && [ -n "$to_repo" ]; then
       {
         echo "Not sent. A project's Anderton messages \"$recipient\" only to ship something, with the kind as the first word:"
         echo "  DEPLOY: a change to ship (a merged PR to deploy, a restart, a host change, or a fix to shared code for a"

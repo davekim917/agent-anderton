@@ -1020,6 +1020,11 @@ check "the project's holder recorded as a worker is still never held" [ "$status
 jq -nc --arg d "$epsilon" '{name: "epsilon-fleet-a", dir: $d, spawner: "epsilon-host"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
 send eea-1 "$epsilon" epsilon-host '"DEPLOY: ship the dashboard fix, merged as https://example.invalid/pr/8"'
 check "a scope's holder recorded as a worker is still judged as a scope's holder" [ "$status" -eq 0 ]
+jq -nc --arg d "$epsilon" '{name: "epsilon-fleet-a", dir: $d, spawner: "epsilon-other"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
+send eea-1 "$epsilon" epsilon-other '"QUESTION: keep the export schedule? I recommend yes."'
+check "reporting to the session that started it, it has a worker's kinds" [ "$status" -eq 0 ]
+gate eea-1 "$epsilon" epsilon-other '"Got it."'
+check "and is held like a worker" [ "$status" -eq 2 ]
 rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-host.json" "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
 
 # Without ps, a holder cannot be proven live, so nothing is held, a scope's holder's relay included.
@@ -1161,6 +1166,15 @@ jq -c '.sessionId = "wt-2"' "$CLAUDE_CONFIG_DIR/sessions/$p_wt.json" > "$work/re
 transcript wt-2 "$recent" asking "A question after /clear."
 out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
 check "an adopted session is still its Anderton's after /clear" contains "=== hand-tab (worker)  $watched"
+wt_reg="$CLAUDE_CONFIG_DIR/sessions/$p_wt.json"
+cp "$wt_reg" "$work/wt-reg.bak"
+jq -c '.sessionId = "wt-reuse" | .startedAt = (.startedAt + 5000)' "$work/wt-reg.bak" > "$wt_reg"
+transcript wt-reuse "$recent" asking "A later process given the same pid."
+out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
+check "a later process given the adopted session's pid is not adopted" eval '! contains "=== hand-tab"'
+out=$(cd "$watched" && env CLAUDE_PID="$p_wa" "$scripts/waiting.sh" --blocked)
+check "while it is still a live session" contains "=== hand-tab  $watched"
+mv "$work/wt-reg.bak" "$wt_reg"
 registry "$p_wt" idle
 spawn; p_im=$pid; session "$p_im" im-1 "$watched" hand-tab "$(date +%s)000"
 transcript im-1 "$recent" asking "A new session reusing the name."
@@ -1486,6 +1500,17 @@ out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
 check "but not once it holds an Anderton role of its own" eval '! contains "bg-lead"'
 rm -f "$(holder_path "$(project_root "$watched")" bg-proj)" "$CLAUDE_CONFIG_DIR/anderton/workers/bg-lead.json"
 echo '[]' > "$FAKE_AGENTS"
+
+# A worker renamed since it started is still found by its worktree, which is its own.
+mkdir -p "$watched/wt-renamed"
+jq -nc --arg d "$watched/wt-renamed" '{name: "first-name", dir: $d, spawner: "holder", worktree: true}' > "$CLAUDE_CONFIG_DIR/anderton/workers/first-name.json"
+spawn; p_rn=$pid; session "$p_rn" rn-1 "$watched/wt-renamed" second-name "$(date +%s)000"
+transcript rn-1 "$recent" asking "A renamed worker's question."
+registry "$p_rn" waiting "permission prompt"
+out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
+check "a renamed worker still reaches the Anderton that started it" contains "=== second-name (worker)"
+registry "$p_rn" idle
+rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/first-name.json"
 
 # The You Should Know plugin's store is a private format, read only when it has the shape expected.
 store="$CLAUDE_CONFIG_DIR/plugins/store"
