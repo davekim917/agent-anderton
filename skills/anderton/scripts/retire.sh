@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Stop a worker spawn.sh started and remove the worktree it made for it. A worktree with uncommitted work, or
+# Stop a worker spawn.sh started and remove the worktree it made for it, or release a session adopt.sh adopted, which
+# keeps running and stops reporting to its Anderton. A worktree with uncommitted work, or
 # commits since it started that no remote branch has, is kept and the worker stays recorded: push or discard
 # that work, then rerun.
 # usage: retire.sh <name>   Exit 0: retired. Exit 3: stopped, worktree kept.
@@ -26,6 +27,15 @@ launcher=$(jq -r '.launcher // "bg"' "$record")
 tab=$(jq -r '.tab // empty' "$record")
 socket=$(jq -r '.socket // empty' "$record")
 server=$(jq -r '.server // empty' "$record")
+label=$(jq -r '.label // empty' "$record")
+label=${label:-$name}
+
+if [ "$(jq -r '.adopted // false' "$record")" = true ]; then
+  spawner=$(jq -r '.spawner // "its Anderton"' "$record")
+  rm -f "$record"
+  echo "Released '$name': it keeps running and no longer reports to $spawner. Tell it so by SendMessage."
+  exit 0
+fi
 
 # A worker that may still be running keeps its worktree: stop it, or confirm Claude Code no longer lists it.
 if ! command -v claude >/dev/null 2>&1; then
@@ -35,13 +45,13 @@ fi
 if [ "$launcher" != bg ]; then
   # A session in a herdr tab or tmux window has no id for claude stop; closing its tab or window ends it. Only
   # a tab or window place_state recognises as the worker's is closed, in the server it was opened in.
-  if [ "$(place_state "$launcher" "$socket" "$tab" "$name" "$server")" = present ]; then
+  if [ "$(place_state "$launcher" "$socket" "$tab" "$label" "$server")" = present ]; then
     case $launcher in
       herdr) HERDR_SOCKET_PATH="$socket" herdr tab close "$tab" >/dev/null 2>&1 || true ;;
       tmux) tmux -S "$socket" kill-window -t "$tab" >/dev/null 2>&1 || true ;;
     esac
   fi
-  if ! worker_gone "$launcher" "$socket" "$tab" "$name" "$server"; then
+  if ! worker_gone "$launcher" "$socket" "$tab" "$name" "$server" "$label"; then
     echo "Could not confirm '$name' stopped ($launcher ${tab:-(no id recorded)} in ${socket:-(no server recorded)}); kept its worktree and record." >&2
     exit 1
   fi

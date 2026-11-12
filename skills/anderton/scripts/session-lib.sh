@@ -210,22 +210,40 @@ place_state() {
 # True once worker $4's tab or window ($1 herdr|tmux, socket $2, id $3, tmux server pid $5) is absent from its
 # server, waiting up to 5 seconds, and no session named $4 is listed. A worker held at a startup prompt never
 # registers, so the session list alone would call it gone while its tab or window still runs.
-worker_gone() {
-  local _
+worker_gone() { # worker_gone <launcher> <socket> <tab> <name> [server] [label]: the label defaults to the name
+  local _ label="${6:-$4}"
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if [ "$(place_state "$@")" = absent ]; then break; fi
+    if [ "$(place_state "$1" "$2" "$3" "$label" "${5:-}")" = absent ]; then break; fi
     sleep 0.5
   done
-  [ "$(place_state "$@")" = absent ] && session_gone "$4"
+  [ "$(place_state "$1" "$2" "$3" "$label" "${5:-}")" = absent ] && session_gone "$4"
 }
 
-# True when the session named $1, running in directory $2, is a worker spawn.sh started: the worker record of
-# that name exists and the session runs in its worktree. A worker reports to its spawner, not the user.
+# The worker record of the session named $1, running in directory $2 (session id $3, pid $4, registry start $5),
+# or nothing: the record spawn.sh or adopt.sh wrote under that name. A worker is matched by the name it was started
+# under, so renaming it releases it, like a tab the user opened. An adopted session shares its directory with the
+# user's other sessions, so it must also be the session adopted: its session id as recorded (a resume and /restart
+# keep it), or its pid with the same start (/clear keeps both), never a later process given the same pid.
+worker_record() {
+  local f dir
+  f="$holders/workers/$1.json"
+  if [ -n "$1" ] && [ -f "$f" ]; then
+    dir=$(jq -r '.dir // empty' "$f" 2>/dev/null || true)
+    case $2 in
+      "$dir" | "$dir"/*)
+        if [ -n "$dir" ] && { [ "$(jq -r '.adopted // false' "$f" 2>/dev/null || true)" != true ] ||
+          jq -e --arg sid "${3:-}" --arg pid "${4:-}" --arg start "${5:-}" '($sid != "" and .sessionId == $sid)
+            or ($pid != "" and $start != "" and (.pid | tostring) == $pid
+                and ((.sessionStartedAt // "") | tostring | split(".")[0]) == $start)' "$f" >/dev/null 2>&1; }; then
+          printf '%s\n' "$f"
+          return
+        fi
+        ;;
+    esac
+  fi
+}
+
+# True when that session is a worker: it reports to its spawner, not the user.
 is_worker() {
-  local f="$holders/workers/$1.json" dir
-  if [ -z "$1" ] || [ ! -f "$f" ]; then return 1; fi
-  dir=$(jq -r '.dir // empty' "$f" 2>/dev/null || true)
-  [ -n "$dir" ] || return 1
-  case $2 in "$dir" | "$dir"/*) return 0 ;; esac
-  return 1
+  [ -n "$(worker_record "$@")" ]
 }

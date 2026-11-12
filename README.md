@@ -191,10 +191,12 @@ held it, and never from a live holder; any other session still claims it explici
 
 **`waiting.sh`** lists the live sessions in the caller's repository (`--all`: every repository) that
 wait on a person, leaving out every Anderton in the caller's repository, the repository's and each
-project's. Run by an Anderton, it lists only the sessions that role answers for: a project's
-Anderton, the workers it started; the repository's, every other session, and a project's workers
-once that project's Anderton is gone. A worker is matched to the session name it was started
-from, so renaming a project's Anderton also hands its workers to the repository's. It lists a
+project's: each is a tab the user reads directly. Run by an Anderton, it lists only the sessions that
+role answers for: the workers it started or adopted, and, for the repository's, a project's workers
+once that project's Anderton is gone. A session nobody started is the user's own tab, which no
+Anderton hears about until the user asks one to adopt it. A worker is matched to the session name it was started
+from, so renaming a worker releases it like a tab the user opened, and renaming a project's Anderton
+hands its workers to the repository's. It lists a
 session when:
 
 - the turn ended with Claude's text;
@@ -216,11 +218,12 @@ starts a worker: a full Claude Code session named `<name>`, in a new git worktre
 `origin/HEAD`, else `origin/main`, `origin/master` or `HEAD`.
 
 - Inside herdr (`HERDR_ENV=1`), the worker opens in a new tab of the caller's workspace, labelled
-  `<name>` (`herdr tab create`, `herdr agent start --kind claude`, then `herdr agent prompt` with
+  `<name>`, or `<caller>/<name>` when the caller is a named project's Anderton, its name folded to
+  lowercase letters, digits and hyphens (`herdr tab create`, `herdr agent start --kind claude`, then `herdr agent prompt` with
   the brief). If Claude Code stops at a startup prompt there, the spawn shows the screen, closes the
   tab and fails, unless the session cannot be confirmed stopped, when it keeps the worktree and
   record for `retire.sh`.
-- Inside tmux (`$TMUX`, and not herdr), it opens in a new detached window named `<name>`. The spawn
+- Inside tmux (`$TMUX`, and not herdr), it opens in a new detached window with that same label. The spawn
   waits up to `$ANDERTON_START_WAIT` seconds (default 30) for the session to register: a window
   that closes first fails the spawn, and one still open is kept with a note that it may wait at a
   startup prompt.
@@ -239,11 +242,21 @@ starts a worker: a full Claude Code session named `<name>`, in a new git worktre
   it was opened in.
 
 **`retire.sh <name>`** stops that worker, then removes its worktree and record. A herdr tab or tmux
-window is closed only when it still carries the worker's name in the server recorded at spawn, and
+window is closed only when it still carries the label it was opened with, in the server recorded at spawn, and
 the worker counts as stopped only when that tab or window is gone and its name has left
 `claude agents`; a background worker is stopped with `claude stop`. It exits 3 and keeps the
 worktree when the worktree has uncommitted changes, or commits since it started that no remote
 branch has. Gitignored files don't count as changes.
+
+**`adopt.sh <name>`** makes the calling Anderton answer for a live session the user opened in its
+repository, as for a worker it started: it writes a worker record naming the caller, so the session's
+messages to it are judged as a worker's and its blocks wake the caller. The record keeps the session's
+id, pid and start time, and the session counts as adopted only while its id matches (a resume and
+`/restart` keep it) or its pid and start time do (`/clear` keeps both), so a later session that reuses
+the name or the pid gains nothing; renaming it, or a `/clear` followed by a resume, releases it. It refuses a caller holding no
+role, another Anderton, and a session another Anderton already answers for. The Anderton then tells
+the session by SendMessage that it reports there. `retire.sh <name>` releases an adopted session
+without stopping it.
 
 **`watch.sh`** is a background `Stop` hook. It runs in every session and exits
 at once, in about 50 ms, in any session that holds no Anderton role. In an Anderton, the
@@ -260,11 +273,12 @@ message: a worker's to the session `spawn.sh` started it from, and any session's
 named in the claim file, checked to be the live process the record names, and addressed by name, by name
 with a listing ref, or by socket. It holds a message whose first line doesn't open with `RESULT:`,
 `QUESTION:`, `BLOCKED:` or `ANSWER:` (any session other than a worker also has `DIRECTION:`, for passing
-on a person's instruction), and one that repeats, word for word, the sender's last message to that
+on a person's instruction, and a named project's Anderton has only `DEPLOY:`, `LOOKUP:` and `ANSWER:`), and one that repeats, word for word, the sender's last message to that
 recipient within 30 minutes (`ANDERTON_REPEAT_WINDOW`, in seconds); an `ANSWER:` is never a repeat,
 since two questions can have the same short answer. A message counts as sent only once the
-send succeeds, so a failed or denied send can be retried. A project's Anderton passes along what it has
-gathered, so its messages to the repository's Anderton are held only when they repeat. The repository's
+send succeeds, so a failed or denied send can be retried. A named project's Anderton answers to the user in its own tab, so it
+messages the repository's Anderton only to ship something, to ask a fact about the host that only it
+can read, or to answer it. The repository's
 Anderton, messages to anyone else, and sessions in other repositories pass untouched, and the repository
 is the one the session started in. It only
 blocks: it prints no decision, so it can't approve a call, and it allows whenever it can't tell, a crash
