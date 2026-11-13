@@ -895,6 +895,33 @@ check "which retire.sh then stops" [ "$status" -eq 0 ]
 # The sections above take over a minute; sessions from here on start now, or their start time would
 # drift past registered_alive's window.
 now_ms="$(date +%s)000"
+# /restart keeps the process but rewrites its registry entry with a new startedAt; procStart still names the process.
+# claude_proc_start <pid>: the procStart Claude Code records, /proc/<pid>/stat field 22 on Linux, else ps lstart in UTC.
+claude_proc_start() {
+  if [ -r "/proc/$1/stat" ]; then cut -d' ' -f22 "/proc/$1/stat"
+  else LC_ALL=C TZ=UTC ps -o lstart= -p "$1" | sed 's/^ *//; s/ *$//'; fi
+}
+with_proc_start() { # with_proc_start <pid> <procStart>
+  local f="$CLAUDE_CONFIG_DIR/sessions/$1.json"
+  jq -c --arg ps "$2" '.procStart = $ps' "$f" > "$f.tmp"
+  mv "$f.tmp" "$f"
+}
+restarted_ms="$(( $(date +%s) + 172800 ))000"
+mkdir "$work/restarted"
+rp="$work/restarted"
+spawn; p_zr=$pid; session "$p_zr" zzr-1 "$rp" zeta-restarted "$restarted_ms"
+with_proc_start "$p_zr" "$(claude_proc_start "$p_zr")"
+spawn; p_zo=$pid; session "$p_zo" zzo-1 "$rp" zeta-other
+check "a session whose procStart matches its process reads live though its startedAt is later" \
+  registered_alive "$p_zr" "$restarted_ms" "$(claude_proc_start "$p_zr")"
+check "one whose procStart names another process start does not" \
+  eval '! registered_alive "$p_zr" "$now_ms" "Thu Jan  1 00:00:07 1970"'
+check "one with no procStart and a drifted startedAt still does not" eval '! registered_alive "$p_zr" "$restarted_ms"'
+check "with no procStart a close startedAt still reads live" registered_alive "$p_zo" "$now_ms"
+claim_status zzr-1 "$p_zr"
+check "a restarted session claims its project" [ "$status" -eq 0 ]
+claim_status zzo-1 "$p_zo"
+check "and another session is refused it, since the restarted one is still its holder" [ "$status" -eq 3 ]
 
 # A worker in a tab or window is an interactive session, so waiting.sh's registry pass must leave it out too.
 spawn; p_tw=$pid; session "$p_tw" twrk-1 "$work/wt-watch-worker" watch-worker

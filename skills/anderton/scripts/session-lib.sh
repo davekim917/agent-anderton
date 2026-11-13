@@ -14,13 +14,34 @@ EOF
   echo $(( ((10#$d * 24 + 10#$h) * 60 + 10#$m) * 60 + 10#$s ))
 }
 
-# True when pid $1 is running and started when the session registry says it did ($2, epoch ms).
+# The start of process $1 in the form Claude Code records as procStart: field 22 of /proc/<pid>/stat
+# where /proc exists, else ps lstart in the C locale and UTC. Nothing when it is gone.
+proc_start() {
+  local t
+  if [ -r "/proc/$1/stat" ]; then
+    t=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
+    # The command name in field 2 can hold spaces and parentheses; field 3 follows its last ")".
+    printf '%s\n' "${t##*) }" | awk '{ print $20 }'
+    return 0
+  fi
+  t=$(LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null) || return 0
+  t=${t#"${t%%[![:space:]]*}"}
+  printf '%s\n' "${t%"${t##*[![:space:]]}"}"
+}
+
+# True when pid $1 is running and is the process the session registry names: its start equals the
+# entry's procStart ($3) when it has one, else started when the entry's startedAt ($2, epoch ms) says.
 # A registry file outlives a crashed session, and its pid can then belong to an unrelated process.
+# /restart keeps the process but writes a new startedAt, so procStart, when present, decides alone.
 # ps, not kill -0: a sandboxed shell can be denied signalling a live process (EPERM).
 registered_alive() {
   local age drift
   age=$(proc_age "$1")
   [ -n "$age" ] || return 1
+  if [ -n "${3:-}" ]; then
+    [ "$(proc_start "$1")" = "$3" ]
+    return
+  fi
   [ -n "$2" ] || return 0
   drift=$(( $(date +%s) - age - $2 / 1000 ))
   [ "$drift" -ge -60 ] && [ "$drift" -le 60 ]
@@ -58,7 +79,7 @@ session_pid() {
     if [ "$(jq -r '.sessionId // empty' "$f" 2>/dev/null)" = "$1" ]; then
       p=$(jq -r '.pid // empty' "$f" 2>/dev/null)
       [ -n "$p" ] || continue
-      if registered_alive "$p" "$(jq -r '.startedAt // empty | floor' "$f" 2>/dev/null)"; then
+      if registered_alive "$p" "$(jq -r '.startedAt // empty | floor' "$f" 2>/dev/null)" "$(jq -r '.procStart // empty' "$f" 2>/dev/null)"; then
         echo "$p"
         return
       fi
@@ -119,7 +140,7 @@ is_holder() {
            elif $r.startedAt != null then ($s.startedAt | floor) == ($r.startedAt | floor)
            else (($r.claimedAt // "") | fromdateiso8601? // null) as $at | $at == null or $at * 1000 >= $s.startedAt
            end)' >/dev/null 2>&1 &&
-    registered_alive "$(jq -r .pid "$1")" "$(jq -r '.startedAt // empty | floor' "$1")"
+    registered_alive "$(jq -r .pid "$1")" "$(jq -r '.startedAt // empty | floor' "$1")" "$(jq -r '.procStart // empty' "$1")"
 }
 
 # The record of project $1's holder, or of scope $2's: its own file, else, for the project's role,
