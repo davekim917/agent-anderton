@@ -35,7 +35,7 @@ found="" cwd=""
 for s in "$sessions"/*.json; do
   [ -e "$s" ] || continue
   [ "$(jq -r '.name // empty' "$s" 2>/dev/null)" = "$name" ] || continue
-  registered_alive "$(jq -r '.pid // empty' "$s")" "$(jq -r '.startedAt // empty | floor' "$s" 2>/dev/null)" || continue
+  registered_alive "$(jq -r '.pid // empty' "$s")" "$(jq -r '.startedAt // empty | floor' "$s" 2>/dev/null)" "$(jq -r '.procStart // empty' "$s" 2>/dev/null)" || continue
   [ -z "$found" ] || refuse "more than one live session is named $name."
   found=$s
   cwd=$(jq -r '.cwd // empty' "$s")

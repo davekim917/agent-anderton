@@ -75,8 +75,8 @@ answers_for() { # answers_for <name> <cwd> [session id] [pid] [start]: true when
 
 for s in "$sessions"/*.json; do
   [ -e "$s" ] || continue
-  fields=$(jq -r '[(.pid // "" | tostring), (.startedAt // "" | if type == "number" then floor | tostring else . end), .sessionId // "", .cwd // "", .name // ""] | join("\u001f")' "$s" 2>/dev/null) || continue
-  IFS=$'\x1f' read -r pid start sid cwd name <<EOF
+  fields=$(jq -r '[(.pid // "" | tostring), (.startedAt // "" | if type == "number" then floor | tostring else . end), .sessionId // "", .cwd // "", .name // "", .procStart // ""] | join("\u001f")' "$s" 2>/dev/null) || continue
+  IFS=$'\x1f' read -r pid start sid cwd name pstart <<EOF
 $fields
 EOF
   if [ -z "$pid" ] || [ -z "$sid" ]; then continue; fi
@@ -100,7 +100,7 @@ EOF
   if [ -z "$all" ] && { [ -z "$cwd" ] || [ "$(project_root "$cwd")" != "$root" ]; }; then
     continue
   fi
-  registered_alive "$pid" "$start" || continue
+  registered_alive "$pid" "$start" "$pstart" || continue
   judged="$judged $sid"
   answers_for "$name" "$cwd" "$sid" "$pid" "$start" || continue
 

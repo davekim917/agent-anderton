@@ -203,7 +203,7 @@ load_session() {
   for f in "$sessions"/*.json; do
     [ -f "$f" ] || continue
     [ "$(jq -r '.name // empty' "$f" 2>/dev/null)" = "$name" ] || continue
-    registered_alive "$(jq -r '.pid // empty' "$f")" "$(jq -r '.startedAt // empty | floor' "$f")" || continue
+    registered_alive "$(jq -r '.pid // empty' "$f")" "$(jq -r '.startedAt // empty | floor' "$f")" "$(jq -r '.procStart // empty' "$f" 2>/dev/null)" || continue
     [ -z "$found" ] || refuse "More than one live session is named $name."
     found=$f
   done
