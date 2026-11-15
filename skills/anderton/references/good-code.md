@@ -67,8 +67,9 @@ states, or lifecycle risk. Indirection that removes none of these is cost.
   change together, not when they merely look alike.
 - **No scaffolding without a consumer.** Do not build support for a feature that
   does not exist yet in the same change.
-- **Smallest diff that solves it.** Remove leftovers from your own search before
-  committing: abandoned edits, debug code, guards added while chasing the bug.
+- **No leftovers.** Remove what your own search left behind before committing:
+  abandoned edits, debug code, guards added while chasing the bug. Size is not the
+  measure: a larger change that fixes the cause beats a small one that patches it over.
 
 ## A backend foundation that holds
 
