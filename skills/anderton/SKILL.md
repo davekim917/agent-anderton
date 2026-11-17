@@ -78,7 +78,7 @@ claim refuses a second.
    - A source it cannot read is not a quiet day: it says so on stderr and exits non-zero,
      after printing what its other sources found. After three failed runs in a row
      (`ANDERTON_PROBE_FAILURES`) the watch wakes you with `probe failing:` and its last
-     stderr line; a run past `ANDERTON_PROBE_TIMEOUT` seconds (120) counts as failed.
+     stderr line, at most once an hour; a run past `ANDERTON_PROBE_TIMEOUT` seconds (120) counts as failed.
    - Where the machine already has the event (a local database, a log), read it there;
      poll a remote API only when nothing local has it.
    A session cron (`CronCreate`) that wakes you to sweep is retired: delete it with

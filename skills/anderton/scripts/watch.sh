@@ -112,11 +112,15 @@ stage_moves() { # true when this run's stage would change a bookmark
   return 1
 }
 run_probe() { # run_probe <command>: sets $probe_news, $probe_alert, $probe_why, $probe_run and $probe_commit
-  local p d status=0 waited=0 fails="" alerted=""
+  local p d status=0 waited=0 fails=""
   probe_news="" probe_alert="" probe_why="" probe_commit=""
   mkdir -p "$probe_dir/bookmarks" 2>/dev/null || return 0
+  # A run whose watch was killed outright: end what it started before clearing it away.
   for d in "$probe_dir"/run.*; do
-    if [ -d "$d" ] && ! ps -p "${d##*.}" >/dev/null 2>&1; then rm -rf "$d"; fi
+    if [ -d "$d" ] && ! ps -p "${d##*.}" >/dev/null 2>&1; then
+      { read -r p < "$d/group"; } 2>/dev/null && kill -KILL -- "-$p" 2>/dev/null
+      rm -rf "$d"
+    fi
   done
   probe_run="$probe_dir/run.$$"
   rm -rf "$probe_run"
@@ -129,6 +133,7 @@ run_probe() { # run_probe <command>: sets $probe_news, $probe_alert, $probe_why,
   p=$!
   set +m
   probe_pid=$p
+  echo "$p" > "$probe_run/group"
   trap 'exit 143' TERM HUP INT
   # Tenths of a second: most probes take a second or two, and the holder should not wait on the poll.
   while kill -0 "$p" 2>/dev/null; do
@@ -145,6 +150,14 @@ run_probe() { # run_probe <command>: sets $probe_news, $probe_alert, $probe_why,
   if [ "$status" = timeout ]; then
     wait "$p" 2>/dev/null
     probe_why="timed out after ${probe_timeout}s"
+    # What it printed before it hung comes back unchanged next run, with its bookmark never moved: told once by the
+    # failure alert rather than on every run.
+    : > "$probe_run/out"
+  elif [ -n "$(find "$probe_run/stage" -mindepth 1 ! -type f 2>/dev/null)" ]; then
+    wait "$p" 2>/dev/null
+    status=1
+    probe_why="staged something other than a plain file; a bookmark is one flat file"
+    : > "$probe_run/out"
   else
     # A probe killed by a signal makes bash report it on stderr, which is the wake's text.
     wait "$p" 2>/dev/null
@@ -170,7 +183,7 @@ run_probe() { # run_probe <command>: sets $probe_news, $probe_alert, $probe_why,
     probe_news=""
   fi
   if [ "$status" = 0 ]; then
-    rm -f "$probe_dir/failures" "$probe_dir/alerted"
+    rm -f "$probe_dir/failures"
     return 0
   fi
   { read -r fails < "$probe_dir/failures"; } 2>/dev/null
@@ -178,10 +191,9 @@ run_probe() { # run_probe <command>: sets $probe_news, $probe_alert, $probe_why,
   fails=$((fails + 1))
   echo "$fails" > "$probe_dir/failures"
   [ "$fails" -ge "$probe_fail_at" ] || return 0
-  { alerted=$(cat "$probe_dir/alerted"); } 2>/dev/null
-  # One alert per failure; a different failure alerts again, at most hourly, so a flapping probe cannot loop.
-  if [ -z "$alerted" ] || { [ "$alerted" != "$probe_why" ] && [ -n "$(find "$probe_dir/alerted" -mmin +60 2>/dev/null)" ]; }; then
-    probe_alert="probe failing: $probe_why ($fails runs in a row; it alerts again only for a different failure)"
+  # At most one alert an hour, kept across successes, so a probe that fails and recovers by turns cannot loop.
+  if [ ! -e "$probe_dir/alerted" ] || [ -n "$(find "$probe_dir/alerted" -mmin +60 2>/dev/null)" ]; then
+    probe_alert="probe failing: $probe_why ($fails runs in a row; at most one such alert an hour)"
   fi
 }
 commit_probe() {
@@ -217,6 +229,12 @@ while is_holder "$reg" "$record"; do
       if ! is_holder "$reg" "$record" || [ "$(watch_owner)" != "$$" ] || orphaned "$$" "$PPID"; then
         rm -rf "$probe_run"
         exit 0
+      fi
+      # And only if it is still the role's probe: a run of the one just replaced or removed tells nothing.
+      if [ "$(jq -r '.probe.command // empty' "$record" 2>/dev/null)" != "$probe" ]; then
+        rm -rf "$probe_run"
+        rm -f "$probe_dir/failures" "$probe_dir/told"
+        probe_news="" probe_alert=""
       fi
       # Nothing to tell, so nothing a bookmark could pass unheard.
       if [ -z "$probe_news" ] && [ -z "$probe_alert" ]; then commit_probe; fi

@@ -276,9 +276,11 @@ role, so a rebind or take-over keeps it. It reads bookmarks from `$ANDERTON_PROB
 ones it would advance to into `$ANDERTON_PROBE_STAGE`; the watch moves them over only once the holder has
 been woken with that output, or when the probe printed nothing. A run that exits non-zero or outlasts
 `ANDERTON_PROBE_TIMEOUT` (120 seconds, which ends its whole process group) is a failure: after
-`ANDERTON_PROBE_FAILURES` (3) in a row the holder is woken once with `probe failing:` and the probe's last
-stderr line, and a failed run's bookmarks count only if what it printed was delivered. Output identical to
-the last delivery wakes no one. State lives in `~/.claude/anderton/<key>.probe/`.
+`ANDERTON_PROBE_FAILURES` (3) in a row the holder is woken with `probe failing:` and the probe's last
+stderr line, at most once an hour, so a probe that fails and recovers by turns cannot loop. A timed-out run's
+output and stage are both dropped, since they would come back unchanged every run. Output identical to the last
+delivery that moves no bookmark wakes no one, a stage must hold only plain files, and a run of a probe that was
+replaced or removed meanwhile is dropped. State lives in `~/.claude/anderton/<key>.probe/`.
 
 **`report-gate.sh`** is a hook on `SendMessage`, run before and after each send. It judges two kinds of
 message: a worker's to the session `spawn.sh` started it from, and any session's to its repository's Anderton,

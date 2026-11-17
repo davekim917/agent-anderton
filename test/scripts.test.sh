@@ -1484,6 +1484,8 @@ case \$(cat "$work/probe.mode") in
   fail-other) echo "probe failing: archive: database is locked" >&2; exit 1 ;;
   partial) echo \$((b + 1)) > "\$ANDERTON_PROBE_STAGE/n"; echo "probe failing: slack: HTTP 500" >&2; exit 1 ;;
   hang) echo \$((b + 1)) > "\$ANDERTON_PROBE_STAGE/n"; sleep 30 & echo \$! > "$work/probe.child"; wait ;;
+  print-hang) echo "item \$((b + 1)) before the hang"; echo \$((b + 1)) > "\$ANDERTON_PROBE_STAGE/n"; sleep 30 ;;
+  dir) echo "item dir"; mkdir "\$ANDERTON_PROBE_STAGE/slack" ;;
 esac
 FAKE
 chmod +x "$work/probe.sh"
@@ -1599,25 +1601,45 @@ check "nor a different failure within the hour" eval 'probe_watch && [ -z "$out"
 touch -t 202001010000 "$probe_dir/alerted"
 probe_run
 check "but a different failure an hour on does" eval '[ "$status" -eq 2 ] && contains "probe failing: archive: database is locked"'
+echo quiet > "$work/probe.mode"
+probe_watch || true
+echo fail > "$work/probe.mode"
+probe_watch || true
+probe_watch || true
+check "a probe that fails and recovers by turns does not alert again within the hour" eval 'probe_watch && [ -z "$out" ]'
 echo partial > "$work/probe.mode"
 probe_watch || true
 check "a failed run that printed nothing keeps the bookmarks of what it read" [ "$(cat "$bookmark")" = 5 ]
 echo news > "$work/probe.mode"
 probe_run
 check "a run that succeeds after failures wakes with its news" eval '[ "$status" -eq 2 ] && contains "item 6"'
-check "and starts the failure count again" eval '[ ! -e "$probe_dir/failures" ] && [ ! -e "$probe_dir/alerted" ]'
+check "and starts the failure count again" [ ! -e "$probe_dir/failures" ]
 echo fail > "$work/probe.mode"
 probe_watch || true
 probe_claim --probe "$work/probe.sh --other"
 check "a different probe starts with no failures of the old one's" eval '[ ! -e "$probe_dir/failures" ] && [ ! -e "$probe_dir/last" ]'
 probe_claim --probe "$work/probe.sh"
 
+rm -f "$probe_dir/alerted"
 echo hang > "$work/probe.mode"
 export ANDERTON_PROBE_TIMEOUT=1 ANDERTON_PROBE_FAILURES=1
 probe_run
 check "a probe that runs past its timeout counts as failing" eval '[ "$status" -eq 2 ] && contains "probe failing: timed out after 1s"'
 check "and what it started is stopped" eval '! kill -0 "$(cat "$work/probe.child")" 2>/dev/null'
 check "and what it staged is dropped" [ "$(cat "$bookmark")" = 6 ]
+rm -f "$probe_dir/failures" "$probe_dir/alerted"
+echo print-hang > "$work/probe.mode"
+probe_run
+check "what a run printed before it hung is not delivered, so it cannot wake the holder on every run" eval \
+  '[ "$status" -eq 2 ] && contains "probe failing: timed out after 1s" && ! contains "before the hang" && [ "$(cat "$bookmark")" = 6 ]'
+check "and the next such run wakes no one" eval 'probe_watch && [ -z "$out" ]'
+unset ANDERTON_PROBE_TIMEOUT
+rm -f "$probe_dir/failures" "$probe_dir/alerted"
+echo dir > "$work/probe.mode"
+probe_run
+check "a stage holding a directory is a failed run, not news" eval '[ "$status" -eq 2 ] && contains "staged something other than a plain file" && ! contains "item dir"'
+rm -f "$probe_dir/failures" "$probe_dir/alerted"
+echo hang > "$work/probe.mode"
 rm -f "$probe_dir/failures" "$probe_dir/alerted" "$work/probe.child"
 export ANDERTON_PROBE_TIMEOUT=60
 probe_due
