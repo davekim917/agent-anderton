@@ -58,6 +58,12 @@ watcher="$holders/$key.watch"
 reported="$holders/$key.$pid.reported"
 reported_keep=200
 tick=${ANDERTON_WATCH_TICK:-30}
+# Claude Code ends this hook at the timeout hooks.json gives it, and only the holder's next Stop starts it again, so a
+# role that hears nothing that long would stop being watched without a word. The watch wakes the holder a day early.
+limit=$(jq -r '.hooks.Stop[0].hooks[0].timeout // empty' "$(dirname "$0")/../../../hooks/hooks.json" 2>/dev/null)
+case $limit in '' | *[!0-9]*) limit=1209600 ;; esac
+renew=${ANDERTON_WATCH_RENEW:-$((limit - 86400))}
+started=$(date +%s)
 mkdir -p "$holders" 2>/dev/null || exit 0
 [ -w "$holders" ] || exit 0
 take_watch() { (set -C; printf '%s %s %s\n' "$$" "$pid" "$PPID" > "$watcher") 2>/dev/null; }
@@ -262,6 +268,10 @@ while is_holder "$reg" "$record"; do
       fi
     } >&2
     commit_probe
+    exit 2
+  fi
+  if [ "$(( $(date +%s) - started ))" -ge "$renew" ]; then
+    echo "Anderton watch: renewing before Claude Code's time limit on this watch. Nothing is new; end your turn and it starts again." >&2
     exit 2
   fi
   sleep "$tick"

@@ -1567,6 +1567,10 @@ echo quiet > "$work/probe.mode"
 check "a probe that prints nothing wakes no one" eval 'probe_watch && [ -z "$out" ]'
 check "and runs once per interval, not once per scan" [ "$(probe_runs)" -eq 1 ]
 check "nor again in the next watch, before its interval is up" eval 'probe_watch not-due && [ "$(probe_runs)" -eq 1 ]'
+export ANDERTON_WATCH_RENEW=2
+probe_run
+check "a watch with nothing to tell still wakes its holder before Claude Code's time limit ends it" eval '[ "$status" -eq 2 ] && contains "renewing before" && ! contains "found something new"'
+unset ANDERTON_WATCH_RENEW
 
 echo news > "$work/probe.mode"
 probe_run
