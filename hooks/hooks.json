@@ -1,5 +1,5 @@
 {
-  "description": "In a session holding an Anderton role, the repository's or a project's, wakes it when a session it answers for blocks on a person. Holds a message to an Anderton, from its workers or another session in the repository, that names no kind or repeats the last one sent; records a message once it is sent. Neither hook can approve anything.",
+  "description": "In a session holding an Anderton role, the repository's or a project's, wakes it when a session it answers for blocks on a person, or when the role's probe prints something new. Holds a message to an Anderton, from its workers or another session in the repository, that names no kind or repeats the last one sent; records a message once it is sent. Neither hook can approve anything.",
   "hooks": {
     "Stop": [
       {

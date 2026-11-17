@@ -64,6 +64,27 @@ claim refuses a second.
    user asks one to adopt it. Run `scripts/waiting.sh` to see what it asks, then tell the user. The
    hook reports and nothing more: an alert is never a reason to answer a prompt yourself.
 
+   **Sources outside Claude Code wake you the same way, through a probe, never a cron.**
+   A probe is a plain script, with no model, that reads your sources from bookmarks and
+   prints one line per new item, or nothing. Set it with
+   `scripts/claim.sh [--project <name>] --probe '<command>' [--probe-every <seconds>]`
+   (default 60; `--no-probe` removes it). The watch runs it on that interval and wakes
+   you with what it prints, so an idle role costs nothing and news arrives within a
+   minute. When woken by it, run your sweep. The contract:
+   - It reads its bookmarks from `$ANDERTON_PROBE_STATE` and writes the ones it would
+     advance to into `$ANDERTON_PROBE_STAGE`, one flat file each. The watch moves them
+     over only after waking you with what it printed, so a bookmark never passes an item
+     you were not told about. It must not print a token, cookie or other secret.
+   - A source it cannot read is not a quiet day: it says so on stderr and exits non-zero,
+     after printing what its other sources found. After three failed runs in a row
+     (`ANDERTON_PROBE_FAILURES`) the watch wakes you with `probe failing:` and its last
+     stderr line; a run past `ANDERTON_PROBE_TIMEOUT` seconds (120) counts as failed.
+   - Where the machine already has the event (a local database, a log), read it there;
+     poll a remote API only when nothing local has it.
+   A session cron (`CronCreate`) that wakes you to sweep is retired: delete it with
+   `CronDelete` once the probe is set. It re-reads your whole context every fire to
+   usually find nothing, it is deleted after 7 days, and it does not survive compaction.
+
    **The user can answer a permission prompt here instead of opening its tab.** Run
    `scripts/prompt.sh <name>` and show them the session's name and the prompt's exact
    text. When they answer, run `scripts/prompt.sh <name> yes|no <fingerprint>`.

@@ -268,6 +268,18 @@ name, even when the holder is idle. The next `Stop` starts it again. The alert c
 blocked session's text. The hook can't answer a prompt: a background hook can't return a decision.
 While a woken holder is mid-turn no watch runs, so a block in that turn is reported when the turn ends.
 
+A role can also name a **probe** (`claim.sh --probe '<command>' [--probe-every <seconds>]`, default 60;
+`--no-probe` removes it): a plain script that checks sources outside Claude Code and prints new items, or
+nothing. The watch runs it on its interval, in the holder's directory, and wakes the holder with what it
+prints (cut at 6,000 bytes), so a role whose sources are quiet costs no tokens. The probe belongs to the
+role, so a rebind or take-over keeps it. It reads bookmarks from `$ANDERTON_PROBE_STATE` and writes the
+ones it would advance to into `$ANDERTON_PROBE_STAGE`; the watch moves them over only once the holder has
+been woken with that output, or when the probe printed nothing. A run that exits non-zero or outlasts
+`ANDERTON_PROBE_TIMEOUT` (120 seconds, which ends its whole process group) is a failure: after
+`ANDERTON_PROBE_FAILURES` (3) in a row the holder is woken once with `probe failing:` and the probe's last
+stderr line, and a failed run's bookmarks count only if what it printed was delivered. Output identical to
+the last delivery wakes no one. State lives in `~/.claude/anderton/<key>.probe/`.
+
 **`report-gate.sh`** is a hook on `SendMessage`, run before and after each send. It judges two kinds of
 message: a worker's to the session `spawn.sh` started it from, and any session's to its repository's Anderton,
 named in the claim file, checked to be the live process the record names, and addressed by name, by name

@@ -3,7 +3,9 @@
 # Anderton role, the repository's or a named project's, it keeps running, and exits 2 when a session that role
 # answers for newly blocks on a person: Claude Code then wakes the holder with this script's stderr, and the next
 # Stop runs it again. It only reports. waiting.sh --blocked decides what counts as blocked and which role answers
-# for it, and nothing here can answer a prompt. Anywhere else, and on any failure, it exits 0 and prints nothing.
+# for it, and nothing here can answer a prompt. When the role's claim names a probe (claim.sh --probe), it also runs
+# that probe on its interval and wakes the holder with whatever it prints, or after ANDERTON_PROBE_FAILURES (default
+# 3) failed runs in a row with "probe failing". Anywhere else, and on any failure, it exits 0 and prints nothing.
 # shellcheck source=SCRIPTDIR/session-lib.sh
 . "$(dirname "$0")/session-lib.sh"
 
@@ -84,27 +86,164 @@ until take_watch; do
     *) rm -f "$watcher" ;;
   esac
 done
-trap '[ "$(watch_owner)" != "$$" ] || rm -f "$watcher"' EXIT
+probe_pid=""
+# A probe runs in its own process group, so a watch that ends must end it too.
+trap '[ -z "$probe_pid" ] || kill -TERM -- "-$probe_pid" 2>/dev/null; [ "$(watch_owner)" != "$$" ] || rm -f "$watcher"' EXIT
 
 find "$holders" -maxdepth 1 -name "$key.*.reported" ! -path "$reported" -exec rm -f {} + 2>/dev/null
 : >> "$reported" || exit 0
 export CLAUDE_PID="$pid"
+
+# The probe's state outlives the holder: the role keeps its probe across sessions, so it keeps the bookmarks too.
+# The probe reads its bookmarks from ANDERTON_PROBE_STATE and writes the ones it would advance to into
+# ANDERTON_PROBE_STAGE, for each source it read in full. They move into the state once its output has woken the
+# holder, or when it printed nothing, so a bookmark never passes an item the holder has not been told about. A run
+# that timed out may have staged half a write, so its stage is dropped.
+probe_dir="$holders/$key.probe"
+probe_out_max=6000
+probe_timeout=${ANDERTON_PROBE_TIMEOUT:-120}
+probe_fail_at=${ANDERTON_PROBE_FAILURES:-3}
+probe_news="" probe_alert="" probe_why="" probe_run="" probe_commit=""
+stage_moves() { # true when this run's stage would change a bookmark
+  local f
+  for f in "$probe_run/stage"/* "$probe_run/stage"/.[!.]*; do
+    if [ -e "$f" ] && ! cmp -s "$f" "$probe_dir/bookmarks/$(basename "$f")"; then return 0; fi
+  done
+  return 1
+}
+run_probe() { # run_probe <command>: sets $probe_news, $probe_alert, $probe_why, $probe_run and $probe_commit
+  local p d status=0 waited=0 fails="" alerted=""
+  probe_news="" probe_alert="" probe_why="" probe_commit=""
+  mkdir -p "$probe_dir/bookmarks" 2>/dev/null || return 0
+  for d in "$probe_dir"/run.*; do
+    if [ -d "$d" ] && ! ps -p "${d##*.}" >/dev/null 2>&1; then rm -rf "$d"; fi
+  done
+  probe_run="$probe_dir/run.$$"
+  rm -rf "$probe_run"
+  mkdir -p "$probe_run/stage" 2>/dev/null || return 0
+  date +%s > "$probe_dir/last"
+  # Its own process group, so a timeout ends whatever the probe started as well.
+  set -m
+  (cd "$cwd" && ANDERTON_PROBE_STATE="$probe_dir/bookmarks" ANDERTON_PROBE_STAGE="$probe_run/stage" \
+    exec bash -c "$1") < /dev/null > "$probe_run/out" 2> "$probe_run/err" &
+  p=$!
+  set +m
+  probe_pid=$p
+  trap 'exit 143' TERM HUP INT
+  # Tenths of a second: most probes take a second or two, and the holder should not wait on the poll.
+  while kill -0 "$p" 2>/dev/null; do
+    if [ "$waited" -ge "$((probe_timeout * 10))" ]; then
+      kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null
+      sleep 2
+      kill -KILL -- "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null
+      status=timeout
+      break
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if [ "$status" = timeout ]; then
+    wait "$p" 2>/dev/null
+    probe_why="timed out after ${probe_timeout}s"
+  else
+    # A probe killed by a signal makes bash report it on stderr, which is the wake's text.
+    wait "$p" 2>/dev/null
+    status=$?
+    probe_why=$(grep . "$probe_run/err" 2>/dev/null | tail -n 1 | cut -c 1-300)
+    probe_why=${probe_why#probe failing: }
+    probe_why=${probe_why:-exit $status with no message}
+    probe_commit=1
+  fi
+  probe_pid=""
+  trap - TERM HUP INT
+  if [ -s "$probe_run/out" ]; then
+    probe_news=$(head -c "$probe_out_max" "$probe_run/out")
+    if [ "$(wc -c < "$probe_run/out")" -gt "$probe_out_max" ]; then
+      cp "$probe_run/out" "$probe_dir/last-output"
+      probe_news="$probe_news
+(cut at $probe_out_max bytes; the whole output is in $probe_dir/last-output)"
+    fi
+  fi
+  # The same words with no bookmark to move is a probe repeating itself: the holder has heard it.
+  if [ -n "$probe_news" ] && [ "$(printf '%s' "$probe_news" | cksum)" = "$(cat "$probe_dir/told" 2>/dev/null)" ] &&
+    ! stage_moves; then
+    probe_news=""
+  fi
+  if [ "$status" = 0 ]; then
+    rm -f "$probe_dir/failures" "$probe_dir/alerted"
+    return 0
+  fi
+  { read -r fails < "$probe_dir/failures"; } 2>/dev/null
+  case $fails in '' | *[!0-9]*) fails=0 ;; esac
+  fails=$((fails + 1))
+  echo "$fails" > "$probe_dir/failures"
+  [ "$fails" -ge "$probe_fail_at" ] || return 0
+  { alerted=$(cat "$probe_dir/alerted"); } 2>/dev/null
+  # One alert per failure; a different failure alerts again, at most hourly, so a flapping probe cannot loop.
+  if [ -z "$alerted" ] || { [ "$alerted" != "$probe_why" ] && [ -n "$(find "$probe_dir/alerted" -mmin +60 2>/dev/null)" ]; }; then
+    probe_alert="probe failing: $probe_why ($fails runs in a row; it alerts again only for a different failure)"
+  fi
+}
+commit_probe() {
+  local f
+  [ -n "$probe_run" ] || return 0
+  if [ -n "$probe_news" ]; then printf '%s' "$probe_news" | cksum > "$probe_dir/told"; fi
+  if [ -n "$probe_alert" ]; then printf '%s\n' "$probe_why" > "$probe_dir/alerted"; fi
+  if [ -n "$probe_commit" ]; then
+    for f in "$probe_run/stage"/* "$probe_run/stage"/.[!.]*; do
+      if [ -e "$f" ]; then mv -f "$f" "$probe_dir/bookmarks/"; fi
+    done
+  fi
+  rm -rf "$probe_run"
+  probe_run=""
+}
+
 while is_holder "$reg" "$record"; do
   if orphaned "$$" "$PPID"; then exit 0; fi
   # Only the lock's owner watches: a watch that lost it leaves, and one whose lock vanished takes it back.
   if [ "$(watch_owner)" != "$$" ] && ! take_watch; then exit 0; fi
   now=$(cd "$cwd" 2>/dev/null && "$(dirname "$0")/waiting.sh" --blocked 2>/dev/null | grep '^=== ')
   new=$(printf '%s\n' "$now" | grep -vxF -f "$reported" | grep .)
-  if [ -n "$new" ]; then
-    # Append only, so a scan that misses a block cannot make it new again. A block that clears and returns has a
-    # new start time in its header, so it is still reported.
-    printf '%s\n' "$new" >> "$reported"
-    tail -n "$reported_keep" "$reported" > "$reported.tmp" && mv "$reported.tmp" "$reported"
+  probe_news="" probe_alert="" probe_run=""
+  probe=$(jq -r '.probe.command // empty' "$record" 2>/dev/null)
+  if [ -n "$probe" ]; then
+    every=$(jq -r '.probe.every // 60 | floor' "$record" 2>/dev/null)
+    last=$(cat "$probe_dir/last" 2>/dev/null)
+    case $last in '' | *[!0-9]*) last=0 ;; esac
+    # The interval holds across watches, so a busy source wakes the holder at most once per interval.
+    if [ "$(( $(date +%s) - last ))" -ge "${every:-60}" ]; then
+      run_probe "$probe"
+      # A run can take minutes: what it found is this holder's to hear only if the role and the watch are still its.
+      if ! is_holder "$reg" "$record" || [ "$(watch_owner)" != "$$" ] || orphaned "$$" "$PPID"; then
+        rm -rf "$probe_run"
+        exit 0
+      fi
+      # Nothing to tell, so nothing a bookmark could pass unheard.
+      if [ -z "$probe_news" ] && [ -z "$probe_alert" ]; then commit_probe; fi
+    fi
+  fi
+  if [ -n "$new" ] || [ -n "$probe_news" ] || [ -n "$probe_alert" ]; then
+    if [ -n "$new" ]; then
+      # Append only, so a scan that misses a block cannot make it new again. A block that clears and returns has a
+      # new start time in its header, so it is still reported.
+      printf '%s\n' "$new" >> "$reported"
+      tail -n "$reported_keep" "$reported" > "$reported.tmp" && mv "$reported.tmp" "$reported"
+    fi
     {
-      echo "Anderton watch: a session you answer for is blocked on a person. Nothing has been answered or approved."
-      printf '%s\n' "$new"
-      echo "Run waiting.sh to see what each one is asking."
+      if [ -n "$new" ]; then
+        echo "Anderton watch: a session you answer for is blocked on a person. Nothing has been answered or approved."
+        printf '%s\n' "$new"
+        echo "Run waiting.sh to see what each one is asking."
+      fi
+      if [ -n "$probe_news" ]; then
+        echo "Anderton watch: your probe found something new. Nothing has been answered or approved."
+        printf '%s\n' "$probe_news"
+      fi
+      if [ -n "$probe_alert" ]; then
+        echo "Anderton watch: $probe_alert. What it watches is not being checked; nothing new is not a quiet day."
+      fi
     } >&2
+    commit_probe
     exit 2
   fi
   sleep "$tick"
