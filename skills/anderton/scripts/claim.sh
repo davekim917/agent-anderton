@@ -4,6 +4,8 @@
 # earlier name of --project and still works. --rebind, which watch.sh runs, only takes back a role this
 # session already had: it refuses unless the record names this process, or names this session's id and a
 # holder that is no longer live (a resumed session runs as a new process; a restarted one has a new start time).
+# --probe <command> names a script watch.sh runs every --probe-every seconds (default 60) for this role, waking
+# the holder when it prints something; --no-probe removes it. A claim that names neither keeps the role's probe.
 # Exit 0: claimed (or already held by this session). Exit 3: held by another live session, or this
 # session already holds another role in the repository.
 # Portable to macOS's bash 3.2 and BSD userland.
@@ -14,20 +16,35 @@ set -euo pipefail
 require_tools claim.sh
 
 sid="${CLAUDE_CODE_SESSION_ID:?not running inside a Claude Code session}"
-force="" scope="" rebind=""
+usage="usage: claim.sh [--project <name>] [--take-over | --rebind] [--probe <command> [--probe-every <seconds>] | --no-probe]"
+force="" scope="" rebind="" probe="" every="" probe_set=""
 while [ $# -gt 0 ]; do
   case $1 in
     --take-over) force=1 ;;
     --rebind) rebind=1 ;;
-    --project | --scope)
-      if [ -z "${2:-}" ]; then echo "usage: claim.sh [--project <name>] [--take-over | --rebind]" >&2; exit 2; fi
-      scope=$2
+    --project | --scope | --probe | --probe-every)
+      if [ -z "${2:-}" ]; then echo "$usage" >&2; exit 2; fi
+      case $1 in
+        --probe) probe=$2 probe_set=1 ;;
+        --probe-every) every=$2 ;;
+        *) scope=$2 ;;
+      esac
       shift
       ;;
-    *) echo "usage: claim.sh [--project <name>] [--take-over | --rebind]" >&2; exit 2 ;;
+    --no-probe) probe="" probe_set=1 ;;
+    *) echo "$usage" >&2; exit 2 ;;
   esac
   shift
 done
+if [ -n "$every" ]; then
+  case $every in
+    *[!0-9]*) every=0 ;;
+  esac
+  if [ "$every" -lt 10 ] || [ -z "$probe" ]; then
+    echo "--probe-every takes whole seconds, 10 or more, with --probe." >&2
+    exit 2
+  fi
+fi
 
 pid="${CLAUDE_PID:-$(session_pid "$sid")}"
 if [ -z "$pid" ]; then
@@ -117,12 +134,31 @@ if [ -n "$record" ] && [ -z "$force" ]; then
   fi
 fi
 
+# The probe belongs to the role, not the session: a rebind, a take-over and a plain re-claim keep it.
+old_probe=$(jq -r '.probe.command // empty' "${record:-/dev/null}" 2>/dev/null || true)
+if [ -n "$probe_set" ]; then
+  kept=$(jq -nc --arg c "$probe" --arg e "${every:-60}" 'if $c == "" then null else {command: $c, every: ($e | tonumber)} end')
+  # A different probe starts with no failures or alerts of the old one's to inherit.
+  if [ "$probe" != "$old_probe" ]; then
+    rm -f "${state%.json}.probe/failures" "${state%.json}.probe/alerted" "${state%.json}.probe/told" "${state%.json}.probe/last"
+  fi
+else
+  kept=$(jq -c '.probe // null' "${record:-/dev/null}" 2>/dev/null || true)
+fi
 started=$(jq -r '.startedAt // empty | floor' "$sessions/$pid.json" 2>/dev/null || true)
 jq -nc --arg root "$root" --arg scope "$scope" --argjson pid "$pid" --arg started "$started" --arg sid "$sid" \
-  --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson probe "${kept:-null}" \
   '{root: $root, scope: (if $scope == "" then null else $scope end), pid: $pid,
-    startedAt: ($started | tonumber? // null), sessionId: $sid, claimedAt: $at}' > "$state.tmp"
+    startedAt: ($started | tonumber? // null), sessionId: $sid, claimedAt: $at}
+   + (if $probe == null then {} else {probe: $probe} end)' > "$state.tmp"
 mv "$state.tmp" "$state"
 # The machine-wide file now speaks for no project, so nothing reads a stale holder from it.
 if [ "$record" = "$legacy_holder" ]; then mv "$legacy_holder" "$legacy_holder.migrated"; fi
 echo "$role claimed by session $sid (pid $pid)."
+if [ -n "$probe_set" ] && [ -n "$probe" ]; then
+  echo "Probe set: the watch runs it every ${every:-60} seconds from the end of this turn, and wakes you when it prints."
+elif [ -n "$probe_set" ]; then
+  echo "Probe removed."
+elif [ -n "$old_probe" ] && [ -z "$rebind" ]; then
+  echo "Probe kept: $old_probe, every $(jq -r '.probe.every' "$state") seconds. --no-probe removes it."
+fi

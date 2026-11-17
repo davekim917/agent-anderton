@@ -1457,6 +1457,205 @@ rm -rf "$CLAUDE_CONFIG_DIR/anderton" "$CLAUDE_CONFIG_DIR/anderton.json"
 mv "$work/anderton.aside" "$CLAUDE_CONFIG_DIR/anderton"
 unset ANDERTON_WATCH_TICK
 
+# A role's probe: claim.sh records it, and watch.sh runs it on its interval and wakes the holder with what it prints.
+export ANDERTON_WATCH_TICK=0.05
+probed="$work/probed"
+mkdir -p "$probed"
+git -C "$probed" init -q
+probe_record=$(holder_path "$(project_root "$probed")")
+probe_dir="${probe_record%.json}.probe"
+bookmark="$probe_dir/bookmarks/n"
+spawn; p_ph=$pid; session "$p_ph" ph-1 "$probed" prober "$(date +%s)000"
+spawn; p_ph2=$pid; session "$p_ph2" ph-2 "$probed" taker "$(date +%s)000"
+# The fake probe reads its bookmark n and, by $work/probe.mode, prints the next item and stages it, prints nothing,
+# repeats itself, or fails. Like a real probe, it stages a bookmark only for what it read in full.
+cat > "$work/probe.sh" <<FAKE
+#!/usr/bin/env bash
+echo run >> "$work/probe.runs"
+trap 'echo done >> "$work/probe.dones"' EXIT
+b=\$(cat "\$ANDERTON_PROBE_STATE/n" 2>/dev/null || echo 0)
+case \$(cat "$work/probe.mode") in
+  quiet) ;;
+  news) echo "item \$((b + 1))"; echo \$((b + 1)) > "\$ANDERTON_PROBE_STAGE/n" ;;
+  same) echo "item same" ;;
+  same-moving) echo "item same"; echo \$((b + 1)) > "\$ANDERTON_PROBE_STAGE/n" ;;
+  big) head -c 10000 /dev/zero | tr '\\0' x; echo; echo tail-marker; echo \$((b + 1)) > "\$ANDERTON_PROBE_STAGE/n" ;;
+  fail) echo "probe failing: slack: HTTP 500" >&2; exit 1 ;;
+  fail-other) echo "probe failing: archive: database is locked" >&2; exit 1 ;;
+  partial) echo \$((b + 1)) > "\$ANDERTON_PROBE_STAGE/n"; echo "probe failing: slack: HTTP 500" >&2; exit 1 ;;
+  hang) echo \$((b + 1)) > "\$ANDERTON_PROBE_STAGE/n"; sleep 30 & echo \$! > "$work/probe.child"; wait ;;
+  print-hang) echo "item \$((b + 1)) before the hang"; echo \$((b + 1)) > "\$ANDERTON_PROBE_STAGE/n"; sleep 30 ;;
+  dir) echo "item dir"; mkdir "\$ANDERTON_PROBE_STAGE/slack" ;;
+esac
+FAKE
+chmod +x "$work/probe.sh"
+probe_claim() { # probe_claim <claim.sh args...>: as the holder, sets $out and $status
+  set +e
+  out=$(cd "$probed" && env CLAUDE_PID="$p_ph" CLAUDE_CODE_SESSION_ID=ph-1 "$scripts/claim.sh" "$@" 2>&1)
+  status=$?
+  set -e
+}
+probe_claim --probe "$work/probe.sh" --probe-every 5
+check "a probe interval under 10 seconds is refused" eval '[ "$status" -eq 2 ] && [ ! -e "$probe_record" ]'
+probe_claim --probe-every 30
+check "an interval with no probe is refused" [ "$status" -eq 2 ]
+probe_claim --probe "$work/probe.sh"
+check "claim.sh --probe records the command, every 60 seconds by default" eval \
+  '[ "$status" -eq 0 ] && [ "$(jq -c .probe "$probe_record")" = "{\"command\":\"$work/probe.sh\",\"every\":60}" ]'
+probe_claim
+check "a claim that names no probe keeps the role's, and says so" eval \
+  '[ "$(jq -r .probe.command "$probe_record")" = "$work/probe.sh" ] && contains "Probe kept: $work/probe.sh, every 60 seconds"'
+probe_claim --rebind
+check "and so does a rebind" [ "$(jq -r .probe.command "$probe_record")" = "$work/probe.sh" ]
+set +e
+out=$(cd "$probed" && env CLAUDE_PID="$p_ph2" CLAUDE_CODE_SESSION_ID=ph-2 "$scripts/claim.sh" --take-over 2>&1)
+set -e
+check "and a take-over, telling the new holder what it runs" eval \
+  '[ "$(jq -r .pid "$probe_record")" = "$p_ph2" ] && [ "$(jq -r .probe.command "$probe_record")" = "$work/probe.sh" ] && contains "Probe kept: $work/probe.sh"'
+probe_claim --take-over
+probe_claim --no-probe
+check "--no-probe removes it" eval '[ "$status" -eq 0 ] && [ "$(jq -r "has(\"probe\")" "$probe_record")" = false ]'
+probe_claim --probe "$work/probe.sh" --probe-every 60
+
+probe_due() { rm -f "$probe_dir/last"; }
+probe_runs() { if [ -e "$work/probe.runs" ]; then wc -l < "$work/probe.runs" | tr -d ' '; else echo 0; fi; }
+probe_dones() { if [ -e "$work/probe.dones" ]; then wc -l < "$work/probe.dones" | tr -d ' '; else echo 0; fi; }
+probe_run() { # probe_run: with the probe due, runs the holder's watch to its end (30 seconds at most); sets $out and $status
+  local w
+  probe_due
+  watch_in ph-1 "$probed" | "$scripts/watch.sh" > "$work/probe.out" 2>&1 &
+  w=$!
+  sleepers="$sleepers $w"
+  for _ in $(seq 1 300); do
+    kill -0 "$w" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$w" 2>/dev/null; then
+    kill "$w" 2>/dev/null || true
+    wait "$w" 2>/dev/null || true
+    status=124 out="the watch did not end"
+    return
+  fi
+  set +e; wait "$w"; status=$?; set -e
+  out=$(cat "$work/probe.out")
+}
+probe_watch() { # probe_watch [not-due]: runs the holder's watch until its probe has run to its end, and a second after,
+  # for the watch to act on it; true while the watch is still running then, and sets $out
+  local before
+  [ "${1:-}" = not-due ] || probe_due
+  before=$(probe_dones)
+  watch_in ph-1 "$probed" | "$scripts/watch.sh" > "$work/probe.out" 2>&1 &
+  watcher_pid=$!
+  sleepers="$sleepers $watcher_pid"
+  for _ in $(seq 1 100); do
+    [ "$(probe_dones)" -le "$before" ] || break
+    sleep 0.1
+  done
+  sleep 1
+  out=$(cat "$work/probe.out")
+  [ "$(probe_dones)" -gt "$before" ] || [ "${1:-}" = not-due ] || out="the probe never ran"
+  if kill -0 "$watcher_pid" 2>/dev/null; then
+    kill "$watcher_pid" 2>/dev/null || true
+    wait "$watcher_pid" 2>/dev/null || true
+    return 0
+  fi
+  wait "$watcher_pid" 2>/dev/null || true
+  return 1
+}
+
+echo quiet > "$work/probe.mode"
+check "a probe that prints nothing wakes no one" eval 'probe_watch && [ -z "$out" ]'
+check "and runs once per interval, not once per scan" [ "$(probe_runs)" -eq 1 ]
+check "nor again in the next watch, before its interval is up" eval 'probe_watch not-due && [ "$(probe_runs)" -eq 1 ]'
+
+echo news > "$work/probe.mode"
+probe_run
+check "a probe that prints something wakes the holder with it" eval '[ "$status" -eq 2 ] && contains "item 1" && contains "Nothing has been answered or approved."'
+check "and its bookmark advances once the holder has been told" [ "$(cat "$bookmark")" = 1 ]
+probe_run
+check "so the next wake carries only what is new" eval '[ "$status" -eq 2 ] && contains "item 2" && ! contains "item 1"'
+
+echo same > "$work/probe.mode"
+probe_run
+check "a probe that prints without advancing wakes the holder once" eval '[ "$status" -eq 2 ] && contains "item same"'
+check "and not again with the same words" eval 'probe_watch && [ -z "$out" ]'
+echo same-moving > "$work/probe.mode"
+probe_run
+check "the same words that move a bookmark are new, and wake it" eval '[ "$status" -eq 2 ] && contains "item same"'
+
+echo big > "$work/probe.mode"
+probe_run
+check "a long report is cut, and says where the whole of it is" eval \
+  '[ "$status" -eq 2 ] && contains "(cut at 6000 bytes; the whole output is in $probe_dir/last-output)" && [ "${#out}" -lt 6600 ] && grep -q tail-marker "$probe_dir/last-output"'
+
+echo 4 > "$bookmark"
+echo fail > "$work/probe.mode"
+check "a failed run wakes no one at first" eval 'probe_watch && [ -z "$out" ]'
+check "nor a second" eval 'probe_watch && [ -z "$out" ]'
+probe_run
+check "the third failure in a row wakes the holder, naming the source once" eval \
+  '[ "$status" -eq 2 ] && contains "probe failing: slack: HTTP 500 (3 runs" && ! contains "probe failing: probe failing" && contains "nothing new is not a quiet day"'
+check "a fourth, the same, does not wake it again" eval 'probe_watch && [ -z "$out" ]'
+echo fail-other > "$work/probe.mode"
+check "nor a different failure within the hour" eval 'probe_watch && [ -z "$out" ]'
+touch -t 202001010000 "$probe_dir/alerted"
+probe_run
+check "but a different failure an hour on does" eval '[ "$status" -eq 2 ] && contains "probe failing: archive: database is locked"'
+echo quiet > "$work/probe.mode"
+probe_watch || true
+echo fail > "$work/probe.mode"
+probe_watch || true
+probe_watch || true
+check "a probe that fails and recovers by turns does not alert again within the hour" eval 'probe_watch && [ -z "$out" ]'
+echo partial > "$work/probe.mode"
+probe_watch || true
+check "a failed run that printed nothing keeps the bookmarks of what it read" [ "$(cat "$bookmark")" = 5 ]
+echo news > "$work/probe.mode"
+probe_run
+check "a run that succeeds after failures wakes with its news" eval '[ "$status" -eq 2 ] && contains "item 6"'
+check "and starts the failure count again" [ ! -e "$probe_dir/failures" ]
+echo fail > "$work/probe.mode"
+probe_watch || true
+probe_claim --probe "$work/probe.sh --other"
+check "a different probe starts with no failures of the old one's" eval '[ ! -e "$probe_dir/failures" ] && [ ! -e "$probe_dir/last" ]'
+probe_claim --probe "$work/probe.sh"
+
+rm -f "$probe_dir/alerted"
+echo hang > "$work/probe.mode"
+export ANDERTON_PROBE_TIMEOUT=1 ANDERTON_PROBE_FAILURES=1
+probe_run
+check "a probe that runs past its timeout counts as failing" eval '[ "$status" -eq 2 ] && contains "probe failing: timed out after 1s"'
+check "and what it started is stopped" eval '! kill -0 "$(cat "$work/probe.child")" 2>/dev/null'
+check "and what it staged is dropped" [ "$(cat "$bookmark")" = 6 ]
+rm -f "$probe_dir/failures" "$probe_dir/alerted"
+echo print-hang > "$work/probe.mode"
+probe_run
+check "what a run printed before it hung is not delivered, so it cannot wake the holder on every run" eval \
+  '[ "$status" -eq 2 ] && contains "probe failing: timed out after 1s" && ! contains "before the hang" && [ "$(cat "$bookmark")" = 6 ]'
+check "and the next such run wakes no one" eval 'probe_watch && [ -z "$out" ]'
+unset ANDERTON_PROBE_TIMEOUT
+rm -f "$probe_dir/failures" "$probe_dir/alerted"
+echo dir > "$work/probe.mode"
+probe_run
+check "a stage holding a directory is a failed run, not news" eval '[ "$status" -eq 2 ] && contains "staged something other than a plain file" && ! contains "item dir"'
+rm -f "$probe_dir/failures" "$probe_dir/alerted"
+echo hang > "$work/probe.mode"
+rm -f "$probe_dir/failures" "$probe_dir/alerted" "$work/probe.child"
+export ANDERTON_PROBE_TIMEOUT=60
+probe_due
+watch_in ph-1 "$probed" | "$scripts/watch.sh" > "$work/probe.out" 2>&1 &
+watcher_pid=$!
+sleepers="$sleepers $watcher_pid"
+for _ in $(seq 1 100); do
+  [ ! -s "$work/probe.child" ] || break
+  sleep 0.1
+done
+kill "$watcher_pid" 2>/dev/null || true
+wait "$watcher_pid" 2>/dev/null || true
+sleep 0.5
+check "a watch that is stopped stops its probe too" eval '[ -s "$work/probe.child" ] && ! kill -0 "$(cat "$work/probe.child")" 2>/dev/null'
+unset ANDERTON_PROBE_TIMEOUT ANDERTON_PROBE_FAILURES ANDERTON_WATCH_TICK
+
 # The role follows the session: a resume runs it as a new process, a restart gives it a new start time,
 # and /clear gives its process a new session id. Only the session that held the role takes it back.
 export ANDERTON_WATCH_TICK=0.05
