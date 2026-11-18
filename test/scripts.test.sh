@@ -990,7 +990,7 @@ gate eeo-1 "$epsilon" "epsilon-host [e1h2]" '"Still waiting on CI."'
 check "to the holder named with its listing ref" [ "$status" -eq 2 ]
 gate eeo-1 "$epsilon" "uds:/run/user/1000/cc-socks/$p_eh.sock" '"Thanks!"'
 check "to the holder's socket address" [ "$status" -eq 2 ]
-send eeo-1 "$epsilon" epsilon-host '"DIRECTION: Dave says hold off merging the cache change."'
+send eeo-1 "$epsilon" epsilon-host '"DIRECTION: Riley says hold off merging the cache change."'
 check "lets a person's direction through" [ "$status" -eq 0 ]
 send eeo-1 "$epsilon" epsilon-host '"QUESTION: merge the cache change today? I recommend yes."'
 check "lets a question to the holder through" [ "$status" -eq 0 ]
