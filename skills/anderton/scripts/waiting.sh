@@ -242,13 +242,38 @@ finished() { # finished <record>: prints why the worker's work is finished, or n
       | "PR #\(.number) \(.state | ascii_downcase)\t\((if .state == "MERGED" then .mergedAt else .closedAt end) // "" | sub("[.][0-9]+Z$"; "Z") | fromdateiso8601? // "")" end' 2>/dev/null |
     while IFS=$'\t' read -r what at; do echo "$what${at:+ $(ago "$at")}"; done
 }
+last_activity() { # last_activity <record>: epoch seconds of the newest transcript entry of any session that may be
+  # that worker (by name, id, or a cwd inside its worktree), else of its start; nothing when neither is known
+  local name id dir sids sid t at best=""
+  name=$(jq -r '.name // empty' "$1")
+  id=$(jq -r '.id // empty' "$1")
+  dir=$(jq -r '.dir // empty' "$1")
+  sids=$( { printf '%s\n' "$registry_entries"; printf '%s' "$agents_json" | jq -c '.[]?' 2>/dev/null || true; } |
+    jq -rR --arg n "$name" --arg id "$id" --arg d "$dir" 'fromjson? | objects
+      | select(.name == $n or ($id != "" and .id == $id) or ((.cwd // "") as $c | $c == $d or ($c | startswith($d + "/"))))
+      | .sessionId // empty' 2>/dev/null | sort -u || true)
+  for sid in $sids; do
+    for t in "$home"/projects/*/"$sid".jsonl; do
+      [ -e "$t" ] || continue
+      at=$(tail -n 200 "$t" | jq -rR 'fromjson? | .timestamp? // empty | strings' 2>/dev/null | sort | tail -n 1 |
+        jq -rR 'sub("[.][0-9]+Z$"; "Z") | fromdateiso8601? // empty' 2>/dev/null || true)
+      if [ -n "$at" ] && { [ -z "$best" ] || [ "$at" -gt "$best" ]; }; then best=$at; fi
+    done
+  done
+  if [ -z "$best" ]; then
+    best=$(jq -r '.startedAt // empty | strings | fromdateiso8601? // empty' "$1" 2>/dev/null || true)
+  fi
+  if [ -n "$best" ]; then echo "$best"; fi
+}
 ready_to_retire() {
-  local r f name dir why pid start pstart bname bcwd lines=""
+  local r f name dir why at pid start pstart bname bcwd lines=""
   # Without the list of background sessions, which have no registry entry, a busy one would read as idle.
   if ! agents_json=$(claude agents --json 2>/dev/null) || ! printf '%s' "$agents_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
     echo "waiting.sh: claude agents failed, so no worker is judged ready to retire" >&2
     return 0
   fi
+  # Every registry entry on one line each, for last_activity: Claude Code writes each file as one line.
+  registry_entries=$(for f in "$sessions"/*.json; do if [ -e "$f" ]; then cat "$f"; echo; fi; done)
   # Only the few registry files that say busy are read in full.
   busy_sessions=""
   while IFS= read -r f; do
@@ -271,6 +296,13 @@ EOF
     answers_for "$name" "$dir" || continue
     if worker_busy "$r"; then continue; fi
     why=$(finished "$r" || true)
+    # Work done in some other worktree leaves this one at its base, so a worker idle a day is listed too.
+    if [ -z "$why" ]; then
+      at=$(last_activity "$r" || true)
+      if [ -n "$at" ] && [ $(( $(date +%s) - at )) -ge 86400 ]; then
+        why="idle $(( ($(date +%s) - at) / 86400 ))d, no finished work found — check its PR"
+      fi
+    fi
     [ -n "$why" ] || continue
     if [ -d "$dir" ]; then
       if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]; then
