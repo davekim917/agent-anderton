@@ -217,6 +217,14 @@ finished() { # finished <record>: prints why the worker's work is finished, or n
     if [ -n "$ref" ] && git -C "$dir" rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1; then break; fi
     ref=""
   done
+  # Any open PR for its branch, whatever it targets, means the work is not finished; only a PR whose head is the
+  # worktree's HEAD settles it otherwise, since a branch reused after its PR merged holds newer work.
+  branch=$(git -C "$dir" symbolic-ref -q --short HEAD 2>/dev/null || true)
+  prs=""
+  if [ -n "$branch" ] && command -v gh >/dev/null 2>&1; then
+    prs=$(cd "$dir" && gh pr list --head "$branch" --state all --limit 20 --json number,state,mergedAt,closedAt,headRefOid 2>/dev/null) || prs=""
+    if printf '%s' "$prs" | jq -e 'any(.[]?; .state == "OPEN")' >/dev/null 2>&1; then return 0; fi
+  fi
   # A worker still at the commit it started from has landed nothing.
   if [ -n "$ref" ] && [ "$head" != "$base" ] && git -C "$dir" merge-base --is-ancestor "$head" "$ref" 2>/dev/null; then
     # It landed in the oldest commit on the branch's first-parent line that contains it: a merge commit, or itself
@@ -227,12 +235,9 @@ finished() { # finished <record>: prints why the worker's work is finished, or n
     echo "branch merged into $ref${at:+ $(ago "$at")}"
     return
   fi
-  branch=$(git -C "$dir" symbolic-ref -q --short HEAD 2>/dev/null) || return 0
-  command -v gh >/dev/null 2>&1 || return 0
-  prs=$(cd "$dir" && gh pr list --head "$branch" --state all --limit 20 --json number,state,mergedAt,closedAt,headRefOid 2>/dev/null) || return 0
-  # Only a PR whose head is the worktree's HEAD settles it: a branch reused after its PR merged holds newer work.
-  printf '%s' "$prs" | jq -r --arg head "$head" 'map(select(.state == "OPEN" or .headRefOid == $head))
-    | if (length == 0) or any(.[]; .state == "OPEN") then empty
+  [ -n "$prs" ] || return 0
+  printf '%s' "$prs" | jq -r --arg head "$head" 'map(select(.headRefOid == $head))
+    | if length == 0 then empty
     else (map(select(.state == "MERGED")) + map(select(.state != "MERGED")))[0]
       | "PR #\(.number) \(.state | ascii_downcase)\t\((if .state == "MERGED" then .mergedAt else .closedAt end) // "" | sub("[.][0-9]+Z$"; "Z") | fromdateiso8601? // "")" end' 2>/dev/null |
     while IFS=$'\t' read -r what at; do echo "$what${at:+ $(ago "$at")}"; done
