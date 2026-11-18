@@ -341,3 +341,4 @@ The name is John Anderton, Tom Cruise's character in *Minority Report*: the one 
 screens who sees everything coming in and steps in before it goes wrong. Parts of the skill are
 adapted from [pstack](https://github.com/cursor/plugins) by Lauren Tan; see
 [NOTICE.md](NOTICE.md). MIT licensed.
+
