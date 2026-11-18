@@ -282,6 +282,10 @@ output and stage are both dropped, since they would come back unchanged every ru
 delivery that moves no bookmark wakes no one, a stage must hold only plain files, and a run of a probe that was
 replaced or removed meanwhile is dropped. State lives in `~/.claude/anderton/<key>.probe/`.
 
+Claude Code ends the watch at the timeout `hooks.json` gives it (14 days), and only the holder's next turn
+starts it again. So a watch that has had nothing to tell for 13 days wakes the holder once with "renewing";
+ending that turn starts a new watch. Without it, a quiet role would stop being watched without a word.
+
 **`report-gate.sh`** is a hook on `SendMessage`, run before and after each send. It judges two kinds of
 message: a worker's to the session `spawn.sh` started it from, and any session's to its repository's Anderton,
 named in the claim file, checked to be the live process the record names, and addressed by name, by name

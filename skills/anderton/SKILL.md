@@ -70,7 +70,8 @@ claim refuses a second.
    `scripts/claim.sh [--project <name>] --probe '<command>' [--probe-every <seconds>]`
    (default 60; `--no-probe` removes it). The watch runs it on that interval and wakes
    you with what it prints, so an idle role costs nothing and news arrives within a
-   minute. When woken by it, run your sweep. The contract:
+   minute. When woken by it, run your sweep. A wake that says "renewing" (once in 13 quiet days, before Claude
+   Code's limit on the watch) needs nothing: end your turn. The contract:
    - It reads its bookmarks from `$ANDERTON_PROBE_STATE` and writes the ones it would
      advance to into `$ANDERTON_PROBE_STAGE`, one flat file each. The watch moves them
      over only after waking you with what it printed, so a bookmark never passes an item
