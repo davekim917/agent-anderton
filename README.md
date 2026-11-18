@@ -267,6 +267,9 @@ sub-agents included, it exits 2 and Claude Code's `asyncRewake` wakes the holder
 name, even when the holder is idle. The next `Stop` starts it again. The alert carries none of the
 blocked session's text. The hook can't answer a prompt: a background hook can't return a decision.
 While a woken holder is mid-turn no watch runs, so a block in that turn is reported when the turn ends.
+One watch runs per role. A second `Stop` from the same install leaves at once, but one from another
+install path, after a plugin update and `/reload-plugins`, replaces the running watch and its probe, so an
+update reaches a live role without a restart.
 
 A role can also name a **probe** (`claim.sh --probe '<command>' [--probe-every <seconds>]`, default 60;
 `--no-probe` removes it): a plain script that checks sources outside Claude Code and prints new items, or

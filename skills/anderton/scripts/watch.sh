@@ -74,15 +74,32 @@ orphaned() { # orphaned <pid> <the parent it started under>
   now=$(ps -o ppid= -p "$1" 2>/dev/null)
   [ -n "$now" ] && [ "$now" -ne "$2" ]
 }
+same_script() { # same_script <command line>: true when it runs this watch.sh, from this install of the plugin
+  case $0 in /*) ;; *) return 0 ;; esac
+  case " $1 " in *" $0 "*) return 0 ;; esac
+  return 1
+}
 until take_watch; do
   is_holder "$reg" "$record" || exit 0
   other=""; owner=""; parent=""
   { read -r other owner parent < "$watcher"; } 2>/dev/null
   # -ww: ps cuts its output at COLUMNS even into a pipe, and a cut path makes a live watch look dead.
-  case $(ps -ww -o command= -p "${other:-0}" 2>/dev/null) in
+  command=$(ps -ww -o command= -p "${other:-0}" 2>/dev/null)
+  case $command in
     *watch.sh*)
       if orphaned "$other" "${parent:-0}"; then
         rm -f "$watcher"
+      elif ! same_script "$command"; then
+        # A watch from another install of the plugin, one an update or a reload left running, would keep the job
+        # forever and never run this version. It is replaced: TERM runs its EXIT trap, which ends its probe's group.
+        kill -TERM "$other" 2>/dev/null
+        for _ in $(seq 1 50); do
+          kill -0 "$other" 2>/dev/null || break
+          sleep 0.1
+        done
+        # Only the same process: in five seconds its pid could have gone to another.
+        if [ "$(ps -ww -o command= -p "$other" 2>/dev/null)" = "$command" ]; then kill -KILL "$other" 2>/dev/null; fi
+        if [ "$(watch_owner)" = "$other" ]; then rm -f "$watcher"; fi
       else
         # A watch for this holder keeps the job. An earlier holder's leaves within a tick of losing the role.
         [ "$owner" != "$pid" ] || exit 0

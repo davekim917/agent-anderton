@@ -1658,6 +1658,46 @@ kill "$watcher_pid" 2>/dev/null || true
 wait "$watcher_pid" 2>/dev/null || true
 sleep 0.5
 check "a watch that is stopped stops its probe too" eval '[ -s "$work/probe.child" ] && ! kill -0 "$(cat "$work/probe.child")" 2>/dev/null'
+
+# A watch from another install of the plugin, left running by an update and a reload, hands the job to the new one.
+other_install="$work/cache/agent-anderton/0123abcd"
+mkdir -p "$other_install/skills/anderton" "$other_install/hooks"
+cp -R "$scripts" "$other_install/skills/anderton/scripts"
+cp "$scripts/../../../hooks/hooks.json" "$other_install/hooks/hooks.json"
+probe_lock="${probe_record%.json}.watch"
+lock_owner() { local o=""; { read -r o _ < "$probe_lock"; } 2>/dev/null || true; printf '%s' "$o"; }
+rm -f "$work/probe.child"
+probe_due
+watch_in ph-1 "$probed" | "$other_install/skills/anderton/scripts/watch.sh" > "$work/old.out" 2>&1 &
+old_pid=$!
+sleepers="$sleepers $old_pid"
+for _ in $(seq 1 100); do
+  [ ! -s "$work/probe.child" ] || break
+  sleep 0.1
+done
+echo quiet > "$work/probe.mode"
+watch_in ph-1 "$probed" | "$scripts/watch.sh" > "$work/probe.out" 2>&1 &
+watcher_pid=$!
+sleepers="$sleepers $watcher_pid"
+for _ in $(seq 1 100); do
+  [ "$(lock_owner)" != "$watcher_pid" ] || break
+  sleep 0.1
+done
+check "a watch from another install of the plugin is replaced by the new one, which takes the job" \
+  eval '[ -s "$work/probe.child" ] && ! kill -0 "$old_pid" 2>/dev/null && kill -0 "$watcher_pid" 2>/dev/null && [ "$(lock_owner)" = "$watcher_pid" ]'
+check "and the probe it was running is stopped with it" eval '! kill -0 "$(cat "$work/probe.child")" 2>/dev/null'
+if kill -0 "$old_pid" 2>/dev/null; then
+  kill "$old_pid" 2>/dev/null || true
+  wait "$old_pid" 2>/dev/null || true
+  old_status=running
+else
+  set +e; wait "$old_pid"; old_status=$?; set -e
+fi
+woke=yes
+if [ "$old_status" != running ] && [ "$old_status" -ne 2 ] && ! grep -q "Anderton watch" "$work/old.out"; then woke=no; fi
+check "the replaced watch ends by its signal, not exit 2, so it wakes no one" [ "$woke" = no ]
+kill "$watcher_pid" 2>/dev/null || true
+wait "$watcher_pid" 2>/dev/null || true
 unset ANDERTON_PROBE_TIMEOUT ANDERTON_PROBE_FAILURES ANDERTON_WATCH_TICK
 
 # The role follows the session: a resume runs it as a new process, a restart gives it a new start time,
