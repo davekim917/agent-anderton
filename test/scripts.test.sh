@@ -1693,8 +1693,9 @@ if kill -0 "$old_pid" 2>/dev/null; then
 else
   set +e; wait "$old_pid"; old_status=$?; set -e
 fi
-check "the replaced watch ends by its signal, not exit 2, so it wakes no one" \
-  eval '[ "$old_status" != running ] && [ "$old_status" -ne 2 ] && ! grep -q "Anderton watch" "$work/old.out"'
+woke=yes
+if [ "$old_status" != running ] && [ "$old_status" -ne 2 ] && ! grep -q "Anderton watch" "$work/old.out"; then woke=no; fi
+check "the replaced watch ends by its signal, not exit 2, so it wakes no one" [ "$woke" = no ]
 kill "$watcher_pid" 2>/dev/null || true
 wait "$watcher_pid" 2>/dev/null || true
 unset ANDERTON_PROBE_TIMEOUT ANDERTON_PROBE_FAILURES ANDERTON_WATCH_TICK
