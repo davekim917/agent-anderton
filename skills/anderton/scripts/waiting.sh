@@ -203,7 +203,7 @@ EOF
   printf '%s' "$agents_json" | jq -e --arg n "$name" --arg id "$id" --arg d "$dir" 'any(.[]?; .state == "working"
     and (.name == $n or ($id != "" and .id == $id) or ((.cwd // "") as $c | $c == $d or ($c | startswith($d + "/")))))' >/dev/null 2>&1
 }
-finished() { # finished <record>: prints why the worker's work is finished, or nothing
+finished() { # finished <record>: prints why the worker's work is finished, "open" when a PR for it is open, or nothing
   local dir base head ref land at branch prs
   dir=$(jq -r '.dir // empty' "$1")
   [ -n "$dir" ] || return 0
@@ -223,7 +223,10 @@ finished() { # finished <record>: prints why the worker's work is finished, or n
   prs=""
   if [ -n "$branch" ] && command -v gh >/dev/null 2>&1; then
     prs=$(cd "$dir" && gh pr list --head "$branch" --state all --limit 20 --json number,state,mergedAt,closedAt,headRefOid 2>/dev/null) || prs=""
-    if printf '%s' "$prs" | jq -e 'any(.[]?; .state == "OPEN")' >/dev/null 2>&1; then return 0; fi
+    if printf '%s' "$prs" | jq -e 'any(.[]?; .state == "OPEN")' >/dev/null 2>&1; then
+      echo open
+      return 0
+    fi
   fi
   # A worker still at the commit it started from has landed nothing.
   if [ -n "$ref" ] && [ "$head" != "$base" ] && git -C "$dir" merge-base --is-ancestor "$head" "$ref" 2>/dev/null; then
@@ -244,7 +247,7 @@ finished() { # finished <record>: prints why the worker's work is finished, or n
 }
 last_activity() { # last_activity <record>: epoch seconds of the newest transcript entry of any session that may be
   # that worker (by name, id, or a cwd inside its worktree), else of its start; nothing when neither is known
-  local name id dir sids sid t at best=""
+  local name id dir sids sid t at start best=""
   name=$(jq -r '.name // empty' "$1")
   id=$(jq -r '.id // empty' "$1")
   dir=$(jq -r '.dir // empty' "$1")
@@ -260,9 +263,9 @@ last_activity() { # last_activity <record>: epoch seconds of the newest transcri
       if [ -n "$at" ] && { [ -z "$best" ] || [ "$at" -gt "$best" ]; }; then best=$at; fi
     done
   done
-  if [ -z "$best" ]; then
-    best=$(jq -r '.startedAt // empty | strings | fromdateiso8601? // empty' "$1" 2>/dev/null || true)
-  fi
+  # A session left by an earlier worker of the same name predates this one, so activity counts from its start at most.
+  start=$(jq -r '.startedAt // empty | strings | fromdateiso8601? // empty' "$1" 2>/dev/null || true)
+  if [ -n "$start" ] && { [ -z "$best" ] || [ "$start" -gt "$best" ]; }; then best=$start; fi
   if [ -n "$best" ]; then echo "$best"; fi
 }
 ready_to_retire() {
@@ -296,6 +299,8 @@ EOF
     answers_for "$name" "$dir" || continue
     if worker_busy "$r"; then continue; fi
     why=$(finished "$r" || true)
+    # A PR still open is work in flight, however long it waits on review.
+    if [ "$why" = open ]; then continue; fi
     # Work done in some other worktree leaves this one at its base, so a worker idle a day is listed too.
     if [ -z "$why" ]; then
       at=$(last_activity "$r" || true)
