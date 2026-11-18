@@ -177,9 +177,10 @@ After starting a worker:
   comes, check the PR or the worktree instead of subscribing again. Each notice wakes you
   and re-reads your whole context.
 - The user can open a background worker with `claude attach <name>` or from their phone.
-- When its PR is merged or the work is dropped, run `scripts/retire.sh <name>`. It
-  stops the session and removes the worktree, unless the worktree holds work no
-  remote has.
+- Retire every worker `scripts/waiting.sh` lists under **Ready to retire**, and one
+  whose work you dropped, with `scripts/retire.sh <name>`. It stops the session and
+  removes the worktree, unless the worktree holds work no remote has: a line that
+  names such work is yours to push or discard first.
 
 **Before anything is built**, settle the data model, the module boundary and the
 caller's usage. That decision is yours even when the build is not.
