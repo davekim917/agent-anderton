@@ -188,16 +188,20 @@ ago() { # ago <epoch seconds>
   elif [ "$d" -ge 60 ]; then echo "$((d / 60))m ago"
   else echo "just now"; fi
 }
-worker_busy() { # worker_busy <name>: true when a live session by that name is mid-turn
-  local f
-  for f in "$sessions"/*.json; do
-    [ -e "$f" ] || continue
-    if [ "$(jq -r 'select(.status == "busy") | .name // empty' "$f" 2>/dev/null || true)" = "$1" ] &&
-      registered_alive "$(jq -r .pid "$f")" "$(jq -r '.startedAt // empty | floor' "$f")" "$(jq -r '.procStart // empty' "$f")"; then
-      return 0
-    fi
-  done
-  printf '%s' "$agents_json" | jq -e --arg n "$1" 'any(.[]?; .name == $n and .state == "working")' >/dev/null 2>&1
+worker_busy() { # worker_busy <record>: true when a live session that is that worker is mid-turn, matched by its recorded
+  # name or id, or by working inside its worktree, since a renamed worker is still the process retire.sh stops
+  local name id dir
+  name=$(jq -r '.name // empty' "$1")
+  id=$(jq -r '.id // empty' "$1")
+  dir=$(jq -r '.dir // empty' "$1")
+  local bn bc
+  while IFS=$'\x1f' read -r bn bc; do
+    if [ -n "$bn$bc" ] && { [ "$bn" = "$name" ] || [ "$bc" = "$dir" ] || case $bc in "$dir"/*) true ;; *) false ;; esac; }; then return 0; fi
+  done <<EOF
+$busy_sessions
+EOF
+  printf '%s' "$agents_json" | jq -e --arg n "$name" --arg id "$id" --arg d "$dir" 'any(.[]?; .state == "working"
+    and (.name == $n or ($id != "" and .id == $id) or ((.cwd // "") as $c | $c == $d or ($c | startswith($d + "/")))))' >/dev/null 2>&1
 }
 finished() { # finished <record>: prints why the worker's work is finished, or nothing
   local dir base head ref land at branch prs
@@ -225,15 +229,33 @@ finished() { # finished <record>: prints why the worker's work is finished, or n
   fi
   branch=$(git -C "$dir" symbolic-ref -q --short HEAD 2>/dev/null) || return 0
   command -v gh >/dev/null 2>&1 || return 0
-  prs=$(cd "$dir" && gh pr list --head "$branch" --state all --limit 20 --json number,state,mergedAt,closedAt 2>/dev/null) || return 0
-  printf '%s' "$prs" | jq -r 'if (length == 0) or any(.[]; .state == "OPEN") then empty
+  prs=$(cd "$dir" && gh pr list --head "$branch" --state all --limit 20 --json number,state,mergedAt,closedAt,headRefOid 2>/dev/null) || return 0
+  # Only a PR whose head is the worktree's HEAD settles it: a branch reused after its PR merged holds newer work.
+  printf '%s' "$prs" | jq -r --arg head "$head" 'map(select(.state == "OPEN" or .headRefOid == $head))
+    | if (length == 0) or any(.[]; .state == "OPEN") then empty
     else (map(select(.state == "MERGED")) + map(select(.state != "MERGED")))[0]
       | "PR #\(.number) \(.state | ascii_downcase)\t\((if .state == "MERGED" then .mergedAt else .closedAt end) // "" | sub("[.][0-9]+Z$"; "Z") | fromdateiso8601? // "")" end' 2>/dev/null |
     while IFS=$'\t' read -r what at; do echo "$what${at:+ $(ago "$at")}"; done
 }
 ready_to_retire() {
-  local r name dir why lines=""
-  agents_json=$(claude agents --json 2>/dev/null || echo '[]')
+  local r f name dir why pid start pstart bname bcwd lines=""
+  # Without the list of background sessions, which have no registry entry, a busy one would read as idle.
+  if ! agents_json=$(claude agents --json 2>/dev/null) || ! printf '%s' "$agents_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    echo "waiting.sh: claude agents failed, so no worker is judged ready to retire" >&2
+    return 0
+  fi
+  # Only the few registry files that say busy are read in full.
+  busy_sessions=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    IFS=$'\x1f' read -r pid start pstart bname bcwd <<EOF
+$(jq -r '[(.pid // "" | tostring), (.startedAt // "" | if type == "number" then floor | tostring else . end), .procStart // "", .name // "", .cwd // ""] | join("\u001f")' "$f" 2>/dev/null || true)
+EOF
+    if [ -n "$pid" ] && registered_alive "$pid" "$start" "$pstart"; then busy_sessions="$busy_sessions$bname$(printf '\037')$bcwd
+"; fi
+  done <<EOF
+$(grep -lE '"status"[[:space:]]*:[[:space:]]*"busy"' "$sessions"/*.json 2>/dev/null || true)
+EOF
   for r in "$holders"/workers/*.json; do
     [ -f "$r" ] || continue
     [ "$(jq -r '.worktree == true and (.adopted // false) == false' "$r" 2>/dev/null)" = true ] || continue
@@ -242,7 +264,7 @@ ready_to_retire() {
     if [ -z "$name" ] || [ -z "$dir" ]; then continue; fi
     if [ -z "$all" ] && [ "$(jq -r '.root // empty' "$r")" != "$root" ]; then continue; fi
     answers_for "$name" "$dir" || continue
-    if worker_busy "$name"; then continue; fi
+    if worker_busy "$r"; then continue; fi
     why=$(finished "$r" || true)
     [ -n "$why" ] || continue
     if [ -d "$dir" ]; then
