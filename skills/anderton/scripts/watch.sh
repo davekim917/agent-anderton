@@ -97,7 +97,8 @@ until take_watch; do
           kill -0 "$other" 2>/dev/null || break
           sleep 0.1
         done
-        kill -KILL "$other" 2>/dev/null
+        # Only the same process: in five seconds its pid could have gone to another.
+        if [ "$(ps -ww -o command= -p "$other" 2>/dev/null)" = "$command" ]; then kill -KILL "$other" 2>/dev/null; fi
         if [ "$(watch_owner)" = "$other" ]; then rm -f "$watcher"; fi
       else
         # A watch for this holder keeps the job. An earlier holder's leaves within a tick of losing the role.
