@@ -2266,6 +2266,20 @@ printf '{"type":"assistant","timestamp":"%s","message":{"content":[{"type":"text
 rho_worker no-session
 jq -c --arg at "$(iso $((now_s - 3 * 86400)))" '.startedAt = $at' "$CLAUDE_CONFIG_DIR/anderton/workers/no-session.json" > "$work/ns.tmp"
 mv "$work/ns.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/no-session.json"
+rho_worker reborn
+jq -c --arg at "$recent" '.startedAt = $at' "$CLAUDE_CONFIG_DIR/anderton/workers/reborn.json" > "$work/rb.tmp"
+mv "$work/rb.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/reborn.json"
+spawn dead; session "$pid" rb-old "$work/elsewhere" reborn
+printf '{"type":"assistant","timestamp":"%s","message":{"content":[{"type":"text","text":"An earlier worker by this name."}]}}\n' "$two_days_ago" \
+  > "$CLAUDE_CONFIG_DIR/projects/p/rb-old.jsonl"
+rho_worker review-wait
+git -C "$work/wt-review-wait" checkout -q -b feat-review-wait
+rho_commit review-wait
+git -C "$work/wt-review-wait" push -q origin HEAD:refs/heads/feat-review-wait 2>/dev/null
+printf '[{"number":16,"state":"OPEN","mergedAt":null,"closedAt":null,"headRefOid":"%s"}]\n' "$(git -C "$work/wt-review-wait" rev-parse HEAD)" \
+  > "$FAKE_GH/feat-review-wait.json"
+jq -c --arg at "$two_days_ago" '.startedAt = $at' "$CLAUDE_CONFIG_DIR/anderton/workers/review-wait.json" > "$work/rw.tmp"
+mv "$work/rw.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/review-wait.json"
 rho_worker busy-old
 spawn; p_bo=$pid; session "$p_bo" bo-1 "$work/wt-busy-old" busy-old "$(date +%s)000"
 registry "$p_bo" busy
@@ -2293,6 +2307,8 @@ check "and a worker idle a day with nothing finished here, from its session's la
 check "or, with no session found, from when it started" contains "- no-session: idle 3d, no finished work found — check its PR"
 check "but not one active within the day" eval '! contains "lately"'
 check "nor a busy one, however long since its last entry" eval '! contains "busy-old"'
+check "nor a new worker reusing the name of one whose old session went idle long ago" eval '! contains "reborn"'
+check "nor one idle a day while its PR waits open on review" eval '! contains "review-wait"'
 check "a finished worker keeps its own reason, not the idle one" eval 'contains "- gone-wt: worktree gone" && ! contains "gone-wt: idle"'
 check "nor a background worker working under another name" eval '! contains "bg-busy"'
 echo '[]' > "$FAKE_AGENTS"
@@ -2304,7 +2320,7 @@ out=$(cd "$rho" && env CLAUDE_PID="$p_rl" "$scripts/waiting.sh" --blocked)
 check "--blocked, for watch.sh, prints no Ready to retire section" eval '! contains "Ready to retire"'
 out=$(env CLAUDE_PID="$p_lead" "$scripts/waiting.sh")
 check "another project's Anderton is not shown them" eval '! contains "gone-wt"'
-for n in gone-wt landed fresh dirty busy-done squashed reused renamed backport bg-busy open-pr side-done stale lately no-session busy-old; do
+for n in gone-wt landed fresh dirty busy-done squashed reused renamed backport bg-busy open-pr side-done stale lately no-session busy-old reborn review-wait; do
   rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/$n.json"
   [ ! -d "$work/wt-$n" ] || git -C "$rho" worktree remove --force "$work/wt-$n"
 done

@@ -178,7 +178,9 @@ After starting a worker:
   and re-reads your whole context.
 - The user can open a background worker with `claude attach <name>` or from their phone.
 - Retire every worker `scripts/waiting.sh` lists under **Ready to retire**, and one
-  whose work you dropped, with `scripts/retire.sh <name>`. It stops the session and
+  whose work you dropped, with `scripts/retire.sh <name>`. A line that says `idle`
+  found no finished work: ask the worker or check its PR first, and retire it once
+  its work is merged or dropped. It stops the session and
   removes the worktree, unless the worktree holds work no remote has: a line that
   names such work is yours to push or discard first.
 
