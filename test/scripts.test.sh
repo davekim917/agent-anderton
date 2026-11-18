@@ -2235,6 +2235,12 @@ rho_commit renamed
 git -C "$work/wt-renamed" push -q origin HEAD:refs/heads/main 2>/dev/null
 spawn; p_rn2=$pid; session "$p_rn2" rn-2 "$work/wt-renamed/sub" renamed-by-user "$(date +%s)000"
 registry "$p_rn2" busy
+rho_worker backport
+git -C "$work/wt-backport" checkout -q -b feat-backport
+rho_commit backport
+git -C "$work/wt-backport" push -q origin HEAD:refs/heads/main 2>/dev/null
+printf '[{"number":15,"state":"OPEN","mergedAt":null,"closedAt":null,"headRefOid":"%s"}]\n' "$(git -C "$work/wt-backport" rev-parse HEAD)" \
+  > "$FAKE_GH/feat-backport.json"
 rho_worker bg-busy
 rho_commit bg-busy
 git -C "$work/wt-bg-busy" push -q origin HEAD:refs/heads/main 2>/dev/null
@@ -2247,7 +2253,7 @@ printf '[{"number":13,"state":"OPEN","mergedAt":null,"closedAt":null,"headRefOid
 rho_worker side-done rho-scope
 git -C "$rho" worktree remove "$work/wt-side-done"
 git -C "$rho" fetch -q origin
-jq -nc --arg d "$work/wt-bg-busy" '[{kind: "background", name: "bg-renamed", id: "id-bg-busy", sessionId: "bgb-1", cwd: $d, state: "working"}]' > "$FAKE_AGENTS"
+jq -nc --arg d "$work/wt-bg-busy" '[{kind: "background", name: "bg-renamed", id: "id-bg-busy", sessionId: "bgb-1", cwd: "/elsewhere", state: "working"}]' > "$FAKE_AGENTS"
 out=$(cd "$rho" && env CLAUDE_PID="$p_rl" "$scripts/waiting.sh")
 check "waiting.sh has a Ready to retire section" contains "=== Ready to retire"
 check "listing a worker whose worktree was removed out from under its record" contains "- gone-wt: worktree gone"
@@ -2260,6 +2266,7 @@ check "nor one with a PR still open" eval '! contains "open-pr"'
 check "nor another Anderton's worker" eval '! contains "side-done"'
 check "nor a reused branch whose merged PR is behind its HEAD" eval '! contains "reused"'
 check "nor a busy worker its user renamed" eval '! contains "renamed"'
+check "nor one on origin/main with a PR to another branch still open" eval '! contains "backport"'
 check "nor a background worker working under another name" eval '! contains "bg-busy"'
 echo '[]' > "$FAKE_AGENTS"
 out=$(cd "$rho" && env CLAUDE_PID="$p_rl" FAKE_AGENTS="$work/no-such-agents.json" "$scripts/waiting.sh" 2>&1 || true)
@@ -2270,7 +2277,7 @@ out=$(cd "$rho" && env CLAUDE_PID="$p_rl" "$scripts/waiting.sh" --blocked)
 check "--blocked, for watch.sh, prints no Ready to retire section" eval '! contains "Ready to retire"'
 out=$(env CLAUDE_PID="$p_lead" "$scripts/waiting.sh")
 check "another project's Anderton is not shown them" eval '! contains "gone-wt"'
-for n in gone-wt landed fresh dirty busy-done squashed reused renamed bg-busy open-pr side-done; do
+for n in gone-wt landed fresh dirty busy-done squashed reused renamed backport bg-busy open-pr side-done; do
   rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/$n.json"
   [ ! -d "$work/wt-$n" ] || git -C "$rho" worktree remove --force "$work/wt-$n"
 done
