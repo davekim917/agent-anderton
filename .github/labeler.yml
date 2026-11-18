@@ -11,7 +11,18 @@ risk:high:
     - 'hooks/**'
     - 'test/**'
     - '.github/**'
-    # The plugin manifest decides what an install loads
-    - '.claude-plugin/**'
-    # The public-boundary scan's exemptions, read from the default branch
-    - '.public-boundary-*.json'
+    # Every dotfile and dot-directory: the plugin manifest, the public-boundary scan's
+    # exemptions, and agent config (.claude, .mcp.json)
+    - '.*'
+    - '.*/**'
+    - 'AGENTS.md'
+    - 'CLAUDE.md'
+    # What Claude Code loads from a plugin root without a manifest change
+    - 'agents/**'
+    - 'commands/**'
+    - 'output-styles/**'
+    - 'bin/**'
+    - 'settings.json'
+    # Published license terms
+    - 'LICENSE*'
+    - 'NOTICE.md'
