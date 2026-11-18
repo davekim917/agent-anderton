@@ -212,6 +212,18 @@ that is `blocked`, and one that is `done` with a turn in the last two days. A wo
 started is listed, marked `(worker)`, only while the registry or `claude agents` says it is
 blocked on a prompt; otherwise it reports to the Anderton.
 
+Then, under `Ready to retire`, it names each recorded worker the caller answers for whose work is
+finished, with the reason: its worktree is gone; its HEAD, past the commit it started from, is on
+origin's default branch as the cached remote ref has it (no fetch), with how long ago it landed; or,
+with `gh` installed, a PR whose head is its HEAD is merged or closed and none for its branch is open.
+A worker is left out while any session that may be it is busy: one under its name or recorded id, or
+one working in its worktree, so renaming it does not hide it. When `claude agents` fails, no worker
+is judged ready. After those reasons, a worker found none of them for, and idle for a day, is listed as
+`idle Nd, no finished work found — check its PR`, since one whose work sits in another repository's
+worktree leaves its own at its base. Idle time runs from the newest transcript entry of any session
+that may be it, else from when it was started. A line notes uncommitted work, or commits no remote branch has, which `retire.sh`
+would keep. `--blocked` leaves this section out.
+
 **`spawn.sh --effort LEVEL [--bg] [--model M] [--mode MODE] [--base REF] <name> [brief-file]`**
 starts a worker: a full Claude Code session named `<name>`, in a new git worktree at
 `$ANDERTON_WORKTREES/wt-<name>` (default: the folder that holds the repository). The base is

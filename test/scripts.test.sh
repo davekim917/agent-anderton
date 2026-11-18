@@ -150,6 +150,19 @@ case $1 in
 esac
 FAKE
 chmod +x "$work/bin/tmux"
+# A fake gh: `pr list --head <branch>` prints $FAKE_GH/<branch>.json, else no PRs.
+cat > "$work/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+branch=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = --head ]; then branch=$2; fi
+  shift
+done
+cat "$FAKE_GH/$branch.json" 2>/dev/null || echo '[]'
+FAKE
+chmod +x "$work/bin/gh"
+export FAKE_GH="$work/gh-prs"
+mkdir -p "$FAKE_GH"
 export PATH="$work/bin:$PATH" FAKE_AGENTS="$work/agents.json" FAKE_LOG="$work/claude-log"
 echo '[]' > "$FAKE_AGENTS"
 mkdir -p "$CLAUDE_CONFIG_DIR/sessions" "$CLAUDE_CONFIG_DIR/projects/p" "$work/beta"
@@ -2166,6 +2179,151 @@ check "tmux: the pane is the one the session's process descends from" eval '[ "$
 FAKE_KEY_CLOSES=1 prompt blocked-one yes "$fp"
 check "tmux: yes presses Enter in that pane" eval '[ "$status" -eq 0 ] && [ "$(pressed)" = "%3 Enter" ]'
 rm -f "$FAKE_LOG.keys" "$FAKE_LOG.tmux-panes" "$screen.bak"
+
+# waiting.sh's Ready to retire: a recorded worker whose work is finished, so its record never outlives its PR.
+rho="$work/rho"
+git init -q --bare "$work/rho-origin.git"
+git init -q "$rho"
+git -C "$rho" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init
+git -C "$rho" remote add origin "$work/rho-origin.git"
+git -C "$rho" push -q origin HEAD:refs/heads/main 2>/dev/null
+git -C "$rho" fetch -q origin
+spawn; p_rl=$pid; session "$p_rl" rl-1 "$rho" rho-lead "$(date +%s)000"
+spawn; p_rs=$pid; session "$p_rs" rs-1 "$rho" rho-scope "$(date +%s)000"
+(cd "$rho" && env CLAUDE_PID="$p_rl" CLAUDE_CODE_SESSION_ID=rl-1 "$scripts/claim.sh" >/dev/null)
+(cd "$rho" && env CLAUDE_PID="$p_rs" CLAUDE_CODE_SESSION_ID=rs-1 "$scripts/claim.sh" --scope side >/dev/null)
+rho_worker() { # rho_worker <name> [spawner]: a worker record and its worktree at origin/main, as spawn.sh makes them
+  mkdir -p "$CLAUDE_CONFIG_DIR/anderton/workers"
+  git -C "$rho" worktree add -q --detach "$work/wt-$1" origin/main
+  jq -nc --arg name "$1" --arg dir "$work/wt-$1" --arg root "$rho" --arg base "$(git -C "$work/wt-$1" rev-parse HEAD)" --arg spawner "${2:-rho-lead}" \
+    '{name: $name, launcher: "bg", id: ("id-" + $name), dir: $dir, root: $root, base: $base, worktree: true, spawner: $spawner}' \
+    > "$CLAUDE_CONFIG_DIR/anderton/workers/$1.json"
+}
+rho_commit() { # rho_commit <name> [committer date]: a commit in that worker's worktree
+  GIT_COMMITTER_DATE="${2:-}" git -C "$work/wt-$1" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "$1"
+}
+rho_worker gone-wt
+git -C "$rho" worktree remove "$work/wt-gone-wt"
+rho_worker landed
+rho_commit landed "$(iso $((now_s - 2 * 86400)))"
+git -C "$work/wt-landed" push -q origin HEAD:refs/heads/main 2>/dev/null
+rho_worker fresh
+rho_worker dirty
+rho_commit dirty
+git -C "$work/wt-dirty" push -q origin HEAD:refs/heads/main 2>/dev/null
+echo draft > "$work/wt-dirty/notes.txt"
+rho_worker busy-done
+rho_commit busy-done
+git -C "$work/wt-busy-done" push -q origin HEAD:refs/heads/main 2>/dev/null
+spawn; p_bd=$pid; session "$p_bd" bd-1 "$work/wt-busy-done" busy-done "$(date +%s)000"
+registry "$p_bd" busy
+rho_worker squashed
+git -C "$work/wt-squashed" checkout -q -b feat-squash
+rho_commit squashed
+git -C "$work/wt-squashed" push -q origin HEAD:refs/heads/feat-squash 2>/dev/null
+printf '[{"number":12,"state":"MERGED","mergedAt":"%s","closedAt":"%s","headRefOid":"%s"}]\n' "$(iso $((now_s - 3 * 86400)))" \
+  "$(iso $((now_s - 3 * 86400)))" "$(git -C "$work/wt-squashed" rev-parse HEAD)" > "$FAKE_GH/feat-squash.json"
+rho_worker reused
+git -C "$work/wt-reused" checkout -q -b feat-reused
+rho_commit reused
+printf '[{"number":14,"state":"MERGED","mergedAt":"%s","closedAt":"%s","headRefOid":"%s"}]\n' "$recent" "$recent" \
+  "$(git -C "$work/wt-reused" rev-parse HEAD)" > "$FAKE_GH/feat-reused.json"
+rho_commit reused
+git -C "$work/wt-reused" push -q origin HEAD:refs/heads/feat-reused 2>/dev/null
+rho_worker renamed
+rho_commit renamed
+git -C "$work/wt-renamed" push -q origin HEAD:refs/heads/main 2>/dev/null
+spawn; p_rn2=$pid; session "$p_rn2" rn-2 "$work/wt-renamed/sub" renamed-by-user "$(date +%s)000"
+registry "$p_rn2" busy
+rho_worker backport
+git -C "$work/wt-backport" checkout -q -b feat-backport
+rho_commit backport
+git -C "$work/wt-backport" push -q origin HEAD:refs/heads/main 2>/dev/null
+printf '[{"number":15,"state":"OPEN","mergedAt":null,"closedAt":null,"headRefOid":"%s"}]\n' "$(git -C "$work/wt-backport" rev-parse HEAD)" \
+  > "$FAKE_GH/feat-backport.json"
+rho_worker bg-busy
+rho_commit bg-busy
+git -C "$work/wt-bg-busy" push -q origin HEAD:refs/heads/main 2>/dev/null
+rho_worker open-pr
+git -C "$work/wt-open-pr" checkout -q -b feat-open
+rho_commit open-pr
+git -C "$work/wt-open-pr" push -q origin HEAD:refs/heads/feat-open 2>/dev/null
+printf '[{"number":13,"state":"OPEN","mergedAt":null,"closedAt":null,"headRefOid":"%s"},{"number":9,"state":"CLOSED","mergedAt":null,"closedAt":"2020-01-01T00:00:00Z","headRefOid":"%s"}]\n' \
+  "$(git -C "$work/wt-open-pr" rev-parse HEAD)" "$(git -C "$work/wt-open-pr" rev-parse HEAD)" > "$FAKE_GH/feat-open.json"
+rho_worker side-done rho-scope
+# Workers whose real work is in another repository's worktree: their own stays at its base.
+two_days_ago=$(iso $((now_s - 2 * 86400)))
+rho_worker stale
+spawn; p_st=$pid; session "$p_st" st-1 "$work/wt-stale" stale "$(date +%s)000"
+registry "$p_st" idle
+printf '{"type":"assistant","timestamp":"%s","message":{"content":[{"type":"text","text":"Opened the PR elsewhere."}]}}\n' "$two_days_ago" \
+  > "$CLAUDE_CONFIG_DIR/projects/p/st-1.jsonl"
+rho_worker lately
+spawn; p_la=$pid; session "$p_la" la-1 "$work/wt-lately" lately "$(date +%s)000"
+registry "$p_la" idle
+printf '{"type":"assistant","timestamp":"%s","message":{"content":[{"type":"text","text":"Still on it."}]}}\n' "$five_min_ago" \
+  > "$CLAUDE_CONFIG_DIR/projects/p/la-1.jsonl"
+rho_worker no-session
+jq -c --arg at "$(iso $((now_s - 3 * 86400)))" '.startedAt = $at' "$CLAUDE_CONFIG_DIR/anderton/workers/no-session.json" > "$work/ns.tmp"
+mv "$work/ns.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/no-session.json"
+rho_worker reborn
+jq -c --arg at "$recent" '.startedAt = $at' "$CLAUDE_CONFIG_DIR/anderton/workers/reborn.json" > "$work/rb.tmp"
+mv "$work/rb.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/reborn.json"
+spawn dead; session "$pid" rb-old "$work/elsewhere" reborn
+printf '{"type":"assistant","timestamp":"%s","message":{"content":[{"type":"text","text":"An earlier worker by this name."}]}}\n' "$two_days_ago" \
+  > "$CLAUDE_CONFIG_DIR/projects/p/rb-old.jsonl"
+rho_worker review-wait
+git -C "$work/wt-review-wait" checkout -q -b feat-review-wait
+rho_commit review-wait
+git -C "$work/wt-review-wait" push -q origin HEAD:refs/heads/feat-review-wait 2>/dev/null
+printf '[{"number":16,"state":"OPEN","mergedAt":null,"closedAt":null,"headRefOid":"%s"}]\n' "$(git -C "$work/wt-review-wait" rev-parse HEAD)" \
+  > "$FAKE_GH/feat-review-wait.json"
+jq -c --arg at "$two_days_ago" '.startedAt = $at' "$CLAUDE_CONFIG_DIR/anderton/workers/review-wait.json" > "$work/rw.tmp"
+mv "$work/rw.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/review-wait.json"
+rho_worker busy-old
+spawn; p_bo=$pid; session "$p_bo" bo-1 "$work/wt-busy-old" busy-old "$(date +%s)000"
+registry "$p_bo" busy
+printf '{"type":"assistant","timestamp":"%s","message":{"content":[{"type":"text","text":"Long build."}]}}\n' "$two_days_ago" \
+  > "$CLAUDE_CONFIG_DIR/projects/p/bo-1.jsonl"
+jq -c --arg at "$two_days_ago" '.startedAt = $at' "$CLAUDE_CONFIG_DIR/anderton/workers/gone-wt.json" > "$work/gw.tmp"
+mv "$work/gw.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/gone-wt.json"
+git -C "$rho" worktree remove "$work/wt-side-done"
+git -C "$rho" fetch -q origin
+jq -nc --arg d "$work/wt-bg-busy" '[{kind: "background", name: "bg-renamed", id: "id-bg-busy", sessionId: "bgb-1", cwd: "/elsewhere", state: "working"}]' > "$FAKE_AGENTS"
+out=$(cd "$rho" && env CLAUDE_PID="$p_rl" "$scripts/waiting.sh")
+check "waiting.sh has a Ready to retire section" contains "=== Ready to retire"
+check "listing a worker whose worktree was removed out from under its record" contains "- gone-wt: worktree gone"
+check "and one whose commit is merged upstream, with when it landed" contains "- landed: branch merged into origin/main 2d ago"
+check "and one whose PR was squash-merged, from gh" contains "- squashed: PR #12 merged 3d ago"
+check "naming the uncommitted work of a finished worker" contains "- dirty: branch merged into origin/main just now, but has uncommitted work"
+check "never a busy worker" eval '! contains "busy-done"'
+check "nor a worker still at the commit it started from" eval '! contains "fresh"'
+check "nor one with a PR still open" eval '! contains "open-pr"'
+check "nor another Anderton's worker" eval '! contains "side-done"'
+check "nor a reused branch whose merged PR is behind its HEAD" eval '! contains "reused"'
+check "nor a busy worker its user renamed" eval '! contains "renamed"'
+check "nor one on origin/main with a PR to another branch still open" eval '! contains "backport"'
+check "and a worker idle a day with nothing finished here, from its session's last activity" contains "- stale: idle 2d, no finished work found — check its PR"
+check "or, with no session found, from when it started" contains "- no-session: idle 3d, no finished work found — check its PR"
+check "but not one active within the day" eval '! contains "lately"'
+check "nor a busy one, however long since its last entry" eval '! contains "busy-old"'
+check "nor a new worker reusing the name of one whose old session went idle long ago" eval '! contains "reborn"'
+check "nor one idle a day while its PR waits open on review" eval '! contains "review-wait"'
+check "a finished worker keeps its own reason, not the idle one" eval 'contains "- gone-wt: worktree gone" && ! contains "gone-wt: idle"'
+check "nor a background worker working under another name" eval '! contains "bg-busy"'
+echo '[]' > "$FAKE_AGENTS"
+out=$(cd "$rho" && env CLAUDE_PID="$p_rl" FAKE_AGENTS="$work/no-such-agents.json" "$scripts/waiting.sh" 2>&1 || true)
+check "when claude agents fails, no worker is judged ready, since a busy one would read as idle" eval '! contains "Ready to retire" && contains "claude agents failed"'
+out=$(cd "$rho" && env CLAUDE_PID="$p_rs" "$scripts/waiting.sh")
+check "which that Anderton is shown" eval 'contains "- side-done: worktree gone" && ! contains "gone-wt"'
+out=$(cd "$rho" && env CLAUDE_PID="$p_rl" "$scripts/waiting.sh" --blocked)
+check "--blocked, for watch.sh, prints no Ready to retire section" eval '! contains "Ready to retire"'
+out=$(env CLAUDE_PID="$p_lead" "$scripts/waiting.sh")
+check "another project's Anderton is not shown them" eval '! contains "gone-wt"'
+for n in gone-wt landed fresh dirty busy-done squashed reused renamed backport bg-busy open-pr side-done stale lately no-session busy-old reborn review-wait; do
+  rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/$n.json"
+  [ ! -d "$work/wt-$n" ] || git -C "$rho" worktree remove --force "$work/wt-$n"
+done
 
 [ "$failures" -eq 0 ] || { echo "$failures check(s) failed"; exit 1; }
 echo "all checks passed"

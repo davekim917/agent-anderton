@@ -177,6 +177,152 @@ EOF
     echo "waiting.sh: could not read $transcript" >&2
 done
 
+# The workers the caller answers for whose work is finished, so none outlives its PR: its worktree is gone, its HEAD
+# has landed on origin's default branch (as the cached remote ref has it: no fetch here), or a PR for its branch is
+# merged or closed (gh, read-only, when it is installed). A busy worker is never listed; one with work retire.sh
+# would keep is listed with that work named. Adopted sessions have no worktree of their own and are left out.
+ago() { # ago <epoch seconds>
+  local d=$(( $(date +%s) - $1 ))
+  if [ "$d" -ge 86400 ]; then echo "$((d / 86400))d ago"
+  elif [ "$d" -ge 3600 ]; then echo "$((d / 3600))h ago"
+  elif [ "$d" -ge 60 ]; then echo "$((d / 60))m ago"
+  else echo "just now"; fi
+}
+worker_busy() { # worker_busy <record>: true when a live session that is that worker is mid-turn, matched by its recorded
+  # name or id, or by working inside its worktree, since a renamed worker is still the process retire.sh stops
+  local name id dir
+  name=$(jq -r '.name // empty' "$1")
+  id=$(jq -r '.id // empty' "$1")
+  dir=$(jq -r '.dir // empty' "$1")
+  local bn bc
+  while IFS=$'\x1f' read -r bn bc; do
+    if [ -n "$bn$bc" ] && { [ "$bn" = "$name" ] || [ "$bc" = "$dir" ] || case $bc in "$dir"/*) true ;; *) false ;; esac; }; then return 0; fi
+  done <<EOF
+$busy_sessions
+EOF
+  printf '%s' "$agents_json" | jq -e --arg n "$name" --arg id "$id" --arg d "$dir" 'any(.[]?; .state == "working"
+    and (.name == $n or ($id != "" and .id == $id) or ((.cwd // "") as $c | $c == $d or ($c | startswith($d + "/")))))' >/dev/null 2>&1
+}
+finished() { # finished <record>: prints why the worker's work is finished, "open" when a PR for it is open, or nothing
+  local dir base head ref land at branch prs
+  dir=$(jq -r '.dir // empty' "$1")
+  [ -n "$dir" ] || return 0
+  if [ ! -d "$dir" ]; then
+    echo "worktree gone"
+    return
+  fi
+  head=$(git -C "$dir" rev-parse -q --verify HEAD 2>/dev/null) || return 0
+  base=$(jq -r '.base // empty' "$1")
+  for ref in "$(git -C "$dir" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)" origin/main origin/master; do
+    if [ -n "$ref" ] && git -C "$dir" rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1; then break; fi
+    ref=""
+  done
+  # Any open PR for its branch, whatever it targets, means the work is not finished; only a PR whose head is the
+  # worktree's HEAD settles it otherwise, since a branch reused after its PR merged holds newer work.
+  branch=$(git -C "$dir" symbolic-ref -q --short HEAD 2>/dev/null || true)
+  prs=""
+  if [ -n "$branch" ] && command -v gh >/dev/null 2>&1; then
+    prs=$(cd "$dir" && gh pr list --head "$branch" --state all --limit 20 --json number,state,mergedAt,closedAt,headRefOid 2>/dev/null) || prs=""
+    if printf '%s' "$prs" | jq -e 'any(.[]?; .state == "OPEN")' >/dev/null 2>&1; then
+      echo open
+      return 0
+    fi
+  fi
+  # A worker still at the commit it started from has landed nothing.
+  if [ -n "$ref" ] && [ "$head" != "$base" ] && git -C "$dir" merge-base --is-ancestor "$head" "$ref" 2>/dev/null; then
+    # It landed in the oldest commit on the branch's first-parent line that contains it: a merge commit, or itself
+    # when it was fast-forwarded or rebased in, and then the commit after it has it as first parent.
+    land=$(git -C "$dir" rev-list --first-parent --ancestry-path "$head..$ref" 2>/dev/null | tail -n 1)
+    if [ -z "$land" ] || [ "$(git -C "$dir" rev-parse -q --verify "$land^1" 2>/dev/null)" = "$head" ]; then land=$head; fi
+    at=$(git -C "$dir" log -1 --format=%ct "$land" 2>/dev/null || true)
+    echo "branch merged into $ref${at:+ $(ago "$at")}"
+    return
+  fi
+  [ -n "$prs" ] || return 0
+  printf '%s' "$prs" | jq -r --arg head "$head" 'map(select(.headRefOid == $head))
+    | if length == 0 then empty
+    else (map(select(.state == "MERGED")) + map(select(.state != "MERGED")))[0]
+      | "PR #\(.number) \(.state | ascii_downcase)\t\((if .state == "MERGED" then .mergedAt else .closedAt end) // "" | sub("[.][0-9]+Z$"; "Z") | fromdateiso8601? // "")" end' 2>/dev/null |
+    while IFS=$'\t' read -r what at; do echo "$what${at:+ $(ago "$at")}"; done
+}
+last_activity() { # last_activity <record>: epoch seconds of the newest transcript entry of any session that may be
+  # that worker (by name, id, or a cwd inside its worktree), else of its start; nothing when neither is known
+  local name id dir sids sid t at start best=""
+  name=$(jq -r '.name // empty' "$1")
+  id=$(jq -r '.id // empty' "$1")
+  dir=$(jq -r '.dir // empty' "$1")
+  sids=$( { printf '%s\n' "$registry_entries"; printf '%s' "$agents_json" | jq -c '.[]?' 2>/dev/null || true; } |
+    jq -rR --arg n "$name" --arg id "$id" --arg d "$dir" 'fromjson? | objects
+      | select(.name == $n or ($id != "" and .id == $id) or ((.cwd // "") as $c | $c == $d or ($c | startswith($d + "/"))))
+      | .sessionId // empty' 2>/dev/null | sort -u || true)
+  for sid in $sids; do
+    for t in "$home"/projects/*/"$sid".jsonl; do
+      [ -e "$t" ] || continue
+      at=$(tail -n 200 "$t" | jq -rR 'fromjson? | .timestamp? // empty | strings' 2>/dev/null | sort | tail -n 1 |
+        jq -rR 'sub("[.][0-9]+Z$"; "Z") | fromdateiso8601? // empty' 2>/dev/null || true)
+      if [ -n "$at" ] && { [ -z "$best" ] || [ "$at" -gt "$best" ]; }; then best=$at; fi
+    done
+  done
+  # A session left by an earlier worker of the same name predates this one, so activity counts from its start at most.
+  start=$(jq -r '.startedAt // empty | strings | fromdateiso8601? // empty' "$1" 2>/dev/null || true)
+  if [ -n "$start" ] && { [ -z "$best" ] || [ "$start" -gt "$best" ]; }; then best=$start; fi
+  if [ -n "$best" ]; then echo "$best"; fi
+}
+ready_to_retire() {
+  local r f name dir why at pid start pstart bname bcwd lines=""
+  # Without the list of background sessions, which have no registry entry, a busy one would read as idle.
+  if ! agents_json=$(claude agents --json 2>/dev/null) || ! printf '%s' "$agents_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    echo "waiting.sh: claude agents failed, so no worker is judged ready to retire" >&2
+    return 0
+  fi
+  # Every registry entry on one line each, for last_activity: Claude Code writes each file as one line.
+  registry_entries=$(for f in "$sessions"/*.json; do if [ -e "$f" ]; then cat "$f"; echo; fi; done)
+  # Only the few registry files that say busy are read in full.
+  busy_sessions=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    IFS=$'\x1f' read -r pid start pstart bname bcwd <<EOF
+$(jq -r '[(.pid // "" | tostring), (.startedAt // "" | if type == "number" then floor | tostring else . end), .procStart // "", .name // "", .cwd // ""] | join("\u001f")' "$f" 2>/dev/null || true)
+EOF
+    if [ -n "$pid" ] && registered_alive "$pid" "$start" "$pstart"; then busy_sessions="$busy_sessions$bname$(printf '\037')$bcwd
+"; fi
+  done <<EOF
+$(grep -lE '"status"[[:space:]]*:[[:space:]]*"busy"' "$sessions"/*.json 2>/dev/null || true)
+EOF
+  for r in "$holders"/workers/*.json; do
+    [ -f "$r" ] || continue
+    [ "$(jq -r '.worktree == true and (.adopted // false) == false' "$r" 2>/dev/null)" = true ] || continue
+    name=$(jq -r '.name // empty' "$r")
+    dir=$(jq -r '.dir // empty' "$r")
+    if [ -z "$name" ] || [ -z "$dir" ]; then continue; fi
+    if [ -z "$all" ] && [ "$(jq -r '.root // empty' "$r")" != "$root" ]; then continue; fi
+    answers_for "$name" "$dir" || continue
+    if worker_busy "$r"; then continue; fi
+    why=$(finished "$r" || true)
+    # A PR still open is work in flight, however long it waits on review.
+    if [ "$why" = open ]; then continue; fi
+    # Work done in some other worktree leaves this one at its base, so a worker idle a day is listed too.
+    if [ -z "$why" ]; then
+      at=$(last_activity "$r" || true)
+      if [ -n "$at" ] && [ $(( $(date +%s) - at )) -ge 86400 ]; then
+        why="idle $(( ($(date +%s) - at) / 86400 ))d, no finished work found — check its PR"
+      fi
+    fi
+    [ -n "$why" ] || continue
+    if [ -d "$dir" ]; then
+      if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]; then
+        why="$why, but has uncommitted work"
+      elif [ -n "$(git -C "$dir" rev-list -1 HEAD --not --remotes "$(jq -r '.base // empty' "$r")" 2>/dev/null)" ]; then
+        why="$why, but has commits no remote branch has"
+      fi
+    fi
+    lines="$lines- $name: $why
+"
+  done
+  if [ -n "$lines" ]; then printf '=== Ready to retire (run retire.sh <name>)\n%s' "$lines"; fi
+}
+[ -n "$blocked" ] || ready_to_retire
+
 # The You Should Know plugin's notes it has seen and not marked known. Its store is a private format, so a store
 # of any other shape makes jq fail, and prints nothing.
 you_should_know() {
