@@ -177,6 +177,88 @@ EOF
     echo "waiting.sh: could not read $transcript" >&2
 done
 
+# The workers the caller answers for whose work is finished, so none outlives its PR: its worktree is gone, its HEAD
+# has landed on origin's default branch (as the cached remote ref has it: no fetch here), or a PR for its branch is
+# merged or closed (gh, read-only, when it is installed). A busy worker is never listed; one with work retire.sh
+# would keep is listed with that work named. Adopted sessions have no worktree of their own and are left out.
+ago() { # ago <epoch seconds>
+  local d=$(( $(date +%s) - $1 ))
+  if [ "$d" -ge 86400 ]; then echo "$((d / 86400))d ago"
+  elif [ "$d" -ge 3600 ]; then echo "$((d / 3600))h ago"
+  elif [ "$d" -ge 60 ]; then echo "$((d / 60))m ago"
+  else echo "just now"; fi
+}
+worker_busy() { # worker_busy <name>: true when a live session by that name is mid-turn
+  local f
+  for f in "$sessions"/*.json; do
+    [ -e "$f" ] || continue
+    if [ "$(jq -r 'select(.status == "busy") | .name // empty' "$f" 2>/dev/null || true)" = "$1" ] &&
+      registered_alive "$(jq -r .pid "$f")" "$(jq -r '.startedAt // empty | floor' "$f")" "$(jq -r '.procStart // empty' "$f")"; then
+      return 0
+    fi
+  done
+  printf '%s' "$agents_json" | jq -e --arg n "$1" 'any(.[]?; .name == $n and .state == "working")' >/dev/null 2>&1
+}
+finished() { # finished <record>: prints why the worker's work is finished, or nothing
+  local dir base head ref land at branch prs
+  dir=$(jq -r '.dir // empty' "$1")
+  [ -n "$dir" ] || return 0
+  if [ ! -d "$dir" ]; then
+    echo "worktree gone"
+    return
+  fi
+  head=$(git -C "$dir" rev-parse -q --verify HEAD 2>/dev/null) || return 0
+  base=$(jq -r '.base // empty' "$1")
+  for ref in "$(git -C "$dir" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)" origin/main origin/master; do
+    if [ -n "$ref" ] && git -C "$dir" rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1; then break; fi
+    ref=""
+  done
+  # A worker still at the commit it started from has landed nothing.
+  if [ -n "$ref" ] && [ "$head" != "$base" ] && git -C "$dir" merge-base --is-ancestor "$head" "$ref" 2>/dev/null; then
+    # It landed in the oldest commit on the branch's first-parent line that contains it: a merge commit, or itself
+    # when it was fast-forwarded or rebased in, and then the commit after it has it as first parent.
+    land=$(git -C "$dir" rev-list --first-parent --ancestry-path "$head..$ref" 2>/dev/null | tail -n 1)
+    if [ -z "$land" ] || [ "$(git -C "$dir" rev-parse -q --verify "$land^1" 2>/dev/null)" = "$head" ]; then land=$head; fi
+    at=$(git -C "$dir" log -1 --format=%ct "$land" 2>/dev/null || true)
+    echo "branch merged into $ref${at:+ $(ago "$at")}"
+    return
+  fi
+  branch=$(git -C "$dir" symbolic-ref -q --short HEAD 2>/dev/null) || return 0
+  command -v gh >/dev/null 2>&1 || return 0
+  prs=$(cd "$dir" && gh pr list --head "$branch" --state all --limit 20 --json number,state,mergedAt,closedAt 2>/dev/null) || return 0
+  printf '%s' "$prs" | jq -r 'if (length == 0) or any(.[]; .state == "OPEN") then empty
+    else (map(select(.state == "MERGED")) + map(select(.state != "MERGED")))[0]
+      | "PR #\(.number) \(.state | ascii_downcase)\t\((if .state == "MERGED" then .mergedAt else .closedAt end) // "" | sub("[.][0-9]+Z$"; "Z") | fromdateiso8601? // "")" end' 2>/dev/null |
+    while IFS=$'\t' read -r what at; do echo "$what${at:+ $(ago "$at")}"; done
+}
+ready_to_retire() {
+  local r name dir why lines=""
+  agents_json=$(claude agents --json 2>/dev/null || echo '[]')
+  for r in "$holders"/workers/*.json; do
+    [ -f "$r" ] || continue
+    [ "$(jq -r '.worktree == true and (.adopted // false) == false' "$r" 2>/dev/null)" = true ] || continue
+    name=$(jq -r '.name // empty' "$r")
+    dir=$(jq -r '.dir // empty' "$r")
+    if [ -z "$name" ] || [ -z "$dir" ]; then continue; fi
+    if [ -z "$all" ] && [ "$(jq -r '.root // empty' "$r")" != "$root" ]; then continue; fi
+    answers_for "$name" "$dir" || continue
+    if worker_busy "$name"; then continue; fi
+    why=$(finished "$r" || true)
+    [ -n "$why" ] || continue
+    if [ -d "$dir" ]; then
+      if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]; then
+        why="$why, but has uncommitted work"
+      elif [ -n "$(git -C "$dir" rev-list -1 HEAD --not --remotes "$(jq -r '.base // empty' "$r")" 2>/dev/null)" ]; then
+        why="$why, but has commits no remote branch has"
+      fi
+    fi
+    lines="$lines- $name: $why
+"
+  done
+  if [ -n "$lines" ]; then printf '=== Ready to retire (run retire.sh <name>)\n%s' "$lines"; fi
+}
+[ -n "$blocked" ] || ready_to_retire
+
 # The You Should Know plugin's notes it has seen and not marked known. Its store is a private format, so a store
 # of any other shape makes jq fail, and prints nothing.
 you_should_know() {

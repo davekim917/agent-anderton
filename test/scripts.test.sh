@@ -150,6 +150,19 @@ case $1 in
 esac
 FAKE
 chmod +x "$work/bin/tmux"
+# A fake gh: `pr list --head <branch>` prints $FAKE_GH/<branch>.json, else no PRs.
+cat > "$work/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+branch=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = --head ]; then branch=$2; fi
+  shift
+done
+cat "$FAKE_GH/$branch.json" 2>/dev/null || echo '[]'
+FAKE
+chmod +x "$work/bin/gh"
+export FAKE_GH="$work/gh-prs"
+mkdir -p "$FAKE_GH"
 export PATH="$work/bin:$PATH" FAKE_AGENTS="$work/agents.json" FAKE_LOG="$work/claude-log"
 echo '[]' > "$FAKE_AGENTS"
 mkdir -p "$CLAUDE_CONFIG_DIR/sessions" "$CLAUDE_CONFIG_DIR/projects/p" "$work/beta"
@@ -2166,6 +2179,79 @@ check "tmux: the pane is the one the session's process descends from" eval '[ "$
 FAKE_KEY_CLOSES=1 prompt blocked-one yes "$fp"
 check "tmux: yes presses Enter in that pane" eval '[ "$status" -eq 0 ] && [ "$(pressed)" = "%3 Enter" ]'
 rm -f "$FAKE_LOG.keys" "$FAKE_LOG.tmux-panes" "$screen.bak"
+
+# waiting.sh's Ready to retire: a recorded worker whose work is finished, so its record never outlives its PR.
+rho="$work/rho"
+git init -q --bare "$work/rho-origin.git"
+git init -q "$rho"
+git -C "$rho" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init
+git -C "$rho" remote add origin "$work/rho-origin.git"
+git -C "$rho" push -q origin HEAD:refs/heads/main 2>/dev/null
+git -C "$rho" fetch -q origin
+spawn; p_rl=$pid; session "$p_rl" rl-1 "$rho" rho-lead "$(date +%s)000"
+spawn; p_rs=$pid; session "$p_rs" rs-1 "$rho" rho-scope "$(date +%s)000"
+(cd "$rho" && env CLAUDE_PID="$p_rl" CLAUDE_CODE_SESSION_ID=rl-1 "$scripts/claim.sh" >/dev/null)
+(cd "$rho" && env CLAUDE_PID="$p_rs" CLAUDE_CODE_SESSION_ID=rs-1 "$scripts/claim.sh" --scope side >/dev/null)
+rho_worker() { # rho_worker <name> [spawner]: a worker record and its worktree at origin/main, as spawn.sh makes them
+  mkdir -p "$CLAUDE_CONFIG_DIR/anderton/workers"
+  git -C "$rho" worktree add -q --detach "$work/wt-$1" origin/main
+  jq -nc --arg name "$1" --arg dir "$work/wt-$1" --arg root "$rho" --arg base "$(git -C "$work/wt-$1" rev-parse HEAD)" --arg spawner "${2:-rho-lead}" \
+    '{name: $name, launcher: "bg", id: "x", dir: $dir, root: $root, base: $base, worktree: true, spawner: $spawner}' \
+    > "$CLAUDE_CONFIG_DIR/anderton/workers/$1.json"
+}
+rho_commit() { # rho_commit <name> [committer date]: a commit in that worker's worktree
+  GIT_COMMITTER_DATE="${2:-}" git -C "$work/wt-$1" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "$1"
+}
+rho_worker gone-wt
+git -C "$rho" worktree remove "$work/wt-gone-wt"
+rho_worker landed
+rho_commit landed "$(iso $((now_s - 2 * 86400)))"
+git -C "$work/wt-landed" push -q origin HEAD:refs/heads/main 2>/dev/null
+rho_worker fresh
+rho_worker dirty
+rho_commit dirty
+git -C "$work/wt-dirty" push -q origin HEAD:refs/heads/main 2>/dev/null
+echo draft > "$work/wt-dirty/notes.txt"
+rho_worker busy-done
+rho_commit busy-done
+git -C "$work/wt-busy-done" push -q origin HEAD:refs/heads/main 2>/dev/null
+spawn; p_bd=$pid; session "$p_bd" bd-1 "$work/wt-busy-done" busy-done "$(date +%s)000"
+registry "$p_bd" busy
+rho_worker squashed
+git -C "$work/wt-squashed" checkout -q -b feat-squash
+rho_commit squashed
+git -C "$work/wt-squashed" push -q origin HEAD:refs/heads/feat-squash 2>/dev/null
+printf '[{"number":12,"state":"MERGED","mergedAt":"%s","closedAt":"%s"}]\n' "$(iso $((now_s - 3 * 86400)))" "$(iso $((now_s - 3 * 86400)))" \
+  > "$FAKE_GH/feat-squash.json"
+rho_worker open-pr
+git -C "$work/wt-open-pr" checkout -q -b feat-open
+rho_commit open-pr
+git -C "$work/wt-open-pr" push -q origin HEAD:refs/heads/feat-open 2>/dev/null
+echo '[{"number":13,"state":"OPEN","mergedAt":null,"closedAt":null},{"number":9,"state":"CLOSED","mergedAt":null,"closedAt":"2020-01-01T00:00:00Z"}]' \
+  > "$FAKE_GH/feat-open.json"
+rho_worker side-done rho-scope
+git -C "$rho" worktree remove "$work/wt-side-done"
+git -C "$rho" fetch -q origin
+out=$(cd "$rho" && env CLAUDE_PID="$p_rl" "$scripts/waiting.sh")
+check "waiting.sh has a Ready to retire section" contains "=== Ready to retire"
+check "listing a worker whose worktree was removed out from under its record" contains "- gone-wt: worktree gone"
+check "and one whose commit is merged upstream, with when it landed" contains "- landed: branch merged into origin/main 2d ago"
+check "and one whose PR was squash-merged, from gh" contains "- squashed: PR #12 merged 3d ago"
+check "naming the uncommitted work of a finished worker" contains "- dirty: branch merged into origin/main just now, but has uncommitted work"
+check "never a busy worker" eval '! contains "busy-done"'
+check "nor a worker still at the commit it started from" eval '! contains "fresh"'
+check "nor one with a PR still open" eval '! contains "open-pr"'
+check "nor another Anderton's worker" eval '! contains "side-done"'
+out=$(cd "$rho" && env CLAUDE_PID="$p_rs" "$scripts/waiting.sh")
+check "which that Anderton is shown" eval 'contains "- side-done: worktree gone" && ! contains "gone-wt"'
+out=$(cd "$rho" && env CLAUDE_PID="$p_rl" "$scripts/waiting.sh" --blocked)
+check "--blocked, for watch.sh, prints no Ready to retire section" eval '! contains "Ready to retire"'
+out=$(env CLAUDE_PID="$p_lead" "$scripts/waiting.sh")
+check "another project's Anderton is not shown them" eval '! contains "gone-wt"'
+for n in gone-wt landed fresh dirty busy-done squashed open-pr side-done; do
+  rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/$n.json"
+  [ ! -d "$work/wt-$n" ] || git -C "$rho" worktree remove --force "$work/wt-$n"
+done
 
 [ "$failures" -eq 0 ] || { echo "$failures check(s) failed"; exit 1; }
 echo "all checks passed"
