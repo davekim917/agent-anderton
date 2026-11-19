@@ -8,12 +8,15 @@
 # in a repository to that repository's live Anderton. A worker has four kinds; any other session also has DIRECTION:, for
 # passing on a person's direction. A named project's Anderton is a tab the user reads directly, so it reaches the
 # repository's Anderton only to ship something (DEPLOY:), to ask a fact about the host that only it can read
-# (LOOKUP:), or to answer it (ANSWER:). The repository's Anderton is never held.
-# It only ever blocks (exit 2, the reason on stderr) and never prints a decision, so it cannot approve anything. The
-# body runs in a subshell that reports a block as 10, so a crash, which bash may report as 2, is read as allow. On any
-# failure it exits 0 and prints nothing.
+# (LOOKUP:), or to answer it (ANSWER:). The repository's Anderton is held only toward a named project's Anderton: there
+# it sends DIRECTION:, QUESTION: or ANSWER:, and each message gets $route appended, so the project's results and the
+# user's calls on it stay in that project's tab.
+# It blocks (exit 2, the reason on stderr) or rewrites the message (updatedInput), and never prints a decision, so it
+# cannot approve anything. The body runs in a subshell that reports a block as 10, so a crash, which bash may report as
+# 2, is read as allow. On any failure it exits 0 and prints nothing.
 
 input=$(cat)
+route="Report results, and any call that is the user's, to the user in your own tab. Reply here only with ANSWER: to a question this message asks, and put a fact in it, not a decision for the user."
 
 main() {
   # shellcheck source=SCRIPTDIR/session-lib.sh
@@ -56,10 +59,13 @@ EOF
   [ -z "$home_dir" ] || cwd=$home_dir
   [ -n "$cwd" ] || exit 0
 
-  # Who the sender is comes first: the repository's Anderton is never held.
+  # Who the sender is comes first: the repository's Anderton is judged only toward a named project's Anderton.
   root=$(project_root "$cwd")
   project=$(holder_record "$root")
-  if [ -n "$project" ] && names_sender "$project"; then exit 0; fi
+  if [ -n "$project" ] && names_sender "$project"; then
+    to_scope "$root" "$project" || exit 0
+    route_to_scope
+  fi
   while IFS= read -r r; do
     if [ -n "$r" ] && [ "$r" != "$project" ] && names_sender "$r"; then scope=1; fi
   done <<EOF
@@ -140,6 +146,49 @@ EOF
   fi
   [ -z "$id" ] || printf '%s\n%s\n' "$state" "$hash" >| "$pending/$id" 2>/dev/null
   exit 0
+}
+
+# The repository's Anderton writing to a named project's Anderton ($recipient): only DIRECTION:, QUESTION: or ANSWER:,
+# with $route appended unless the message already carries it. Under auto mode Claude Code can deny a call whose input
+# a hook changed after review; the call Claude sends again already carries $route, so it passes unchanged.
+route_to_scope() {
+  local kind
+  kind=$(printf '%s' "$first" | sed -nE -e 's/^[[:space:]*_#>`-]*//' -e 's/^(DIRECTION|QUESTION|ANSWER):.*/\1/p') || exit 0
+  if [ -z "$kind" ]; then
+    {
+      echo "Not sent. \"$recipient\" is a project's Anderton: the user reads its tab, so its results and the user's calls"
+      echo "on its project go there, not to you. Write to it only with the kind as the first word:"
+      echo "  DIRECTION: work or a person's instruction to carry out"
+      echo "  QUESTION: a fact you need from it, which it answers with ANSWER:"
+      echo "  ANSWER: a reply to its LOOKUP: or other question"
+    } >&2
+    exit 10
+  fi
+  printf '%s' "$input" | jq -ce --arg route "$route" '.tool_input
+    | select(.message | index($route) | not)
+    | .message += "\n\n" + $route
+    | if (.content | type) == "string" then .content += "\n\n" + $route else . end
+    | {hookSpecificOutput: {hookEventName: "PreToolUse", updatedInput: .}}' 2>/dev/null
+  exit 0
+}
+
+# True when $to addresses the live holder of a named project in repository $1 other than its holder record $2; sets
+# $recipient to that holder's name.
+to_scope() {
+  local r spid sname
+  while IFS= read -r r; do
+    [ -n "$r" ] && [ "$r" != "$2" ] || continue
+    spid=$(jq -r '.pid // empty' "$r" 2>/dev/null)
+    if [ -z "$spid" ] || ! is_holder "$sessions/$spid.json" "$r"; then continue; fi
+    sname=$(jq -r '.name // empty' "$sessions/$spid.json" 2>/dev/null)
+    if addresses "$spid" "$sname"; then
+      recipient=${sname:-"a project's Anderton"}
+      return 0
+    fi
+  done <<EOF
+$(project_holders "$1")
+EOF
+  return 1
 }
 
 # The pid of the session running this hook. Its registry entry names its session id; when two entries name it, the

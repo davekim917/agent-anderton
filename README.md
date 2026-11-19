@@ -311,11 +311,13 @@ recipient within 30 minutes (`ANDERTON_REPEAT_WINDOW`, in seconds); an `ANSWER:`
 since two questions can have the same short answer. A message counts as sent only once the
 send succeeds, so a failed or denied send can be retried. A named project's Anderton answers to the user in its own tab, so it
 messages the repository's Anderton only to ship something, to ask a fact about the host that only it
-can read, or to answer it. The repository's
-Anderton, messages to anyone else, and sessions in other repositories pass untouched, and the repository
-is the one the session started in. It only
-blocks: it prints no decision, so it can't approve a call, and it allows whenever it can't tell, a crash
-included.
+can read, or to answer it. The other way, the repository's Anderton writes to a named project's Anderton
+only with `DIRECTION:`, `QUESTION:` or `ANSWER:`, and the hook appends to each such message (as the
+call's `updatedInput`) a footer telling the project's Anderton to report results and the user's calls in
+its own tab and to reply only with a fact. Its other messages, messages to anyone else, and sessions in
+other repositories pass untouched, and the repository is the one the session started in. It blocks or
+appends that footer: it prints no decision, so it can't approve a call, and it allows whenever it can't
+tell, a crash included.
 
 **`prompt.sh <name> [yes|no <fingerprint>]`** lets you answer a permission prompt from the Anderton
 session. It reads the prompt from the session's herdr tab or tmux pane and prints it with a

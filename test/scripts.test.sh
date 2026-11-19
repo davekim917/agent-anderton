@@ -1062,6 +1062,53 @@ check "though sending it there twice is" [ "$status" -eq 2 ]
 gate eew-1 "$epsilon" epsilon-host '"DIRECTION: ship it."'
 check "a worker writing to the project's holder still has only the four kinds" [ "$status" -eq 2 ]
 
+# The repository's Anderton writing to a named project's Anderton: DIRECTION:, QUESTION: or ANSWER: only, each carrying
+# the routing footer, so the project's results and the user's calls on it stay in that project's tab.
+footer="Report results, and any call that is the user's, to the user in your own tab. Reply here only with ANSWER: to a question this message asks, and put a fact in it, not a decision for the user."
+gate eeh-1 "$epsilon" epsilon-fleet-a '"DIRECTION: Riley wants the export moved to Thursday."'
+check "report-gate lets the repository's holder direct a project's holder" [ "$status" -eq 0 ]
+check "appending the routing footer to the message" [ "$(printf '%s' "$out" | jq -r .hookSpecificOutput.updatedInput.message)" = "DIRECTION: Riley wants the export moved to Thursday.
+
+$footer" ]
+check "keeping the rest of the call" [ "$(printf '%s' "$out" | jq -r '.hookSpecificOutput | "\(.hookEventName) \(.updatedInput.to)"')" = "PreToolUse epsilon-fleet-a" ]
+check "and deciding nothing" [ "$(printf '%s' "$out" | jq -c '.hookSpecificOutput | del(.hookEventName, .updatedInput)')" = "{}" ]
+gate eeh-1 "$epsilon" "uds:/run/user/1000/cc-socks/$p_ea.sock" '"**QUESTION:** which day does the export run now?"'
+check "a question by socket address gets the footer too" [ "$(printf '%s' "$out" | jq -r .hookSpecificOutput.updatedInput.message)" = "**QUESTION:** which day does the export run now?
+
+$footer" ]
+gate eeh-1 "$epsilon" epsilon-fleet-p '"ANSWER: yes, the nightly backup includes transcripts."'
+check "an answer to a project's LOOKUP gets it too" [ "$(printf '%s' "$out" | jq -r .hookSpecificOutput.updatedInput.message)" = "ANSWER: yes, the nightly backup includes transcripts.
+
+$footer" ]
+set +e
+out=$(jq -nc --arg cwd "$epsilon" '{session_id: "eeh-1", cwd: $cwd, hook_event_name: "PreToolUse", tool_name: "SendMessage",
+  tool_use_id: "toolu_content", tool_input: {to: "epsilon-fleet-a", message: "DIRECTION: rerun the export.", content: "DIRECTION: rerun the export."}}' |
+  "$scripts/report-gate.sh" 2>&1)
+set -e
+check "a call that also carries the text as content gets the footer in both" \
+  [ "$(printf '%s' "$out" | jq -r --arg f "$footer" '.hookSpecificOutput.updatedInput | [.message, .content] | map(endswith("\n\n" + $f)) | all')" = true ]
+gate eeh-1 "$epsilon" epsilon-fleet-a "$(jq -nc --arg f "$footer" '"DIRECTION: rerun the export.\n\n" + $f')"
+check "a message that already carries the footer passes unchanged" [ "$status" -eq 0 ]
+check "silently, so a call sent again after auto mode's review is not rewritten twice" [ -z "$out" ]
+gate eeh-1 "$epsilon" epsilon-fleet-a '"Can you ask the owner which day the export should run?"'
+check "holds a message to a project's holder that names no kind" [ "$status" -eq 2 ]
+check "naming the kinds it may send there" contains "DIRECTION: work or a person's instruction"
+check "and where the project's calls go" contains "the user reads its tab"
+gate eeh-1 "$epsilon" epsilon-fleet-a '"RESULT: the export moved to Thursday."'
+check "holds a result sent to a project's holder too" [ "$status" -eq 2 ]
+gate eeh-1 "$epsilon" eps-worker '"Got it, thanks."'
+check "leaves the repository's holder's message to a worker alone" [ "$status" -eq 0 ]
+check "unchanged" [ -z "$out" ]
+gate eea-1 "$epsilon" eps-worker '"DIRECTION: fix the dashboard next."'
+check "leaves a project's holder's message to its worker alone" [ "$status" -eq 0 ]
+check "unchanged" [ -z "$out" ]
+send eea-1 "$epsilon" epsilon-host '"DEPLOY: ship the export move, merged as https://example.invalid/pr/9"'
+check "and its deploy to the repository's holder" [ "$status" -eq 0 ]
+check "unchanged" [ -z "$out" ]
+gate eea-1 "$epsilon" epsilon-fleet-b '"Got it."'
+check "and its message to another project's holder" [ "$status" -eq 0 ]
+check "unchanged" [ -z "$out" ]
+
 # A holder that is also recorded as a worker is judged as a holder.
 jq -nc --arg d "$epsilon" '{name: "epsilon-host", dir: $d, spawner: "epsilon-other"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-host.json"
 gate eeh-1 "$epsilon" epsilon-other '"Got it."'
