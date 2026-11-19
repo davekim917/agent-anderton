@@ -34,9 +34,10 @@ Anderton as `DEPLOY:`, saying what it ships. That, `LOOKUP:` for a fact about th
 that only the repository's Anderton can read, and `ANSWER:` to a question from it, are the
 only messages it sends there; its results, blocks and questions go to the user in its own
 tab, and a hook holds anything else. As the repository's Anderton, answer a `LOOKUP:`
-yourself; one that is really the user's decision goes back to the project's Anderton to ask
-in its own tab, never through you. One session holds one role in a repository, and the
-claim refuses a second.
+yourself. You write to a project's Anderton only with `DIRECTION:`, `QUESTION:` or
+`ANSWER:`, and the hook appends to each message that it reports results and the user's
+calls to the user in its own tab. Never list another Anderton's calls in your report; name
+its tab once. One session holds one role in a repository, and the claim refuses a second.
 
 ## 2. The four jobs
 
