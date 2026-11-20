@@ -77,11 +77,12 @@ answers_for() { # answers_for <name> <cwd> [session id] [pid] [start]: true when
 # as blocked but rendered from a newer entry reads as a call unanswered for over a minute, a header the watch never
 # reported. Without a temporary file it reads the entry in place, as before.
 entry=$(mktemp "${TMPDIR:-/tmp}/waiting.XXXXXX" 2>/dev/null) || entry=""
-[ -z "$entry" ] || trap 'rm -f "$entry"' EXIT
+[ -z "$entry" ] || trap 'rm -f "$entry" 2>/dev/null || true' EXIT
 for s in "$sessions"/*.json; do
   [ -e "$s" ] || continue
   src=$s
-  if [ -n "$entry" ] && cp "$s" "$entry" 2>/dev/null; then src=$entry; fi
+  # Into the file mktemp made private: macOS cp can recreate it with the entry's own mode.
+  if [ -n "$entry" ] && cat <"$s" 2>/dev/null >|"$entry"; then src=$entry; fi
   fields=$(jq -r '[(.pid // "" | tostring), (.startedAt // "" | if type == "number" then floor | tostring else . end), .sessionId // "", .cwd // "", .name // "", .procStart // ""] | join("\u001f")' "$src" 2>/dev/null) || continue
   IFS=$'\x1f' read -r pid start sid cwd name pstart <<EOF
 $fields
