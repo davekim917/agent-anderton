@@ -50,6 +50,8 @@ if [ -n "${2:-}" ]; then brief=$(cat "$2"); else brief=$(cat); fi
 # The user watches and types into every worker through its tab, so inside herdr a caller cannot hide one by choice:
 # --bg there is admitted only by the marker a failed herdr start of the same name leaves, and only once.
 herdr_failed="$holders/workers/$name.herdr-failed"
+# Resolved once, so the marker's project and the worker's are the same one.
+root=$(invoking_root)
 # Taken by renaming, so of two reruns only one gets it; it admits only a rerun from the same project within the hour.
 admitted=""
 if [ "$launcher" = bg ] && [ "${HERDR_ENV:-}" = 1 ] && mv "$herdr_failed" "$herdr_failed.$$" 2>/dev/null; then
@@ -59,7 +61,7 @@ if [ "$launcher" = bg ] && [ "${HERDR_ENV:-}" = 1 ] && mv "$herdr_failed" "$herd
     '' | *[!0-9]*) ;;
     *)
       age=$(($(date +%s) - ${marker%% *}))
-      if [ "${marker#* }" = "$(invoking_root)" ] && [ "$age" -ge 0 ] && [ "$age" -lt 3600 ]; then admitted=1; fi
+      if [ "${marker#* }" = "$root" ] && [ "$age" -ge 0 ] && [ "$age" -lt 3600 ]; then admitted=1; fi
       ;;
   esac
 fi
@@ -132,7 +134,6 @@ if claude agents --json 2>/dev/null | jq -e --arg n "$name" 'any(.[]; .name == $
   exit 1
 fi
 
-root=$(invoking_root)
 dir=$root
 worktree=false
 if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
@@ -218,10 +219,7 @@ if [ "$launcher" = herdr ]; then
   fi
   tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null || true)
   pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null || true)
-  if [ -z "$tab" ] || [ -z "$pane" ]; then
-    [ -z "$tab" ] || herdr tab close "$tab" >/dev/null 2>&1 || true
-    failed "herdr opened no tab: $out"
-  fi
+  if [ -z "$tab" ] || [ -z "$pane" ]; then failed "herdr opened no tab: $out"; fi
   # Recorded as soon as the tab exists, so a spawn cut short still leaves retire.sh something to stop.
   write_record
   # A startup prompt (folder trust, a new permission mode) leaves the agent blocked: show it, then undo.
