@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Start a real Claude Code session to do one task: in its own worktree of the caller's repository (outside the
 # checkout), in the caller's permission mode, told to report to the caller by name. Inside herdr it opens in a new
-# tab, inside tmux in a new window, where the user can watch it and type into it; elsewhere, or with --bg, it runs
-# in the background. $ANDERTON_START_WAIT (seconds, default 30) bounds the wait for a tmux worker to register.
-# usage: spawn.sh --effort LEVEL [--bg] [--model M] [--mode MODE] [--base REF] <name> [brief-file]   (else the brief on stdin)
+# tab, inside tmux in a new window, where the user can watch it and type into it; elsewhere, or with --bg outside
+# herdr, it runs in the background. Inside herdr --bg is refused: a worker goes to the background there only when its
+# tab fails to start, on this script's own decision. $ANDERTON_START_WAIT (seconds, default 30) bounds the wait for a tmux worker to register.
+# usage: spawn.sh --effort LEVEL [--bg (not inside herdr)] [--model M] [--mode MODE] [--base REF] <name> [brief-file]   (else the brief on stdin)
 # Workers run on Opus unless --model names another. Worktrees go under $ANDERTON_WORKTREES, default the folder that holds the repository, as wt-<name>.
 # Portable to macOS's bash 3.2 and BSD userland.
 set -euo pipefail
@@ -16,7 +17,7 @@ command -v claude >/dev/null 2>&1 || {
   exit 1
 }
 
-usage="usage: spawn.sh --effort low|medium|high|xhigh|max [--bg] [--model M] [--mode MODE] [--base REF] <name: a-z 0-9 -> [brief-file]"
+usage="usage: spawn.sh --effort low|medium|high|xhigh|max [--bg (not inside herdr)] [--model M] [--mode MODE] [--base REF] <name: a-z 0-9 -> [brief-file]"
 model="" effort="" mode="" base="" launcher=""
 while [ $# -gt 0 ]; do
   case $1 in
@@ -46,9 +47,18 @@ case $effort in
   *) echo "$usage" >&2; exit 2 ;;
 esac
 if [ -n "${2:-}" ]; then brief=$(cat "$2"); else brief=$(cat); fi
+in_herdr=""
+if [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] && [ -n "${HERDR_SOCKET_PATH:-}" ] &&
+  command -v herdr >/dev/null 2>&1; then
+  in_herdr=1
+fi
+# The user watches and types into every worker through its tab, so inside herdr a caller cannot hide one by choice.
+if [ "$launcher" = bg ] && [ -n "$in_herdr" ]; then
+  echo "spawn.sh: --bg is refused inside herdr; the worker opens in a tab the user can watch. If the tab fails to start, spawn.sh falls back to the background itself." >&2
+  exit 2
+fi
 if [ -z "$launcher" ]; then
-  if [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] && [ -n "${HERDR_SOCKET_PATH:-}" ] &&
-    command -v herdr >/dev/null 2>&1; then
+  if [ -n "$in_herdr" ]; then
     launcher=herdr
   elif [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
     launcher=tmux
@@ -174,35 +184,49 @@ if [ "$launcher" = herdr ]; then
   socket="${HERDR_SOCKET_PATH:-}"
   # A tab's or window's process takes its environment from its multiplexer, not from this script: a non-default
   # Claude home is passed on, or the worker would register where neither the caller nor these scripts look.
+  herdr_failure=""
   if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
     out=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$dir" --label "$label" --no-focus \
-      --env "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR" 2>&1) || failed "Could not open a herdr tab: $out"
+      --env "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR" 2>&1) || herdr_failure="Could not open a herdr tab: $out"
   else
     out=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$dir" --label "$label" --no-focus 2>&1) ||
-      failed "Could not open a herdr tab: $out"
+      herdr_failure="Could not open a herdr tab: $out"
   fi
-  tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null || true)
-  pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null || true)
-  if [ -z "$tab" ] || [ -z "$pane" ]; then failed "herdr opened no tab: $out"; fi
-  # Recorded as soon as the tab exists, so a spawn cut short still leaves retire.sh something to stop.
-  write_record
-  # A startup prompt (folder trust, a new permission mode) leaves the agent blocked: show it, then undo.
-  if ! out=$(herdr agent start "$name" --kind claude --pane "$pane" --timeout 120000 -- "$@" 2>&1) ||
-    ! out=$(herdr agent prompt "$name" "$brief" 2>&1); then
-    screen=$(herdr agent read "$name" 2>/dev/null | tail -n 20 || true)
-    herdr tab close "$tab" >/dev/null 2>&1 || true
-    if ! worker_gone herdr "$socket" "$tab" "$name" "" "$label"; then
-      echo "Claude Code in herdr tab '$name' did not take the brief: $out
+  if [ -z "$herdr_failure" ]; then
+    tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null || true)
+    pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null || true)
+    if [ -z "$tab" ] || [ -z "$pane" ]; then
+      herdr_failure="herdr opened no tab: $out"
+      [ -z "$tab" ] || herdr tab close "$tab" >/dev/null 2>&1 || true
+    fi
+  fi
+  if [ -z "$herdr_failure" ]; then
+    # Recorded as soon as the tab exists, so a spawn cut short still leaves retire.sh something to stop.
+    write_record
+    # A startup prompt (folder trust, a new permission mode) leaves the agent blocked: show it, then undo.
+    if ! out=$(herdr agent start "$name" --kind claude --pane "$pane" --timeout 120000 -- "$@" 2>&1) ||
+      ! out=$(herdr agent prompt "$name" "$brief" 2>&1); then
+      screen=$(herdr agent read "$name" 2>/dev/null | tail -n 20 || true)
+      herdr tab close "$tab" >/dev/null 2>&1 || true
+      if ! worker_gone herdr "$socket" "$tab" "$name" "" "$label"; then
+        echo "Claude Code in herdr tab '$name' did not take the brief: $out
 $screen
 It is not confirmed stopped, so $dir and its record are kept: close tab $tab, then run retire.sh $name." >&2
-      exit 1
+        exit 1
+      fi
+      herdr_failure="Claude Code in herdr tab '$name' did not take the brief: $out
+$screen"
     fi
-    failed "Claude Code in herdr tab '$name' did not take the brief: $out
-$screen
-Rerun with --bg to start it in the background instead."
   fi
-  where="herdr tab '$label' ($tab)"
-elif [ "$launcher" = tmux ]; then
+  if [ -n "$herdr_failure" ]; then
+    echo "$herdr_failure
+spawn.sh: the herdr tab failed, so the worker starts in the background instead: open it with claude attach $name." >&2
+    launcher=bg tab="" socket=""
+  else
+    where="herdr tab '$label' ($tab)"
+  fi
+fi
+if [ "$launcher" = tmux ]; then
   socket="${TMUX%%,*}"
   server=$(printf '%s' "$TMUX" | cut -d, -f2)
   # Given as separate arguments, the window's command runs without a shell, so the brief needs no quoting.
@@ -228,7 +252,7 @@ elif [ "$launcher" = tmux ]; then
   done
   where="tmux window '$label' ($tab)"
   [ -n "$listed" ] || echo "Worker '$name' has not registered yet: it may be waiting at a startup prompt in its window." >&2
-else
+elif [ "$launcher" = bg ]; then
   out=$(cd "$dir" && claude --bg "$@" "$brief" 2>&1) || failed "$out"
   # `claude stop` and `claude rm` take the session's id, not its name.
   id=$(claude agents --json 2>/dev/null | jq -r --arg n "$name" 'first(.[] | select(.name == $n) | .id) // empty' 2>/dev/null || true)

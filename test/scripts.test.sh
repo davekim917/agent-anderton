@@ -38,7 +38,7 @@ FAKE
 chmod +x "$work/bin/claude"
 # A fake herdr. Open tabs are lines "<server socket> <tab id> <label>" in $FAKE_LOG.tabs-open, so a tab is
 # found only in the server ($HERDR_SOCKET_PATH) it was opened in, under its own label.
-# `tab create` opens tab $FAKE_HERDR_TAB (default w9:t5). `agent start` and `agent prompt` log what they got;
+# `tab create` opens tab $FAKE_HERDR_TAB (default w9:t5), or fails with $FAKE_HERDR_CREATE_FAIL. `agent start` and `agent prompt` log what they got;
 # with $FAKE_HERDR_START_LIVE, start lists the session as live. `tab get` reports the tab, or tab_not_found, or
 # with $FAKE_HERDR_GET_GARBAGE an unreadable answer, or with $FAKE_HERDR_NO_SERVER server_not_running. `tab close` logs the tab and its server, closes it (not with
 # $FAKE_HERDR_CLOSE_FAIL) and, with $FAKE_HERDR_CLOSE_ENDS, ends the session in it.
@@ -48,6 +48,7 @@ sock=${HERDR_SOCKET_PATH:-}
 case "$1 $2" in
   "tab create")
     printf '%s\n' "$@" > "$FAKE_LOG.tab"
+    if [ -n "${FAKE_HERDR_CREATE_FAIL:-}" ]; then echo '{"error":{"code":"workspace_not_found"}}'; exit 1; fi
     label=""
     while [ $# -gt 0 ]; do
       if [ "$1" = --label ]; then label=$2; fi
@@ -736,23 +737,37 @@ printf '%s\n' "$agents_before" > "$FAKE_AGENTS"
 mv "$work/lead-reg.bak" "$lead_reg"
 rm -f "$(holder_path "$(project_root "$alpha")" tabs)"
 
+rm -f "$FAKE_LOG.bg"
 run env "${herdr_env[@]}" "$scripts/spawn.sh" --effort high --bg bg-in-herdr <<'BRIEF'
 Task.
 BRIEF
-check "--bg starts it in the background even inside herdr" eval '[ "$status" -eq 0 ] && [ "$(sed -n 1p "$FAKE_LOG.bg")" = "$work/wt-bg-in-herdr" ]'
-echo '[]' > "$FAKE_AGENTS"
-run "$scripts/retire.sh" bg-in-herdr
+check "--bg is refused inside herdr" [ "$status" -eq 2 ]
+check "saying the worker opens in a tab" contains "refused inside herdr"
+check "starting nothing in the background" [ ! -e "$FAKE_LOG.bg" ]
+check "making no worktree" [ ! -e "$work/wt-bg-in-herdr" ]
+check "and keeping no record" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/bg-in-herdr.json" ]
 
 : > "$FAKE_LOG.closed"
 run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t6 FAKE_HERDR_START_FAIL=1 "$scripts/spawn.sh" --effort high stuck-tab <<'BRIEF'
 Task.
 BRIEF
-check "a tab whose claude never becomes ready fails the spawn" [ "$status" -eq 1 ]
+check "a tab whose claude never becomes ready falls back to the background" eval '[ "$status" -eq 0 ] && [ "$(sed -n 1p "$FAKE_LOG.bg")" = "$work/wt-stuck-tab" ]'
 check "showing what it is stuck on" contains "Is this a project you trust?"
-check "and offering --bg" contains "Rerun with --bg"
+check "and saying it started in the background instead" contains "starts in the background instead"
 check "closing that tab" grep -qx "w9:t6" "$FAKE_LOG.closed"
-check "releasing its name" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/stuck-tab.json" ]
-check "and removing its worktree" [ ! -e "$work/wt-stuck-tab" ]
+check "recording a background worker, not the closed tab" [ "$(jq -r '"\(.launcher) \(.tab)"' "$CLAUDE_CONFIG_DIR/anderton/workers/stuck-tab.json")" = "bg " ]
+check "on its worktree" [ -d "$work/wt-stuck-tab" ]
+echo '[]' > "$FAKE_AGENTS"
+run "$scripts/retire.sh" stuck-tab
+check "which retire.sh then retires" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-stuck-tab" ]'
+rm -f "$FAKE_LOG.bg"
+run env "${herdr_env[@]}" FAKE_HERDR_CREATE_FAIL=1 "$scripts/spawn.sh" --effort high no-tab <<'BRIEF'
+Task.
+BRIEF
+check "a herdr that cannot open a tab falls back to the background" eval '[ "$status" -eq 0 ] && [ "$(sed -n 1p "$FAKE_LOG.bg")" = "$work/wt-no-tab" ]'
+check "saying why" contains "Could not open a herdr tab"
+echo '[]' > "$FAKE_AGENTS"
+run "$scripts/retire.sh" no-tab
 run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t7 FAKE_HERDR_START_FAIL=1 FAKE_HERDR_START_LIVE=1 FAKE_HERDR_CLOSE_FAIL=1 "$scripts/spawn.sh" --effort high live-stuck <<'BRIEF'
 Task.
 BRIEF

@@ -224,7 +224,7 @@ worktree leaves its own at its base. Idle time runs from the newest transcript e
 that may be it, else from when it was started. A line notes uncommitted work, or commits no remote branch has, which `retire.sh`
 would keep. `--blocked` leaves this section out.
 
-**`spawn.sh --effort LEVEL [--bg] [--model M] [--mode MODE] [--base REF] <name> [brief-file]`**
+**`spawn.sh --effort LEVEL [--bg (not inside herdr)] [--model M] [--mode MODE] [--base REF] <name> [brief-file]`**
 starts a worker: a full Claude Code session named `<name>`, in a new git worktree at
 `$ANDERTON_WORKTREES/wt-<name>` (default: the folder that holds the repository). The base is
 `origin/HEAD`, else `origin/main`, `origin/master` or `HEAD`.
@@ -232,14 +232,16 @@ starts a worker: a full Claude Code session named `<name>`, in a new git worktre
 - Inside herdr (`HERDR_ENV=1`), the worker opens in a new tab of the caller's workspace, labelled
   `<name>`, or `<caller>/<name>` when the caller is a named project's Anderton, its name folded to
   lowercase letters, digits and hyphens (`herdr tab create`, `herdr agent start --kind claude`, then `herdr agent prompt` with
-  the brief). If Claude Code stops at a startup prompt there, the spawn shows the screen, closes the
-  tab and fails, unless the session cannot be confirmed stopped, when it keeps the worktree and
-  record for `retire.sh`.
+  the brief). If herdr cannot open the tab, or Claude Code stops at a startup prompt there, the spawn
+  shows why, closes the tab and starts the worker in the background instead, saying so; unless the
+  session cannot be confirmed stopped, when it fails and keeps the worktree and record for `retire.sh`.
+  `--bg` is refused inside herdr: you watch and type into every worker through its tab, so a caller
+  cannot hide one by choice.
 - Inside tmux (`$TMUX`, and not herdr), it opens in a new detached window with that same label. The spawn
   waits up to `$ANDERTON_START_WAIT` seconds (default 30) for the session to register: a window
   that closes first fails the spawn, and one still open is kept with a note that it may wait at a
   startup prompt.
-- Elsewhere, or with `--bg`, it is a background session (`claude --bg`).
+- Elsewhere, or with `--bg` outside herdr, it is a background session (`claude --bg`).
 - It runs in the caller's permission mode, read from the caller's transcript.
 - `--effort` is required (`low`, `medium`, `high`, `xhigh` or `max`), so a worker never runs at the
   default just because nobody chose. The Anderton picks it from your request and says so; a level you
