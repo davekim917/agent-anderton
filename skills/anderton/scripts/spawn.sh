@@ -57,7 +57,10 @@ if [ "$launcher" = bg ] && [ "${HERDR_ENV:-}" = 1 ] && mv "$herdr_failed" "$herd
   rm -f "$herdr_failed.$$"
   case ${marker%% *} in
     '' | *[!0-9]*) ;;
-    *) if [ "${marker#* }" = "$(invoking_root)" ] && [ $(($(date +%s) - ${marker%% *})) -lt 3600 ]; then admitted=1; fi ;;
+    *)
+      age=$(($(date +%s) - ${marker%% *}))
+      if [ "${marker#* }" = "$(invoking_root)" ] && [ "$age" -ge 0 ] && [ "$age" -lt 3600 ]; then admitted=1; fi
+      ;;
   esac
 fi
 if [ "${HERDR_ENV:-}" = 1 ]; then
@@ -215,7 +218,10 @@ if [ "$launcher" = herdr ]; then
   fi
   tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null || true)
   pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null || true)
-  if [ -z "$tab" ] || [ -z "$pane" ]; then failed "herdr opened no tab: $out"; fi
+  if [ -z "$tab" ] || [ -z "$pane" ]; then
+    [ -z "$tab" ] || herdr tab close "$tab" >/dev/null 2>&1 || true
+    failed "herdr opened no tab: $out"
+  fi
   # Recorded as soon as the tab exists, so a spawn cut short still leaves retire.sh something to stop.
   write_record
   # A startup prompt (folder trust, a new permission mode) leaves the agent blocked: show it, then undo.
