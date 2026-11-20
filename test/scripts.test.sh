@@ -1325,6 +1325,12 @@ mv "$block_file.tmp" "$block_file"
 sleep 1
 check "a block one scan missed does not wake the holder when it returns" kill -0 "$watcher_pid"
 check "and says nothing" [ ! -s "$work/watch.out" ]
+if [ -s "$work/watch.out" ] || ! kill -0 "$watcher_pid" 2>/dev/null; then
+  echo "DIAG watch.out:"; sed 's/^/DIAG   /' "$work/watch.out"
+  echo "DIAG reported:"; cat "$CLAUDE_CONFIG_DIR"/anderton/*.reported 2>/dev/null | sed 's/^/DIAG   /'
+  echo "DIAG blocked now:"; (cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked 2>&1) | sed 's/^/DIAG   /'
+  echo "DIAG elapsed since suite start: $(( $(date +%s) - now_s ))s"
+fi
 now_ms=$((now_ms + 1000))
 registry "$p_wa" waiting "input needed"
 set +e; wait "$watcher_pid"; status=$?; set -e
