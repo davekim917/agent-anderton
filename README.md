@@ -235,8 +235,9 @@ starts a worker: a full Claude Code session named `<name>`, in a new git worktre
   the brief). If herdr cannot open the tab, or Claude Code stops at a startup prompt there, the spawn
   shows why, closes the tab and starts the worker in the background instead, saying so; unless the
   session cannot be confirmed stopped, when it fails and keeps the worktree and record for `retire.sh`.
-  `--bg` is refused inside herdr: you watch and type into every worker through its tab, so a caller
-  cannot hide one by choice.
+  `--bg` is refused whenever `HERDR_ENV=1`: you watch and type into every worker through its tab,
+  so a caller cannot hide one by choice. If herdr's workspace, socket or CLI is missing there and
+  tmux is not available, the worker starts in the background, with a note saying so.
 - Inside tmux (`$TMUX`, and not herdr), it opens in a new detached window with that same label. The spawn
   waits up to `$ANDERTON_START_WAIT` seconds (default 30) for the session to register: a window
   that closes first fails the spawn, and one still open is kept with a note that it may wait at a

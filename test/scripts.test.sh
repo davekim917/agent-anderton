@@ -38,7 +38,8 @@ FAKE
 chmod +x "$work/bin/claude"
 # A fake herdr. Open tabs are lines "<server socket> <tab id> <label>" in $FAKE_LOG.tabs-open, so a tab is
 # found only in the server ($HERDR_SOCKET_PATH) it was opened in, under its own label.
-# `tab create` opens tab $FAKE_HERDR_TAB (default w9:t5), or fails with $FAKE_HERDR_CREATE_FAIL. `agent start` and `agent prompt` log what they got;
+# `tab create` opens tab $FAKE_HERDR_TAB (default w9:t5), or with $FAKE_HERDR_CREATE_FAIL=1 fails
+# before opening one, with =opened fails after opening it. `agent start` and `agent prompt` log what they got;
 # with $FAKE_HERDR_START_LIVE, start lists the session as live. `tab get` reports the tab, or tab_not_found, or
 # with $FAKE_HERDR_GET_GARBAGE an unreadable answer, or with $FAKE_HERDR_NO_SERVER server_not_running. `tab close` logs the tab and its server, closes it (not with
 # $FAKE_HERDR_CLOSE_FAIL) and, with $FAKE_HERDR_CLOSE_ENDS, ends the session in it.
@@ -48,7 +49,7 @@ sock=${HERDR_SOCKET_PATH:-}
 case "$1 $2" in
   "tab create")
     printf '%s\n' "$@" > "$FAKE_LOG.tab"
-    if [ -n "${FAKE_HERDR_CREATE_FAIL:-}" ]; then echo '{"error":{"code":"workspace_not_found"}}'; exit 1; fi
+    if [ "${FAKE_HERDR_CREATE_FAIL:-}" = 1 ]; then echo '{"error":{"code":"workspace_not_found"}}'; exit 1; fi
     label=""
     while [ $# -gt 0 ]; do
       if [ "$1" = --label ]; then label=$2; fi
@@ -57,6 +58,7 @@ case "$1 $2" in
     tab=${FAKE_HERDR_TAB:-w9:t5}
     echo "$sock $tab $label" >> "$FAKE_LOG.tabs-open"
     printf '{"id":"cli:tab:create","result":{"root_pane":{"pane_id":"w9:p5","tab_id":"%s"},"tab":{"tab_id":"%s"},"type":"tab_created"}}\n' "$tab" "$tab"
+    if [ "${FAKE_HERDR_CREATE_FAIL:-}" = opened ]; then exit 1; fi
     ;;
   "agent start")
     printf '%s\n' "$@" > "$FAKE_LOG.start"
@@ -768,6 +770,42 @@ check "a herdr that cannot open a tab falls back to the background" eval '[ "$st
 check "saying why" contains "Could not open a herdr tab"
 echo '[]' > "$FAKE_AGENTS"
 run "$scripts/retire.sh" no-tab
+check "and retire.sh retires it" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-no-tab" ]'
+: > "$FAKE_LOG.closed"
+rm -f "$FAKE_LOG.bg"
+run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t8 FAKE_HERDR_CREATE_FAIL=opened "$scripts/spawn.sh" --effort high half-tab <<'BRIEF'
+Task.
+BRIEF
+check "a create that fails after opening a tab closes that tab" grep -qx "w9:t8" "$FAKE_LOG.closed"
+check "before falling back to the background" eval '[ "$status" -eq 0 ] && [ "$(sed -n 1p "$FAKE_LOG.bg")" = "$work/wt-half-tab" ]'
+echo '[]' > "$FAKE_AGENTS"
+run "$scripts/retire.sh" half-tab
+rm -f "$FAKE_LOG.bg"
+run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t9 FAKE_HERDR_CREATE_FAIL=opened FAKE_HERDR_CLOSE_FAIL=1 "$scripts/spawn.sh" --effort high half-stuck <<'BRIEF'
+Task.
+BRIEF
+check "a failed create whose tab will not close fails the spawn" [ "$status" -eq 1 ]
+check "starting nothing in the background" [ ! -e "$FAKE_LOG.bg" ]
+check "and keeping a record of that tab for retire.sh" [ "$(jq -r '"\(.launcher) \(.tab)"' "$CLAUDE_CONFIG_DIR/anderton/workers/half-stuck.json" 2>/dev/null)" = "herdr w9:t9" ]
+run "$scripts/retire.sh" half-stuck
+echo '{}' > "$FAKE_AGENTS"
+run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t6 FAKE_HERDR_START_FAIL=1 "$scripts/spawn.sh" --effort high odd-list <<'BRIEF'
+Task.
+BRIEF
+check "a session list that is not a list does not confirm the failed tab stopped" eval '[ "$status" -eq 1 ] && [ ! -e "$FAKE_LOG.bg" ]'
+echo '[]' > "$FAKE_AGENTS"
+run "$scripts/retire.sh" odd-list
+run env HERDR_ENV=1 "$scripts/spawn.sh" --effort high --bg bare-herdr-bg <<'BRIEF'
+Task.
+BRIEF
+check "--bg is refused inside herdr even when herdr cannot be used from here" eval '[ "$status" -eq 2 ] && [ ! -e "$FAKE_LOG.bg" ]'
+run env HERDR_ENV=1 "$scripts/spawn.sh" --effort high bare-herdr <<'BRIEF'
+Task.
+BRIEF
+check "inside an unusable herdr the worker starts in the background" eval '[ "$status" -eq 0 ] && [ "$(sed -n 1p "$FAKE_LOG.bg")" = "$work/wt-bare-herdr" ]'
+check "saying so" contains "without its workspace, socket or CLI"
+echo '[]' > "$FAKE_AGENTS"
+run "$scripts/retire.sh" bare-herdr
 run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t7 FAKE_HERDR_START_FAIL=1 FAKE_HERDR_START_LIVE=1 FAKE_HERDR_CLOSE_FAIL=1 "$scripts/spawn.sh" --effort high live-stuck <<'BRIEF'
 Task.
 BRIEF

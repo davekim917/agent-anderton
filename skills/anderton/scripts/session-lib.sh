@@ -175,7 +175,7 @@ session_gone() {
   local listed _
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     if listed=$(claude agents --json 2>/dev/null) &&
-      printf '%s' "$listed" | jq -e --arg n "$1" 'all(.[]; .name != $n)' >/dev/null 2>&1; then
+      printf '%s' "$listed" | jq -e --arg n "$1" 'type == "array" and all(.[]; .name != $n)' >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.5
