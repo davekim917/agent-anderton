@@ -76,8 +76,8 @@ answers_for() { # answers_for <name> <cwd> [session id] [pid] [start]: true when
 # Each entry is judged on one copy: Claude Code rewrites it as the session's status changes, and a session selected
 # as blocked but rendered from a newer entry reads as a call unanswered for over a minute, a header the watch never
 # reported. Without a temporary file it reads the entry in place, as before.
-# The copy sits in a directory only this user can enter, so nobody else can read or replace it.
-snapdir=$(mktemp -d "${TMPDIR:-/tmp}/waiting.XXXXXX" 2>/dev/null) || snapdir=""
+# The copy sits in this user's own Claude home, never a shared temporary directory another user could reach.
+snapdir=$(mktemp -d "$holders/.waiting.XXXXXX" 2>/dev/null) || snapdir=""
 entry=""
 if [ -n "$snapdir" ]; then
   entry="$snapdir/entry"
