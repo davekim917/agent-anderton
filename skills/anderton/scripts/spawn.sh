@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Start a real Claude Code session to do one task: in its own worktree of the caller's repository (outside the
 # checkout), in the caller's permission mode, told to report to the caller by name. Inside herdr it opens in a new
-# tab, inside tmux in a new window, where the user can watch it and type into it; elsewhere, or with --bg, it runs
-# in the background. $ANDERTON_START_WAIT (seconds, default 30) bounds the wait for a tmux worker to register.
-# usage: spawn.sh --effort LEVEL [--bg] [--model M] [--mode MODE] [--base REF] <name> [brief-file]   (else the brief on stdin)
+# tab, inside tmux in a new window, where the user can watch it and type into it; elsewhere it runs in the background.
+# --bg asks for the background outside herdr; inside herdr it is refused, except once after spawn.sh itself failed to
+# start that name in a herdr tab and said to rerun with it. $ANDERTON_START_WAIT (seconds, default 30) bounds the wait for a tmux worker to register.
+# usage: spawn.sh --effort LEVEL [--bg (not inside herdr)] [--model M] [--mode MODE] [--base REF] <name> [brief-file]   (else the brief on stdin)
 # Workers run on Opus unless --model names another. Worktrees go under $ANDERTON_WORKTREES, default the folder that holds the repository, as wt-<name>.
 # Portable to macOS's bash 3.2 and BSD userland.
 set -euo pipefail
@@ -16,7 +17,7 @@ command -v claude >/dev/null 2>&1 || {
   exit 1
 }
 
-usage="usage: spawn.sh --effort low|medium|high|xhigh|max [--bg] [--model M] [--mode MODE] [--base REF] <name: a-z 0-9 -> [brief-file]"
+usage="usage: spawn.sh --effort low|medium|high|xhigh|max [--bg (not inside herdr)] [--model M] [--mode MODE] [--base REF] <name: a-z 0-9 -> [brief-file]"
 model="" effort="" mode="" base="" launcher=""
 while [ $# -gt 0 ]; do
   case $1 in
@@ -46,6 +47,36 @@ case $effort in
   *) echo "$usage" >&2; exit 2 ;;
 esac
 if [ -n "${2:-}" ]; then brief=$(cat "$2"); else brief=$(cat); fi
+# The user watches and types into every worker through its tab, so inside herdr a caller cannot hide one by choice:
+# --bg there is admitted only by the marker a failed herdr start of the same name leaves, and only once.
+herdr_failed="$holders/workers/$name.herdr-failed"
+# Resolved once, so the marker's project and the worker's are the same one.
+root=$(invoking_root)
+# Taken by renaming, so of two reruns only one gets it; it admits only a rerun from the same project within the hour.
+admitted=""
+if [ "$launcher" = bg ] && [ "${HERDR_ENV:-}" = 1 ] && mv "$herdr_failed" "$herdr_failed.$$" 2>/dev/null; then
+  marker=$(cat "$herdr_failed.$$" 2>/dev/null || true)
+  rm -f "$herdr_failed.$$"
+  case ${marker%% *} in
+    '' | *[!0-9]*) ;;
+    *)
+      age=$(($(date +%s) - ${marker%% *}))
+      if [ "${marker#* }" = "$root" ] && [ "$age" -ge 0 ] && [ "$age" -lt 3600 ]; then admitted=1; fi
+      ;;
+  esac
+fi
+if [ "${HERDR_ENV:-}" = 1 ]; then
+  if [ "$launcher" = bg ] && [ -z "$admitted" ]; then
+    echo "spawn.sh: --bg is refused inside herdr; the worker opens in a tab the user can watch. It is accepted only for the rerun spawn.sh asks for after a herdr tab fails to start." >&2
+    exit 2
+  fi
+  # herdr refuses an agent name that does not start with a letter or is over 32 characters.
+  case $name in
+    [a-z]*) [ ${#name} -le 32 ] || { echo "spawn.sh: inside herdr a worker name is at most 32 characters." >&2; exit 2; } ;;
+    *) echo "spawn.sh: inside herdr a worker name starts with a letter." >&2; exit 2 ;;
+  esac
+fi
+rm -f "$herdr_failed"
 if [ -z "$launcher" ]; then
   if [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] && [ -n "${HERDR_SOCKET_PATH:-}" ] &&
     command -v herdr >/dev/null 2>&1; then
@@ -54,6 +85,8 @@ if [ -z "$launcher" ]; then
     launcher=tmux
   else
     launcher="bg"
+    [ "${HERDR_ENV:-}" != 1 ] ||
+      echo "spawn.sh: inside herdr but without its workspace, socket or CLI here, so the worker starts in the background: open it with claude attach $name." >&2
   fi
 fi
 if [ -z "$(printf '%s' "$brief" | tr -d '[:space:]')" ]; then
@@ -101,7 +134,6 @@ if claude agents --json 2>/dev/null | jq -e --arg n "$name" 'any(.[]; .name == $
   exit 1
 fi
 
-root=$(invoking_root)
 dir=$root
 worktree=false
 if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
@@ -153,6 +185,10 @@ failed() {
   [ -z "${1:-}" ] || echo "$1" >&2
   if [ "$worktree" = true ]; then git -C "$root" worktree remove --force "$dir"; fi
   rm -f "$record"
+  # Written last, once the name is released, so a rerun it admits can reserve the name.
+  if [ "$launcher" = herdr ] && printf '%s %s\n' "$(date +%s)" "$root" 2>/dev/null >"$herdr_failed"; then
+    echo "Rerun with --bg to start it in the background instead." >&2
+  fi
   exit 1
 }
 
@@ -198,8 +234,7 @@ It is not confirmed stopped, so $dir and its record are kept: close tab $tab, th
       exit 1
     fi
     failed "Claude Code in herdr tab '$name' did not take the brief: $out
-$screen
-Rerun with --bg to start it in the background instead."
+$screen"
   fi
   where="herdr tab '$label' ($tab)"
 elif [ "$launcher" = tmux ]; then

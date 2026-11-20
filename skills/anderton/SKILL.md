@@ -146,7 +146,9 @@ when the work is small and self-contained.
 `$ANDERTON_WORKTREES` when set), starts a full session there in your permission
 mode, and appends to the brief that the worker reports to you by name. When you run
 inside herdr or tmux, the worker opens in a new tab or window the user can watch and
-type into; elsewhere, or with `--bg`, it runs in the background. A project's Anderton
+type into; elsewhere it runs in the background. Never pass `--bg` inside herdr except
+as the rerun `spawn.sh` asks for after a tab fails to start: it refuses `--bg` there
+otherwise, since the user watches every worker through its tab. A project's Anderton
 labels the tab with its own name, as `<its name>/<worker>`.
 
 **Adopt a session** the user opened when they ask you to take it on:
