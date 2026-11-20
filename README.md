@@ -238,7 +238,8 @@ starts a worker: a full Claude Code session named `<name>`, in a new git worktre
   If only `herdr agent prompt` failed, the brief may have reached the session, so the spawn fails
   rather than replay it in the background.
   `--bg` is refused whenever `HERDR_ENV=1`: you watch and type into every worker through its tab,
-  so a caller cannot hide one by choice. If herdr's workspace, socket or CLI is missing there and
+  so a caller cannot hide one by choice. For the same reason a name herdr would refuse (one not
+  starting with a letter, or over 32 characters) is refused there up front. If herdr's workspace, socket or CLI is missing there and
   tmux is not available, the worker starts in the background, with a note saying so.
 - Inside tmux (`$TMUX`, and not herdr), it opens in a new detached window with that same label. The spawn
   waits up to `$ANDERTON_START_WAIT` seconds (default 30) for the session to register: a window

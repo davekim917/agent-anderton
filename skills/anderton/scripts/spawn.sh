@@ -58,6 +58,14 @@ if [ "$launcher" = bg ] && [ "${HERDR_ENV:-}" = 1 ]; then
   echo "spawn.sh: --bg is refused inside herdr; the worker opens in a tab the user can watch. If the tab fails to start, spawn.sh falls back to the background itself." >&2
   exit 2
 fi
+# herdr refuses an agent name that does not start with a letter or is over 32 characters; refused here, so such a name
+# cannot reach the background through a failed tab.
+if [ "${HERDR_ENV:-}" = 1 ]; then
+  case $name in
+    [a-z]*) [ ${#name} -le 32 ] || { echo "spawn.sh: inside herdr a worker name is at most 32 characters." >&2; exit 2; } ;;
+    *) echo "spawn.sh: inside herdr a worker name starts with a letter." >&2; exit 2 ;;
+  esac
+fi
 if [ -z "$launcher" ]; then
   if [ -n "$herdr_ready" ]; then
     launcher=herdr

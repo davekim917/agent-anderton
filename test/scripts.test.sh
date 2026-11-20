@@ -815,6 +815,22 @@ check "without replaying the brief in the background" [ ! -e "$FAKE_LOG.bg" ]
 check "saying why" contains "may have reached it"
 check "closing that tab" grep -qx "w9:t6" "$FAKE_LOG.closed"
 check "and releasing its name" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/lost-prompt.json" ]
+rm -f "$FAKE_LOG.bg"
+for bad in 1-worker a-name-longer-than-thirty-two-chars; do
+  run env "${herdr_env[@]}" "$scripts/spawn.sh" --effort high "$bad" <<'BRIEF'
+Task.
+BRIEF
+  check "inside herdr a name herdr would refuse is refused before any launch: $bad" eval '[ "$status" -eq 2 ] && [ ! -e "$FAKE_LOG.bg" ] && [ ! -e "$work/wt-$bad" ]'
+done
+jq -nc --arg d "$work/wt-no-id" --arg r "$work" '{name: "no-id", launcher: "bg", id: "", dir: $d, root: $r, worktree: false, spawner: "lead-session"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/no-id.json"
+echo '[{"kind":"background","name":"no-id","id":"c0ffee01","cwd":"/","state":"working"}]' > "$FAKE_AGENTS"
+: > "$FAKE_LOG.life"
+run "$scripts/retire.sh" no-id
+check "retire.sh finds a background worker recorded without an id by its name, and stops it" eval '[ "$status" -eq 0 ] && grep -qx "stop c0ffee01" "$FAKE_LOG.life"'
+jq -nc --arg d "$work/wt-no-id" --arg r "$work" '{name: "no-id", launcher: "bg", id: "", dir: $d, root: $r, worktree: false, spawner: "lead-session"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/no-id.json"
+echo '[]' > "$FAKE_AGENTS"
+run "$scripts/retire.sh" no-id
+check "and retires one no longer listed" eval '[ "$status" -eq 0 ] && [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/no-id.json" ]'
 run env HERDR_ENV=1 "$scripts/spawn.sh" --effort high --bg bare-herdr-bg <<'BRIEF'
 Task.
 BRIEF

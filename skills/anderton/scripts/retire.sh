@@ -56,11 +56,14 @@ if [ "$launcher" != bg ]; then
     exit 1
   fi
 else
+  # A spawn cut short after its record but before the session id leaves none: look the session up by name.
+  [ -n "$id" ] || id=$(claude agents --json 2>/dev/null | jq -r --arg n "$name" 'first(.[] | select(.name == $n) | .id) // empty' 2>/dev/null || true)
   if [ -z "$id" ]; then
-    echo "The record for '$name' has no session id; stop it by hand (claude agents), then rerun." >&2
-    exit 1
-  fi
-  if ! claude stop "$id" >/dev/null 2>&1; then
+    if ! session_gone "$name"; then
+      echo "The record for '$name' has no session id; stop it by hand (claude agents), then rerun." >&2
+      exit 1
+    fi
+  elif ! claude stop "$id" >/dev/null 2>&1; then
     if ! listed=$(claude agents --json 2>/dev/null) ||
       ! printf '%s' "$listed" | jq -e --arg id "$id" 'all(.[]; .id != $id)' >/dev/null 2>&1; then
       echo "Could not stop '$name' ($id), and it is not confirmed gone; kept its worktree and record." >&2
