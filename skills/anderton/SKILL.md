@@ -148,8 +148,8 @@ mode, and appends to the brief that the worker reports to you by name. When you 
 inside herdr or tmux, the worker opens in a new tab or window the user can watch and
 type into; elsewhere, or with `--bg` outside herdr, it runs in the background. Inside
 herdr (`HERDR_ENV=1`) `spawn.sh` refuses `--bg`: if the tab fails to start and is
-confirmed stopped, or herdr cannot be used from here, it starts the worker in the
-background itself and says so. A project's Anderton
+confirmed stopped before it got the brief, or herdr cannot be used from here and
+there is no tmux, it starts the worker in the background itself and says so. A project's Anderton
 labels the tab with its own name, as `<its name>/<worker>`.
 
 **Adopt a session** the user opened when they ask you to take it on:

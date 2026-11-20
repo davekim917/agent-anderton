@@ -202,9 +202,10 @@ if [ "$launcher" = herdr ]; then
   [ -z "$tab" ] || write_record
   if [ -z "$herdr_failure" ] && { [ -z "$tab" ] || [ -z "$pane" ]; }; then herdr_failure="herdr opened no tab: $out"; fi
   # A startup prompt (folder trust, a new permission mode) leaves the agent blocked: show it, then undo.
+  prompt_failed=""
   if [ -z "$herdr_failure" ]; then
     if ! out=$(herdr agent start "$name" --kind claude --pane "$pane" --timeout 120000 -- "$@" 2>&1) ||
-      ! out=$(herdr agent prompt "$name" "$brief" 2>&1); then
+      { ! out=$(herdr agent prompt "$name" "$brief" 2>&1) && prompt_failed=1; }; then
       screen=$(herdr agent read "$name" 2>/dev/null | tail -n 20 || true)
       herdr_failure="Claude Code in herdr tab '$name' did not take the brief: $out
 $screen"
@@ -219,6 +220,9 @@ It is not confirmed stopped, so $dir and its record are kept: close tab $tab, th
         exit 1
       fi
     fi
+    # A failed prompt may still have reached the session, which may have acted on it: never replay the brief.
+    [ -z "$prompt_failed" ] || failed "$herdr_failure
+The brief may have reached it before the tab closed, so it is not restarted in the background: rerun spawn.sh."
     echo "$herdr_failure
 spawn.sh: the herdr tab failed, so the worker starts in the background instead: open it with claude attach $name." >&2
     # Rewritten before the launch, so a spawn cut short leaves a background record, not one for the closed tab.

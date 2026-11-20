@@ -39,7 +39,8 @@ chmod +x "$work/bin/claude"
 # A fake herdr. Open tabs are lines "<server socket> <tab id> <label>" in $FAKE_LOG.tabs-open, so a tab is
 # found only in the server ($HERDR_SOCKET_PATH) it was opened in, under its own label.
 # `tab create` opens tab $FAKE_HERDR_TAB (default w9:t5), or with $FAKE_HERDR_CREATE_FAIL=1 fails
-# before opening one, with =opened fails after opening it. `agent start` and `agent prompt` log what they got;
+# before opening one, with =opened fails after opening it. `agent start` and `agent prompt` log what they got
+# (prompt then fails with $FAKE_HERDR_PROMPT_FAIL);
 # with $FAKE_HERDR_START_LIVE, start lists the session as live. `tab get` reports the tab, or tab_not_found, or
 # with $FAKE_HERDR_GET_GARBAGE an unreadable answer, or with $FAKE_HERDR_NO_SERVER server_not_running. `tab close` logs the tab and its server, closes it (not with
 # $FAKE_HERDR_CLOSE_FAIL) and, with $FAKE_HERDR_CLOSE_ENDS, ends the session in it.
@@ -65,7 +66,10 @@ case "$1 $2" in
     if [ -n "${FAKE_HERDR_START_LIVE:-}" ]; then printf '[{"kind":"interactive","name":"%s","id":null}]\n' "$3" > "$FAKE_AGENTS"; fi
     if [ -n "${FAKE_HERDR_START_FAIL:-}" ]; then echo '{"error":{"code":"agent_not_ready"}}'; exit 1; fi
     ;;
-  "agent prompt") printf '%s' "$4" > "$FAKE_LOG.prompt" ;;
+  "agent prompt")
+    printf '%s' "$4" > "$FAKE_LOG.prompt"
+    if [ -n "${FAKE_HERDR_PROMPT_FAIL:-}" ]; then echo '{"error":{"code":"connection_lost"}}'; exit 1; fi
+    ;;
   "agent list") cat "$FAKE_LOG.herdr-agents" 2>/dev/null || echo '{"result":{"agents":[]}}' ;;
   "agent read")
     if [ -n "${FAKE_SCREEN:-}" ]; then
@@ -795,6 +799,22 @@ BRIEF
 check "a session list that is not a list does not confirm the failed tab stopped" eval '[ "$status" -eq 1 ] && [ ! -e "$FAKE_LOG.bg" ]'
 echo '[]' > "$FAKE_AGENTS"
 run "$scripts/retire.sh" odd-list
+printf '%s\n' '[{"kind":"interactive","name":"two-lists","id":null}]' '[]' > "$FAKE_AGENTS"
+run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t6 FAKE_HERDR_START_FAIL=1 "$scripts/spawn.sh" --effort high two-lists <<'BRIEF'
+Task.
+BRIEF
+check "nor does an answer of two lists, the first naming it" eval '[ "$status" -eq 1 ] && [ ! -e "$FAKE_LOG.bg" ]'
+echo '[]' > "$FAKE_AGENTS"
+run "$scripts/retire.sh" two-lists
+: > "$FAKE_LOG.closed"
+run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t6 FAKE_HERDR_PROMPT_FAIL=1 "$scripts/spawn.sh" --effort high lost-prompt <<'BRIEF'
+Task.
+BRIEF
+check "a prompt that may have reached the session fails the spawn" [ "$status" -eq 1 ]
+check "without replaying the brief in the background" [ ! -e "$FAKE_LOG.bg" ]
+check "saying why" contains "may have reached it"
+check "closing that tab" grep -qx "w9:t6" "$FAKE_LOG.closed"
+check "and releasing its name" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/lost-prompt.json" ]
 run env HERDR_ENV=1 "$scripts/spawn.sh" --effort high --bg bare-herdr-bg <<'BRIEF'
 Task.
 BRIEF
