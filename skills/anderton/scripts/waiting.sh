@@ -73,14 +73,26 @@ answers_for() { # answers_for <name> <cwd> [session id] [pid] [start]: true when
   [ -z "$mine" ] || [ "$(answering_role "$@")" = "$mine" ]
 }
 
+# Each entry is judged on one copy: Claude Code rewrites it as the session's status changes, and a session selected
+# as blocked but rendered from a newer entry reads as a call unanswered for over a minute, a header the watch never
+# reported. Without a temporary file it reads the entry in place, as before.
+# The copy sits in this user's own Claude home, never a shared temporary directory another user could reach.
+snapdir=$(mktemp -d "$holders/.waiting.XXXXXX" 2>/dev/null) || snapdir=""
+entry=""
+if [ -n "$snapdir" ]; then
+  entry="$snapdir/entry"
+  trap 'rm -rf "$snapdir" 2>/dev/null || true' EXIT
+fi
 for s in "$sessions"/*.json; do
   [ -e "$s" ] || continue
-  fields=$(jq -r '[(.pid // "" | tostring), (.startedAt // "" | if type == "number" then floor | tostring else . end), .sessionId // "", .cwd // "", .name // "", .procStart // ""] | join("\u001f")' "$s" 2>/dev/null) || continue
+  src=$s
+  if [ -n "$entry" ] && { cat <"$s" >|"$entry"; } 2>/dev/null; then src=$entry; fi
+  fields=$(jq -r '[(.pid // "" | tostring), (.startedAt // "" | if type == "number" then floor | tostring else . end), .sessionId // "", .cwd // "", .name // "", .procStart // ""] | join("\u001f")' "$src" 2>/dev/null) || continue
   IFS=$'\x1f' read -r pid start sid cwd name pstart <<EOF
 $fields
 EOF
   if [ -z "$pid" ] || [ -z "$sid" ]; then continue; fi
-  status=$(jq -r '.status // ""' "$s" 2>/dev/null) || continue
+  status=$(jq -r '.status // ""' "$src" 2>/dev/null) || continue
   held=""
   while IFS= read -r r; do
     if [ -n "$r" ] && is_holder "$s" "$r"; then held=$r; fi
@@ -128,7 +140,7 @@ EOF
         tail -n 200 "$f"
       done
     fi
-  } | jq -nrR --slurpfile reg "$s" --arg name "${name:-${sid%%-*}}${tag}" --arg cwd "$cwd" --arg blocked "$blocked" '
+  } | jq -nrR --slurpfile reg "$src" --arg name "${name:-${sid%%-*}}${tag}" --arg cwd "$cwd" --arg blocked "$blocked" '
     def blocks: .message.content | if type == "string" then [{type: "text", text: .}] elif type == "array" then . else [] end;
     def human: .type == "user" and (.isMeta | not)
       and (blocks | all(.[]; .type != "tool_result"))
