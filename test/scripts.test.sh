@@ -40,7 +40,8 @@ chmod +x "$work/bin/claude"
 # found only in the server ($HERDR_SOCKET_PATH) it was opened in, under its own label.
 # `tab create` opens tab $FAKE_HERDR_TAB (default w9:t5), or with $FAKE_HERDR_CREATE_FAIL=1 fails
 # before opening one, with =opened fails after opening it. `agent start` and `agent prompt` log what they got
-# (prompt then fails with $FAKE_HERDR_PROMPT_FAIL);
+# (prompt then fails with $FAKE_HERDR_PROMPT_FAIL, start with $FAKE_HERDR_START_TAKEN as
+# agent_name_taken);
 # with $FAKE_HERDR_START_LIVE, start lists the session as live. `tab get` reports the tab, or tab_not_found, or
 # with $FAKE_HERDR_GET_GARBAGE an unreadable answer, or with $FAKE_HERDR_NO_SERVER server_not_running. `tab close` logs the tab and its server, closes it (not with
 # $FAKE_HERDR_CLOSE_FAIL) and, with $FAKE_HERDR_CLOSE_ENDS, ends the session in it.
@@ -65,6 +66,7 @@ case "$1 $2" in
     printf '%s\n' "$@" > "$FAKE_LOG.start"
     if [ -n "${FAKE_HERDR_START_LIVE:-}" ]; then printf '[{"kind":"interactive","name":"%s","id":null}]\n' "$3" > "$FAKE_AGENTS"; fi
     if [ -n "${FAKE_HERDR_START_FAIL:-}" ]; then echo '{"error":{"code":"agent_not_ready"}}'; exit 1; fi
+    if [ -n "${FAKE_HERDR_START_TAKEN:-}" ]; then echo '{"error":{"code":"agent_name_taken"}}'; exit 1; fi
     ;;
   "agent prompt")
     printf '%s' "$4" > "$FAKE_LOG.prompt"
@@ -814,7 +816,18 @@ check "a prompt that may have reached the session fails the spawn" [ "$status" -
 check "without replaying the brief in the background" [ ! -e "$FAKE_LOG.bg" ]
 check "saying why" contains "may have reached it"
 check "closing that tab" grep -qx "w9:t6" "$FAKE_LOG.closed"
-check "and releasing its name" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/lost-prompt.json" ]
+check "keeping its worktree, which it may have written to" [ -d "$work/wt-lost-prompt" ]
+check "and a record retire.sh can finish from" [ "$(jq -r .launcher "$CLAUDE_CONFIG_DIR/anderton/workers/lost-prompt.json" 2>/dev/null)" = herdr ]
+echo '[]' > "$FAKE_AGENTS"
+run "$scripts/retire.sh" lost-prompt
+check "which it does" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-lost-prompt" ]'
+rm -f "$FAKE_LOG.bg"
+run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t6 FAKE_HERDR_START_TAKEN=1 "$scripts/spawn.sh" --effort high taken-name <<'BRIEF'
+Task.
+BRIEF
+check "a name another herdr agent holds fails the spawn" eval '[ "$status" -eq 1 ] && [ ! -e "$FAKE_LOG.bg" ]'
+check "saying so" contains "Another herdr agent holds the name"
+check "releasing its name and worktree" eval '[ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/taken-name.json" ] && [ ! -e "$work/wt-taken-name" ]'
 rm -f "$FAKE_LOG.bg"
 for bad in 1-worker a-name-longer-than-thirty-two-chars; do
   run env "${herdr_env[@]}" "$scripts/spawn.sh" --effort high "$bad" <<'BRIEF'
@@ -822,15 +835,6 @@ Task.
 BRIEF
   check "inside herdr a name herdr would refuse is refused before any launch: $bad" eval '[ "$status" -eq 2 ] && [ ! -e "$FAKE_LOG.bg" ] && [ ! -e "$work/wt-$bad" ]'
 done
-jq -nc --arg d "$work/wt-no-id" --arg r "$work" '{name: "no-id", launcher: "bg", id: "", dir: $d, root: $r, worktree: false, spawner: "lead-session"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/no-id.json"
-echo '[{"kind":"background","name":"no-id","id":"c0ffee01","cwd":"/","state":"working"}]' > "$FAKE_AGENTS"
-: > "$FAKE_LOG.life"
-run "$scripts/retire.sh" no-id
-check "retire.sh finds a background worker recorded without an id by its name, and stops it" eval '[ "$status" -eq 0 ] && grep -qx "stop c0ffee01" "$FAKE_LOG.life"'
-jq -nc --arg d "$work/wt-no-id" --arg r "$work" '{name: "no-id", launcher: "bg", id: "", dir: $d, root: $r, worktree: false, spawner: "lead-session"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/no-id.json"
-echo '[]' > "$FAKE_AGENTS"
-run "$scripts/retire.sh" no-id
-check "and retires one no longer listed" eval '[ "$status" -eq 0 ] && [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/no-id.json" ]'
 run env HERDR_ENV=1 "$scripts/spawn.sh" --effort high --bg bare-herdr-bg <<'BRIEF'
 Task.
 BRIEF

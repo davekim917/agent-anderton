@@ -236,7 +236,8 @@ starts a worker: a full Claude Code session named `<name>`, in a new git worktre
   shows why, closes the tab and starts the worker in the background instead, saying so; unless the
   session cannot be confirmed stopped, when it fails and keeps the worktree and record for `retire.sh`.
   If only `herdr agent prompt` failed, the brief may have reached the session, so the spawn fails
-  rather than replay it in the background.
+  rather than replay it in the background, and keeps the worktree and record for `retire.sh`. A name
+  another herdr agent already holds fails the spawn too.
   `--bg` is refused whenever `HERDR_ENV=1`: you watch and type into every worker through its tab,
   so a caller cannot hide one by choice. For the same reason a name herdr would refuse (one not
   starting with a letter, or over 32 characters) is refused there up front. If herdr's workspace, socket or CLI is missing there and
