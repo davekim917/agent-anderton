@@ -38,7 +38,7 @@ FAKE
 chmod +x "$work/bin/claude"
 # A fake herdr. Open tabs are lines "<server socket> <tab id> <label>" in $FAKE_LOG.tabs-open, so a tab is
 # found only in the server ($HERDR_SOCKET_PATH) it was opened in, under its own label.
-# `tab create` opens tab $FAKE_HERDR_TAB (default w9:t5). `agent start` and `agent prompt` log what they got;
+# `tab create` opens tab $FAKE_HERDR_TAB (default w9:t5), or fails with $FAKE_HERDR_CREATE_FAIL. `agent start` and `agent prompt` log what they got;
 # with $FAKE_HERDR_START_LIVE, start lists the session as live. `tab get` reports the tab, or tab_not_found, or
 # with $FAKE_HERDR_GET_GARBAGE an unreadable answer, or with $FAKE_HERDR_NO_SERVER server_not_running. `tab close` logs the tab and its server, closes it (not with
 # $FAKE_HERDR_CLOSE_FAIL) and, with $FAKE_HERDR_CLOSE_ENDS, ends the session in it.
@@ -48,6 +48,7 @@ sock=${HERDR_SOCKET_PATH:-}
 case "$1 $2" in
   "tab create")
     printf '%s\n' "$@" > "$FAKE_LOG.tab"
+    if [ -n "${FAKE_HERDR_CREATE_FAIL:-}" ]; then echo '{"error":{"code":"workspace_not_found"}}'; exit 1; fi
     label=""
     while [ $# -gt 0 ]; do
       if [ "$1" = --label ]; then label=$2; fi
@@ -787,6 +788,32 @@ run env "${herdr_env[@]}" "$scripts/spawn.sh" --effort high --bg stuck-tab <<'BR
 Task.
 BRIEF
 check "and only once: a second --bg of that name is refused" eval '[ "$status" -eq 2 ] && [ ! -e "$FAKE_LOG.bg" ]'
+run env "${herdr_env[@]}" FAKE_HERDR_CREATE_FAIL=1 "$scripts/spawn.sh" --effort high no-tab <<'BRIEF'
+Task.
+BRIEF
+check "a herdr that cannot open a tab fails the spawn and offers --bg" eval '[ "$status" -eq 1 ] && contains "Rerun with --bg"'
+cp "$CLAUDE_CONFIG_DIR/anderton/workers/no-tab.herdr-failed" "$work/no-tab.marker"
+printf '%s %s\n' "$(date +%s)" "$beta" > "$CLAUDE_CONFIG_DIR/anderton/workers/no-tab.herdr-failed"
+run env "${herdr_env[@]}" "$scripts/spawn.sh" --effort high --bg no-tab <<'BRIEF'
+Task.
+BRIEF
+check "a marker another project's failure left does not admit --bg here" eval '[ "$status" -eq 2 ] && [ ! -e "$FAKE_LOG.bg" ]'
+cp "$work/no-tab.marker" "$CLAUDE_CONFIG_DIR/anderton/workers/no-tab.herdr-failed"
+run env "${herdr_env[@]}" "$scripts/spawn.sh" --effort high no-tab <<'BRIEF'
+Task.
+BRIEF
+check "a spawn of that name in a tab" [ "$status" -eq 0 ]
+echo '[]' > "$FAKE_AGENTS"
+run "$scripts/retire.sh" no-tab
+run env "${herdr_env[@]}" "$scripts/spawn.sh" --effort high --bg no-tab <<'BRIEF'
+Task.
+BRIEF
+check "clears the marker, so --bg is refused again" eval '[ "$status" -eq 2 ] && [ ! -e "$FAKE_LOG.bg" ]'
+printf '%s %s\n' "$(( $(date +%s) - 7200 ))" "$(cat "$work/no-tab.marker" | cut -d' ' -f2-)" > "$CLAUDE_CONFIG_DIR/anderton/workers/no-tab.herdr-failed"
+run env "${herdr_env[@]}" "$scripts/spawn.sh" --effort high --bg no-tab <<'BRIEF'
+Task.
+BRIEF
+check "and a marker over an hour old admits nothing" eval '[ "$status" -eq 2 ] && [ ! -e "$FAKE_LOG.bg" ]'
 run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t7 FAKE_HERDR_START_FAIL=1 FAKE_HERDR_START_LIVE=1 FAKE_HERDR_CLOSE_FAIL=1 "$scripts/spawn.sh" --effort high live-stuck <<'BRIEF'
 Task.
 BRIEF

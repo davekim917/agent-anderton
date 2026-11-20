@@ -234,10 +234,12 @@ starts a worker: a full Claude Code session named `<name>`, in a new git worktre
   lowercase letters, digits and hyphens (`herdr tab create`, `herdr agent start --kind claude`, then `herdr agent prompt` with
   the brief). If Claude Code stops at a startup prompt there, the spawn shows the screen, closes the
   tab and fails, unless the session cannot be confirmed stopped, when it keeps the worktree and
-  record for `retire.sh`. A failed tab, including one herdr could not open, says to rerun with `--bg`.
+  record for `retire.sh`. A failed tab that is confirmed closed, including one herdr could not open,
+  says to rerun with `--bg`.
 - Inside herdr `--bg` is refused: you watch and type into every worker through its tab, so a caller
   cannot hide one by choice. The one exception is that rerun: the failed start leaves a marker for its
-  name that admits one `--bg` spawn of that name, and any later spawn of the name clears it. A name
+  name that admits one `--bg` spawn of that name from the same project within the hour; any later
+  spawn of the name uses it up or clears it. A name
   herdr would refuse (not starting with a letter, or over 32 characters) is refused up front there.
 - Inside tmux (`$TMUX`, and not herdr), it opens in a new detached window with that same label. The spawn
   waits up to `$ANDERTON_START_WAIT` seconds (default 30) for the session to register: a window

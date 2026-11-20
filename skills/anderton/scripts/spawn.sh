@@ -50,8 +50,18 @@ if [ -n "${2:-}" ]; then brief=$(cat "$2"); else brief=$(cat); fi
 # The user watches and types into every worker through its tab, so inside herdr a caller cannot hide one by choice:
 # --bg there is admitted only by the marker a failed herdr start of the same name leaves, and only once.
 herdr_failed="$holders/workers/$name.herdr-failed"
+# Taken by renaming, so of two reruns only one gets it; it admits only a rerun from the same project within the hour.
+admitted=""
+if [ "$launcher" = bg ] && [ "${HERDR_ENV:-}" = 1 ] && mv "$herdr_failed" "$herdr_failed.$$" 2>/dev/null; then
+  marker=$(cat "$herdr_failed.$$" 2>/dev/null || true)
+  rm -f "$herdr_failed.$$"
+  case ${marker%% *} in
+    '' | *[!0-9]*) ;;
+    *) if [ "${marker#* }" = "$(invoking_root)" ] && [ $(($(date +%s) - ${marker%% *})) -lt 3600 ]; then admitted=1; fi ;;
+  esac
+fi
 if [ "${HERDR_ENV:-}" = 1 ]; then
-  if [ "$launcher" = bg ] && [ ! -e "$herdr_failed" ]; then
+  if [ "$launcher" = bg ] && [ -z "$admitted" ]; then
     echo "spawn.sh: --bg is refused inside herdr; the worker opens in a tab the user can watch. It is accepted only for the rerun spawn.sh asks for after a herdr tab fails to start." >&2
     exit 2
   fi
@@ -169,12 +179,12 @@ write_record() {
 
 failed() {
   [ -z "${1:-}" ] || echo "$1" >&2
-  if [ "$launcher" = herdr ]; then
-    : >"$herdr_failed"
-    echo "Rerun with --bg to start it in the background instead." >&2
-  fi
   if [ "$worktree" = true ]; then git -C "$root" worktree remove --force "$dir"; fi
   rm -f "$record"
+  # Written last, once the name is released, so a rerun it admits can reserve the name.
+  if [ "$launcher" = herdr ] && printf '%s %s\n' "$(date +%s)" "$root" 2>/dev/null >"$herdr_failed"; then
+    echo "Rerun with --bg to start it in the background instead." >&2
+  fi
   exit 1
 }
 
