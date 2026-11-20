@@ -827,6 +827,7 @@ Task.
 BRIEF
 check "a name another herdr agent holds fails the spawn" eval '[ "$status" -eq 1 ] && [ ! -e "$FAKE_LOG.bg" ]'
 check "saying so" contains "Another herdr agent holds the name"
+check "without showing the screen of the agent that holds it" eval '! contains "Is this a project you trust?"'
 check "releasing its name and worktree" eval '[ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/taken-name.json" ] && [ ! -e "$work/wt-taken-name" ]'
 rm -f "$FAKE_LOG.bg"
 for bad in 1-worker a-name-longer-than-thirty-two-chars; do

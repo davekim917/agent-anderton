@@ -210,11 +210,16 @@ if [ "$launcher" = herdr ]; then
   [ -z "$tab" ] || write_record
   if [ -z "$herdr_failure" ] && { [ -z "$tab" ] || [ -z "$pane" ]; }; then herdr_failure="herdr opened no tab: $out"; fi
   # A startup prompt (folder trust, a new permission mode) leaves the agent blocked: show it, then undo.
-  prompt_failed=""
+  prompt_failed="" name_taken=""
   if [ -z "$herdr_failure" ]; then
     if ! out=$(herdr agent start "$name" --kind claude --pane "$pane" --timeout 120000 -- "$@" 2>&1) ||
       { ! out=$(herdr agent prompt "$name" "$brief" 2>&1) && prompt_failed=1; }; then
-      screen=$(herdr agent read "$name" 2>/dev/null | tail -n 20 || true)
+      # The name then belongs to another agent, whose screen is not this worker's.
+      if [ -z "$prompt_failed" ] && [ "$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null || true)" = agent_name_taken ]; then
+        name_taken=1 screen=""
+      else
+        screen=$(herdr agent read "$pane" 2>/dev/null | tail -n 20 || true)
+      fi
       herdr_failure="Claude Code in herdr tab '$name' did not take the brief: $out
 $screen"
     fi
@@ -235,10 +240,8 @@ It is not confirmed stopped, so $dir and its record are kept: close tab $tab, th
 The brief may have reached it before the tab closed, so it is not restarted in the background: $dir and its record are kept for retire.sh $name." >&2
       exit 1
     fi
-    case $herdr_failure in
-      *agent_name_taken*) failed "$herdr_failure
-Another herdr agent holds the name '$name'; pick another name." ;;
-    esac
+    [ -z "$name_taken" ] || failed "$herdr_failure
+Another herdr agent holds the name '$name'; pick another name."
     echo "$herdr_failure
 spawn.sh: the herdr tab failed, so the worker starts in the background instead: open it with claude attach $name." >&2
     # Reserved again as before any launch, so a spawn cut short releases the name instead of recording the closed tab.
