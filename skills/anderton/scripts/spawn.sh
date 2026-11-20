@@ -225,6 +225,12 @@ $screen"
     fi
   fi
   if [ -n "$herdr_failure" ]; then
+    # A tab already gone was closed by the user or retire.sh, which owns the cleanup: never relaunch what they stopped.
+    if [ -n "$tab" ] && [ "$(place_state herdr "$socket" "$tab" "$label")" = absent ]; then
+      echo "$herdr_failure
+Its herdr tab was closed while it started, so it is not restarted in the background: $dir and its record are left for retire.sh $name." >&2
+      exit 1
+    fi
     if [ -n "$tab" ]; then
       herdr tab close "$tab" >/dev/null 2>&1 || true
       if ! worker_gone herdr "$socket" "$tab" "$name" "" "$label"; then

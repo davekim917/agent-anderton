@@ -41,7 +41,7 @@ chmod +x "$work/bin/claude"
 # `tab create` opens tab $FAKE_HERDR_TAB (default w9:t5), or with $FAKE_HERDR_CREATE_FAIL=1 fails
 # before opening one, with =opened fails after opening it. `agent start` and `agent prompt` log what they got
 # (prompt then fails with $FAKE_HERDR_PROMPT_FAIL, start with $FAKE_HERDR_START_TAKEN as
-# agent_name_taken);
+# agent_name_taken, or with $FAKE_HERDR_START_CLOSED after its tabs were closed under it);
 # with $FAKE_HERDR_START_LIVE, start lists the session as live. `tab get` reports the tab, or tab_not_found, or
 # with $FAKE_HERDR_GET_GARBAGE an unreadable answer, or with $FAKE_HERDR_NO_SERVER server_not_running. `tab close` logs the tab and its server, closes it (not with
 # $FAKE_HERDR_CLOSE_FAIL) and, with $FAKE_HERDR_CLOSE_ENDS, ends the session in it.
@@ -66,6 +66,10 @@ case "$1 $2" in
     printf '%s\n' "$@" > "$FAKE_LOG.start"
     if [ -n "${FAKE_HERDR_START_LIVE:-}" ]; then printf '[{"kind":"interactive","name":"%s","id":null}]\n' "$3" > "$FAKE_AGENTS"; fi
     if [ -n "${FAKE_HERDR_START_FAIL:-}" ]; then echo '{"error":{"code":"agent_not_ready"}}'; exit 1; fi
+    if [ -n "${FAKE_HERDR_START_CLOSED:-}" ]; then
+      awk -v s="$sock" '$1 != s' "$FAKE_LOG.tabs-open" > "$FAKE_LOG.tabs-open.tmp"; mv "$FAKE_LOG.tabs-open.tmp" "$FAKE_LOG.tabs-open"
+      echo '{"error":{"code":"pane_not_found"}}'; exit 1
+    fi
     if [ -n "${FAKE_HERDR_START_TAKEN:-}" ]; then echo '{"error":{"code":"agent_name_taken"}}'; exit 1; fi
     ;;
   "agent prompt")
@@ -828,6 +832,16 @@ BRIEF
 check "a name another herdr agent holds fails the spawn" eval '[ "$status" -eq 1 ] && [ ! -e "$FAKE_LOG.bg" ]'
 check "saying so" contains "Another herdr agent holds the name"
 check "without showing the screen of the agent that holds it" eval '! contains "Is this a project you trust?"'
+rm -f "$FAKE_LOG.bg"
+run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t6 FAKE_HERDR_START_CLOSED=1 "$scripts/spawn.sh" --effort high closed-under <<'BRIEF'
+Task.
+BRIEF
+check "a tab closed by someone else while it started fails the spawn" eval '[ "$status" -eq 1 ] && [ ! -e "$FAKE_LOG.bg" ]'
+check "saying it is not restarted in the background" contains "not restarted in the background"
+check "leaving its worktree and record to whoever closed it" eval '[ -d "$work/wt-closed-under" ] && [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/closed-under.json" ]'
+echo '[]' > "$FAKE_AGENTS"
+run "$scripts/retire.sh" closed-under
+check "which retire.sh retires" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-closed-under" ]'
 check "releasing its name and worktree" eval '[ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/taken-name.json" ] && [ ! -e "$work/wt-taken-name" ]'
 rm -f "$FAKE_LOG.bg"
 for bad in 1-worker a-name-longer-than-thirty-two-chars; do
