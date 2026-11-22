@@ -265,19 +265,29 @@ class WorkerTest(unittest.TestCase):
         (notice / "message").write_text("RESULT: fixture completed")
         original = self.client.call
         sent = []
+        started = []
 
         def lost_ack(method, params):
             if method == "thread/queue/add":
                 sent.append(params["clientUserMessageId"])
-                self.client.queue = [{"clientUserMessageId": sent[0]}]
+                self.client.queue = [{"id": "operator-submission", "clientUserMessageId": "unrelated"},
+                                     {"id": "anderton-notice", "clientUserMessageId": sent[0]}]
                 raise TimeoutError("acknowledgment lost")
+            if method == "thread/queue/start":
+                started.append(params["queuedSubmissionId"])
+                return {"turn": {"id": "completed-notice"}}
             return original(method, params)
 
         with patch.object(self.client, "call", side_effect=lost_ack):
             with self.assertRaises(TimeoutError):
                 worker_api.deliver_notice(self.client, claim, notice)
             self.assertEqual(sent[0], json.loads((notice / "receipt.json").read_text())["id"])
+            self.client.info["status"] = {"type": "active"}
             self.assertFalse(worker_api.deliver_notice(self.client, claim, notice))
+            self.assertEqual([], started)
+            self.client.info["status"] = {"type": "idle"}
+            self.assertFalse(worker_api.deliver_notice(self.client, claim, notice))
+            self.assertEqual(["anderton-notice"], started)
             self.client.queue = []
             self.client.turns = [{"id": "completed-notice", "status": "completed"}]
             self.client.items["completed-notice"] = [user_message("RESULT: fixture completed")]

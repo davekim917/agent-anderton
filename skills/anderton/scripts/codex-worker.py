@@ -252,7 +252,9 @@ def direction_state(client, worker):
     for look in range(2):
         if look:
             time.sleep(DIRECTION_RECHECK_SECONDS)
-        state = direction_seen(client, worker, pending)
+        state, _ = direction_seen(client, worker, pending)
+        if state == "queued":
+            return "pending"
         if state != "unseen":
             return state
     # Neither queued nor in a turn since the one before it, twice, with no turn running. A connection that failed
@@ -264,26 +266,25 @@ def direction_state(client, worker):
 
 
 def direction_seen(client, worker, pending):
-    """finished or pending as Codex shows the direction; when it shows nowhere, pending while the thread is busy, else
-    unseen. A busy thread only rules out a lost direction: another turn running never holds up a finished one."""
+    """Locate the direction in the queue or history, or determine whether it may still be starting."""
     thread = worker["id"]
     # The queue first: an entry leaves it only once its turn has started, and that turn records the direction before it
     # can end, so a direction gone from the queue shows in the turns, or the thread is busy with it, or a recheck sees it.
     for entry in client.pages("thread/queue/list", threadId=thread, limit=20):
         if entry.get("clientUserMessageId") == pending["id"]:
-            return "pending"
+            return "queued", entry
     busy = False
     for turn in client.pages("thread/turns/list", threadId=thread, limit=20, itemsView="notLoaded"):
         busy = busy or turn["status"] == "inProgress"
         for entry in client.pages("thread/items/list", threadId=thread, turnId=turn["id"], limit=10):
             item = entry["item"]
             if item["type"] == "userMessage" and item.get("clientId") == pending["id"]:
-                return "finished" if turn["status"] in {"completed", "interrupted", "failed"} else "pending"
+                return ("finished" if turn["status"] in {"completed", "interrupted", "failed"} else "pending"), None
         if turn["id"] == pending["previousTurn"]:
             break
     if busy or read_thread(client, worker)["status"]["type"] == "active":
-        return "pending"
-    return "unseen"
+        return "pending", None
+    return "unseen", None
 
 
 def save_worker(path, worker):
@@ -340,15 +341,22 @@ def deliver_notice(client, claim, notice):
     receipt_path = notice / "receipt.json"
     if receipt_path.exists():
         receipt = json.loads(receipt_path.read_text())
-        state = direction_seen(client, worker, receipt)
-        if state == "finished":
-            return True
-        if state == "pending":
-            if info["status"]["type"] == "notLoaded":
-                client.call("thread/resume", {"threadId": thread, "excludeTurns": True})
-            return False
-        if time.time() - receipt["sentAt"] < DIRECTION_LOST_AFTER_SECONDS:
-            return False
+        for look in range(2):
+            state, submission = direction_seen(client, worker, receipt)
+            if state == "finished":
+                return True
+            if state == "queued":
+                status = read_thread(client, worker)["status"]["type"]
+                if status == "notLoaded":
+                    client.call("thread/resume", {"threadId": thread, "excludeTurns": True})
+                elif status == "idle":
+                    # A queue can remain stopped after an interruption or daemon restart.
+                    client.call("thread/queue/start", {"threadId": thread, "queuedSubmissionId": submission["id"]})
+                return False
+            if state == "pending" or time.time() - receipt["sentAt"] < DIRECTION_LOST_AFTER_SECONDS:
+                return False
+            if look == 0:
+                time.sleep(DIRECTION_RECHECK_SECONDS)
     else:
         turns = client.call("thread/turns/list", {
             "threadId": thread, "limit": 1, "itemsView": "notLoaded",
