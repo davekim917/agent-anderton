@@ -2572,7 +2572,9 @@ check "and one whose pane shows its thread is closed" eval '[ "$status" -eq 0 ] 
 
 # spawn.sh starts a Codex worker with the title retire.sh reads; without it no Codex tab could be closed.
 cxs="$work/codex-spawn"
-mkdir -p "$cxs" "$work/codex-home/app-server-control"
+# A Unix socket path is capped near 104 bytes, which macOS's TMPDIR can exceed.
+cxhome=$(mktemp -d /tmp/anderton-cx.XXXXXX)
+mkdir -p "$cxs" "$cxhome/app-server-control"
 cp "$scripts/spawn.sh" "$scripts/session-lib.sh" "$cxs/"
 cat >"$cxs/codex-worker.py" <<FAKE
 #!/usr/bin/env bash
@@ -2580,10 +2582,10 @@ case " \$* " in *" --token "*) echo "$cx_thread" ;; esac
 FAKE
 printf '#!/usr/bin/env bash\n' >"$work/bin/codex"
 chmod +x "$cxs/codex-worker.py" "$work/bin/codex"
-python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$work/codex-home/app-server-control/app-server-control.sock"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$cxhome/app-server-control/app-server-control.sock"
 rm -f "$FAKE_LOG.window"
 set +e
-out=$(cd "$rho" && printf 'Task.\n' | env CLAUDE_CODE_SESSION_ID=rl-1 CLAUDE_PID="$p_rl" CODEX_HOME="$work/codex-home" TMUX=/tmp/fake-tmux,1,0 \
+out=$(cd "$rho" && printf 'Task.\n' | env CLAUDE_CODE_SESSION_ID=rl-1 CLAUDE_PID="$p_rl" CODEX_HOME="$cxhome" TMUX=/tmp/fake-tmux,1,0 \
   FAKE_TMUX_WINDOW=@41 "$cxs/spawn.sh" --provider codex --effort low cx-titled 2>&1)
 status=$?
 set -e
@@ -2591,6 +2593,7 @@ check "spawn.sh starts a Codex worker in tmux" [ "$status" -eq 0 ]
 check "titling its tab with the thread id" grep -qxF 'tui.terminal_title=["thread-id"]' "$FAKE_LOG.window"
 check "and records the thread it registered" [ "$(jq -r .id "$CLAUDE_CONFIG_DIR/anderton/workers/cx-titled.json" 2>/dev/null)" = "$cx_thread" ]
 rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/cx-titled.json" "$work/bin/codex"
+rm -rf "$cxhome"
 [ ! -d "$work/wt-cx-titled" ] || git -C "$rho" worktree remove --force "$work/wt-cx-titled"
 
 # tmux reads an argument ending in ";" as the end of its command, and expands formats in the start directory.
