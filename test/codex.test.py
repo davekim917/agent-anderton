@@ -18,6 +18,8 @@ class FakeCodex:
         self.items = {}
         self.threads = [self.info]
         self.latest = []
+        self.queue = []
+        self.checked_queue = False
 
     def __enter__(self):
         return self
@@ -30,6 +32,9 @@ class FakeCodex:
             return {"data": [{"id": params["threadId"]}]}
         if method == "thread/items/list":
             return {"data": self.latest}
+        if method == "thread/queue/list":
+            self.checked_queue = True
+            return {"data": self.queue}
         assert method == "thread/read"
         assert params["threadId"] == self.info["id"]
         return {"thread": self.info}
@@ -131,14 +136,31 @@ class WorkerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "More than one"):
             worker_api.find_thread(self.client, directory, "", token)
 
-    def test_pending_direction_requires_a_user_receipt(self):
-        token = "00000000-0000-4000-8000-000000000789"
-        self.worker["codexPending"] = token
-        self.client.turns = [{"id": "first", "status": "completed"}]
-        self.client.items["first"] = [message(f"Anderton direction {token}")]
-        self.assertFalse(worker_api.direction_received(self.client, self.worker))
-        self.client.items["first"].append(user_message(f"Anderton direction {token}\n\nMore work"))
-        self.assertTrue(worker_api.direction_received(self.client, self.worker))
+    def test_inactivity_requires_empty_queue_and_current_idle_status(self):
+        self.assertTrue(worker_api.is_inactive(self.client, self.worker))
+        self.client.queue = [{"id": "next"}]
+        self.assertFalse(worker_api.is_inactive(self.client, self.worker))
+        self.client.queue = []
+        self.client.checked_queue = False
+        original = self.client.call
+
+        def starts_between_queue_and_status(method, params):
+            if method == "thread/read" and self.client.checked_queue:
+                self.client.info["status"] = {"type": "active"}
+            return original(method, params)
+
+        with patch.object(self.client, "call", side_effect=starts_between_queue_and_status):
+            self.assertFalse(worker_api.is_inactive(self.client, self.worker))
+
+    def test_reminds_when_pending_block_identity_stays_the_same(self):
+        self.client.turns = [{"id": "first", "status": "inProgress"}]
+        self.client.info["status"] = {"type": "active", "activeFlags": ["waitingOnApproval"]}
+        self.client.latest = [{"item": {"id": "approval-one"}}]
+        with patch.object(worker_api.time, "time", return_value=1000):
+            self.assertIn("waiting on approval", self.scan()[0])
+            self.delivered()
+        with patch.object(worker_api.time, "time", return_value=1000 + worker_api.BLOCK_REMINDER_SECONDS):
+            self.assertIn("still waiting on approval", self.scan()[0])
 
 
 if __name__ == "__main__":

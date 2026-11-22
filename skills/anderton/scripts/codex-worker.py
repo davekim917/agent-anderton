@@ -15,6 +15,7 @@ import time
 import uuid
 
 MAX_MESSAGE = 16 * 1024 * 1024
+BLOCK_REMINDER_SECONDS = 300
 # RFC 6455 requires the handshake GUID in uppercase ASCII.
 HANDSHAKE_GUID = str(uuid.UUID("258eafa5-e914-47da-95ca-c5ab0dc85b11")).upper().encode("ascii")
 REPORT = re.compile(r"^(RESULT|QUESTION|BLOCKED|ANSWER):[ \t]*\S")
@@ -69,7 +70,7 @@ class Codex:
             raise ValueError("Invalid Codex daemon WebSocket signature")
         self.call("initialize", {"clientInfo": {
             "name": "agent-anderton", "title": None, "version": "1.0"
-        }, "capabilities": None})
+        }, "capabilities": {"experimentalApi": True, "requestAttestation": False}})
         self.send({"method": "initialized"})
 
     def frame(self, opcode, payload):
@@ -201,16 +202,10 @@ def final_report(client, thread, turn):
     return None
 
 
-def direction_received(client, worker):
-    token = worker.get("codexPending")
-    if not token:
-        return True
-    thread = worker["id"]
-    marker = f"Anderton direction {uuid.UUID(token)}"
-    for turn in client.pages("thread/turns/list", threadId=thread, limit=20, itemsView="notLoaded"):
-        if has_message(client, thread, turn["id"], marker):
-            return True
-    return False
+def is_inactive(client, worker):
+    if client.call("thread/queue/list", {"threadId": worker["id"], "limit": 1})["data"]:
+        return False
+    return read_thread(client, worker)["status"]["type"] in {"idle", "notLoaded"}
 
 
 def sweep_worker(worker, state_dir, stage_dir):
@@ -239,14 +234,21 @@ def sweep_worker(worker, state_dir, stage_dir):
                 completed.append(turn)
         block = None
         if waiting:
-            # A second tool can ask for approval in the same turn between polls.
+            # Successive approval requests can share a tool item ID in Codex.
             items = client.call("thread/items/list", {
                 "threadId": thread, "turnId": running, "sortDirection": "desc", "limit": 1,
             })["data"] if running else []
-            block = [running, waiting, items[0]["item"]["id"] if items else None]
-        if block and block != state.get("block"):
-            reasons = ["approval" if flag == "waitingOnApproval" else "user input" for flag in waiting]
-            events.append(f"{name} (Codex {thread}) is waiting on {' and '.join(reasons)}. Open its worker tab.")
+            key = [running, waiting, items[0]["item"]["id"] if items else None]
+            previous_block = state.get("block")
+            now = int(time.time())
+            same_block = isinstance(previous_block, dict) and previous_block["key"] == key
+            if not same_block or now - previous_block["notifiedAt"] >= BLOCK_REMINDER_SECONDS:
+                block = {"key": key, "notifiedAt": now}
+                reasons = ["approval" if flag == "waitingOnApproval" else "user input" for flag in waiting]
+                still = "still " if same_block else ""
+                events.append(f"{name} (Codex {thread}) is {still}waiting on {' and '.join(reasons)}. Open its worker tab.")
+            else:
+                block = previous_block
         for turn in reversed(completed):
             if turn["status"] == "completed":
                 text = final_report(client, thread, turn["id"])
@@ -270,7 +272,7 @@ def main():
     endpoint.add_argument("--baseline", action="store_true")
     endpoint.add_argument("--after")
     find.add_argument("--token")
-    for command in ("state", "target", "inactive", "output", "received"):
+    for command in ("state", "target", "inactive", "output"):
         action = commands.add_parser(command)
         action.add_argument("record", type=Path)
     sweep = commands.add_parser("sweep")
@@ -291,19 +293,16 @@ def main():
         if thread is None:
             return 3
         print(thread)
-    elif args.command in {"state", "target", "inactive", "output", "received"}:
+    elif args.command in {"state", "target", "inactive", "output"}:
         worker = json.loads(args.record.read_text())
         with Codex(Path(worker["codexHome"])) as client:
             if args.command == "inactive" and not worker["id"]:
                 result = client.call("thread/list", {"cwd": worker["dir"], "limit": 1})
                 threads = result["data"]
                 return int(bool(threads and threads[0]["id"] != worker.get("codexBaseline")))
-            info = read_thread(client, worker)
-            if args.command == "received":
-                return int(not direction_received(client, worker))
             if args.command == "inactive":
-                return int(info["status"]["type"] not in {"idle", "notLoaded"} or
-                           not direction_received(client, worker))
+                return int(not is_inactive(client, worker))
+            info = read_thread(client, worker)
             if args.command == "output":
                 thread = worker["id"]
                 turns = client.call("thread/turns/list", {

@@ -78,11 +78,5 @@ fi
 socket=$("$scripts/codex-worker.py" target "$record")
 thread=$(jq -r .id "$record")
 codex_home=$(jq -r .codexHome "$record")
-if ! "$scripts/codex-worker.py" received "$record"; then
-  echo "A previous direction to '$2' has no delivery receipt. Inspect the worker's thread before sending another." >&2
-  exit 1
-fi
-token=$(python3 -c 'import uuid; print(uuid.uuid4())')
-update_record codexPending "$token"
-message=$(printf 'Anderton direction %s\nDirection from your Claude Code Anderton. Follow the existing approval policy.\n\n%s' "$token" "$3")
+message=$(printf 'Direction from your Claude Code Anderton. Follow the existing approval policy.\n\n%s' "$3")
 CODEX_HOME="$codex_home" codex queue --remote "unix://$socket" --thread "$thread" --message "$message" --resume
