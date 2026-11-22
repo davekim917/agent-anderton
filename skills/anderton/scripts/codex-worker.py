@@ -17,8 +17,11 @@ import time
 import uuid
 
 MAX_MESSAGE = 16 * 1024 * 1024
+REQUEST_SECONDS = 5
+# Codex answers a thread/list filtered by cwd by scanning its whole thread history: seconds per few hundred threads.
+DIRECTORY_LIST_SECONDS = 60
 BLOCK_REMINDER_SECONDS = 300
-# Longer than any request a lost connection can leave in flight: Codex.call waits 5 seconds for its answer.
+# Longer than any request a lost connection can leave in flight: Codex.call waits REQUEST_SECONDS for a send's answer.
 DIRECTION_LOST_AFTER_SECONDS = 60
 # Codex deletes a queue entry only once its turn has started; a second look this much later sees that turn.
 DIRECTION_RECHECK_SECONDS = 3
@@ -40,7 +43,7 @@ class RequestRejected(ValueError):
 class Codex:
     def __init__(self, home):
         self.socket = socket.socket(socket.AF_UNIX)
-        self.socket.settimeout(5)
+        self.socket.settimeout(REQUEST_SECONDS)
         self.socket.connect(str(daemon_socket(home)))
         self.stream = self.socket.makefile("rb")
         self.request_id = 0
@@ -133,25 +136,25 @@ class Codex:
     def send(self, message):
         self.frame(1, json.dumps(message).encode())
 
-    def call(self, method, params):
+    def call(self, method, params, timeout=REQUEST_SECONDS):
         self.request_id += 1
         request = self.request_id
         self.send({"id": request, "method": method, "params": params})
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self.socket.settimeout(max(0.001, deadline - time.monotonic()))
             message = self.receive()
             if message.get("id") == request and "method" not in message:
-                self.socket.settimeout(5)
+                self.socket.settimeout(REQUEST_SECONDS)
                 if "error" in message:
                     raise RequestRejected(method, message["error"])
                 return message["result"]
         raise ValueError(f"Timed out waiting for {method}")
 
-    def pages(self, method, **params):
+    def pages(self, method, timeout=REQUEST_SECONDS, **params):
         seen = set()
         while True:
-            result = self.call(method, params)
+            result = self.call(method, params, timeout=timeout)
             yield from result["data"]
             cursor = result.get("nextCursor")
             if not cursor:
@@ -209,10 +212,26 @@ def started_with(client, thread, marker):
     return None
 
 
-def find_thread(client, directory, after, token):
+def threads_since(client, directory, since):
+    """The directory's threads created at or after since, a Unix time in seconds, newest first."""
+    # Without useStateDbOnly Codex rereads each listed thread's rollout file, a fraction of a second apiece, and a cwd
+    # filter that matches nothing has it read them all. This list is answered from its index and stops at since.
+    for thread in client.pages("thread/list", sortKey="created_at", sortDirection="desc", useStateDbOnly=True,
+                               limit=20):
+        if thread["createdAt"] < since:
+            return
+        if Path(thread["cwd"]).resolve() == directory:
+            yield thread
+
+
+def find_thread(client, directory, after, token, since=None):
     marker = f"Anderton launch {uuid.UUID(token)}"
     match = None
-    for thread in client.pages("thread/list", cwd=str(directory), limit=10):
+    if since is None:
+        threads = client.pages("thread/list", timeout=DIRECTORY_LIST_SECONDS, cwd=str(directory), limit=10)
+    else:
+        threads = threads_since(client, directory, since)
+    for thread in threads:
         if Path(thread["cwd"]).resolve() != directory:
             raise ValueError("Codex daemon returned a thread in a different worktree")
         if thread["id"] == after:
@@ -432,10 +451,10 @@ def main():
     find = commands.add_parser("find")
     find.add_argument("home", type=Path)
     find.add_argument("directory", type=Path)
-    endpoint = find.add_mutually_exclusive_group()
-    endpoint.add_argument("--baseline", action="store_true")
+    endpoint = find.add_mutually_exclusive_group(required=True)
+    endpoint.add_argument("--since", type=int)
     endpoint.add_argument("--after")
-    find.add_argument("--token")
+    find.add_argument("--token", required=True)
     launch = commands.add_parser("launch-matches")
     launch.add_argument("record", type=Path)
     launch.add_argument("thread")
@@ -467,14 +486,7 @@ def main():
     elif args.command == "find":
         directory = args.directory.resolve()
         with Codex(args.home) as client:
-            if args.baseline:
-                threads = client.call("thread/list", {"cwd": str(directory), "limit": 1})["data"]
-                if threads:
-                    print(uuid.UUID(threads[0]["id"]))
-                return 0
-            if not args.token:
-                raise ValueError("Codex worker registration requires its launch token")
-            thread = find_thread(client, directory, args.after, args.token)
+            thread = find_thread(client, directory, args.after, args.token, args.since)
         if thread is None:
             return 3
         print(thread)
@@ -518,8 +530,12 @@ def main():
             if args.command == "message":
                 queue_direction(client, args.record, worker, args.text)
                 return 0
+            if args.command == "inactive" and not worker["id"] and "codexLaunchedAt" in worker:
+                directory = Path(worker["dir"]).resolve()
+                return int(next(threads_since(client, directory, worker["codexLaunchedAt"]), None) is not None)
             if args.command == "inactive" and not worker["id"]:
-                result = client.call("thread/list", {"cwd": worker["dir"], "limit": 1})
+                result = client.call("thread/list", {"cwd": worker["dir"], "limit": 1},
+                                     timeout=DIRECTORY_LIST_SECONDS)
                 threads = result["data"]
                 return int(bool(threads and threads[0]["id"] != worker.get("codexBaseline")))
             if args.command == "inactive":

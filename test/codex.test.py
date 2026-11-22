@@ -21,6 +21,8 @@ class FakeCodex:
         self.latest = []
         self.queue = []
         self.checked_queue = False
+        self.listings = []
+        self.listed = []
 
     def __enter__(self):
         return self
@@ -28,7 +30,7 @@ class FakeCodex:
     def __exit__(self, *_):
         pass
 
-    def call(self, method, params):
+    def call(self, method, params, timeout=None):
         if method == "thread/turns/list":
             return {"data": [{"id": params["threadId"]}]}
         if method == "thread/items/list":
@@ -40,9 +42,10 @@ class FakeCodex:
         assert params["threadId"] == self.info["id"]
         return {"thread": self.info}
 
-    def pages(self, method, **params):
+    def pages(self, method, timeout=None, **params):
         if method == "thread/list":
-            return iter(self.threads)
+            self.listings.append(params)
+            return (self.listed.append(thread["id"]) or thread for thread in self.threads)
         if method == "thread/turns/list":
             return iter(self.turns)
         if method == "thread/queue/list":
@@ -163,6 +166,36 @@ class WorkerTest(unittest.TestCase):
             self.client.items[thread] = [user_message(f"Anderton launch {token}\n\nBrief")]
             self.assertEqual(0, worker_api.main())
             self.assertEqual(thread, str(worker_api.find_thread(self.client, directory, "", token)))
+
+    def test_a_launch_is_found_among_threads_created_since_it_without_a_cwd_filter(self):
+        token = "00000000-0000-4000-8000-000000000789"
+        marker = f"Anderton launch {token}"
+        directory = Path(self.worker["dir"])
+        launched = 1000
+        elsewhere = {"id": "00000000-0000-7000-8000-000000000a01", "cwd": str(self.state), "createdAt": 1003}
+        launch = {**self.client.info, "createdAt": 1001}
+        earlier = {"id": "00000000-0000-7000-8000-000000000a02", "cwd": self.worker["dir"], "createdAt": 999}
+        older = {"id": "00000000-0000-7000-8000-000000000a03", "cwd": self.worker["dir"], "createdAt": 900}
+        self.client.threads = [elsewhere, launch, earlier, older]
+        self.client.items[launch["id"]] = [user_message(f"{marker}\n\nBrief")]
+        # An earlier worker in the same worktree path carrying the marker would be a second match if it were read.
+        self.client.items[earlier["id"]] = [user_message(marker)]
+        self.assertEqual(launch["id"], str(worker_api.find_thread(self.client, directory, None, token, launched)))
+        self.assertNotIn("cwd", self.client.listings[-1])
+        self.assertEqual("desc", self.client.listings[-1]["sortDirection"])
+        self.assertIs(True, self.client.listings[-1]["useStateDbOnly"])
+        self.assertEqual([elsewhere["id"], launch["id"], earlier["id"]], self.client.listed)
+
+    def test_an_unregistered_worker_is_busy_only_once_a_thread_starts_after_its_launch(self):
+        self.worker.update(id="", codexLaunchedAt=1000)
+        self.record.write_text(json.dumps(self.worker))
+        self.client.threads = [{"id": "00000000-0000-7000-8000-000000000a02", "cwd": self.worker["dir"],
+                                "createdAt": 999}]
+        with patch.object(worker_api.sys, "argv", ["codex-worker.py", "inactive", str(self.record)]):
+            self.assertEqual(0, worker_api.main())
+            self.client.threads.insert(0, {**self.client.info, "createdAt": 1000})
+            self.assertEqual(1, worker_api.main())
+        self.assertTrue(all("cwd" not in params for params in self.client.listings))
 
     def test_inactivity_requires_empty_queue_and_current_idle_status(self):
         self.assertTrue(worker_api.is_inactive(self.client, self.worker))
@@ -320,6 +353,78 @@ class WorkerTest(unittest.TestCase):
             self.client.items["completed-notice"][0]["item"]["clientId"] = sent[0]
             self.assertTrue(worker_api.deliver_notice(self.client, claim, notice))
         self.assertEqual(1, len(sent))
+
+
+class SlowDaemonTest(unittest.TestCase):
+    """The real Codex.call against a daemon that answers each method after a delay on a simulated clock."""
+
+    def setUp(self):
+        self.now = 0.0
+        clock = patch.object(worker_api.time, "monotonic", side_effect=lambda: self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name).resolve()
+        self.delays = {}
+
+    def client(self):
+        test = self
+        sent = []
+
+        class Transport:
+            timeout = None
+
+            def settimeout(self, seconds):
+                self.timeout = seconds
+
+            def close(self):
+                pass
+
+        transport = Transport()
+        client = object.__new__(worker_api.Codex)
+        client.socket = client.stream = transport
+        client.request_id = 0
+        client.initialize = lambda: None
+        client.send = sent.append
+
+        def receive():
+            request = sent[-1]
+            delay = test.delays.get(request["method"], 0)
+            if delay > transport.timeout:
+                test.now += transport.timeout
+                raise TimeoutError("timed out")
+            test.now += delay
+            result = {"queuedSubmission": {"id": "submission"}} if request["method"] == "thread/queue/add" \
+                else {"data": []}
+            return {"id": request["id"], "result": result}
+
+        client.receive = receive
+        return client
+
+    def run_main(self, *argv):
+        with patch.object(worker_api, "Codex", return_value=self.client()), \
+                patch.object(worker_api.sys, "argv", ["codex-worker.py", *argv]):
+            return worker_api.main()
+
+    def test_lists_a_worktrees_threads_that_take_longer_than_a_send(self):
+        # Measured: about 9 seconds for a worktree with no threads, on a daemon holding some 600.
+        self.delays["thread/list"] = 9.3
+        home = str(self.directory / "codex")
+        worktree = str(self.directory / "worktree")
+        self.assertEqual(3, self.run_main("find", home, worktree, "--after", "",
+                                          "--token", "00000000-0000-4000-8000-000000000789"))
+        record = self.directory / "worker.json"
+        record.write_text(json.dumps({"id": "", "name": "fixture", "dir": worktree, "codexHome": home,
+                                      "codexBaseline": ""}))
+        self.assertEqual(0, self.run_main("inactive", str(record)))
+
+    def test_a_send_still_gives_up_after_five_seconds(self):
+        self.delays["thread/queue/add"] = 5.5
+        with self.assertRaises(TimeoutError):
+            self.client().call("thread/queue/add", {"threadId": "thread", "clientUserMessageId": "id", "input": []})
+        self.assertEqual(5, self.now)
+        self.assertLess(self.now, worker_api.DIRECTION_LOST_AFTER_SECONDS)
 
 
 if __name__ == "__main__":
