@@ -50,7 +50,7 @@ watch_claude_worker() {
   [ -n "$owner" ] || return 0
   owner_provider=$(record_provider "$owner")
   uses_claude_transcript "$worker" "$owner_provider" || return 0
-  [ "$(live_claude_worker "$worker" --allow-rebind)" = "$worker_reg" ] || return 0
+  claude_stop_matches "$worker" "$worker_reg" "$worker_sid" || return 0
   take_claude_worker_watch "${worker%.json}.$worker_sid.watch" || return 0
   bind_claude_worker "$worker" "$root" "$worker_sid" "$worker_reg" "$transcript" || return 0
   tick=${ANDERTON_WATCH_TICK:-30}

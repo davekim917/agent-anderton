@@ -230,7 +230,7 @@ mv "$tmp/current-worker" "$clearable"
   take_repository_lock "$PWD"
   lock_worker "$clearable"
   touch "$tmp/worker-lock-held"
-  for _ in $(seq 1 150); do
+  for _ in $(seq 1 250); do
     if [ -f "$tmp/release-worker-lock" ]; then exit 0; fi
     sleep 0.1
   done
@@ -249,6 +249,11 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 [ -s "${clearable%.json}.after-clear.watch" ]
+for _ in $(seq 1 150); do
+  if grep -q 'within 10 seconds' "$tmp/after-clear-hook"; then break; fi
+  sleep 0.1
+done
+grep -q 'within 10 seconds' "$tmp/after-clear-hook"
 jq -e '.claudeSession.id == "before-clear"' "$clearable" >/dev/null
 touch "$tmp/release-worker-lock"
 wait "$busy_lock"
