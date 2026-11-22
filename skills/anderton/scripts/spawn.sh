@@ -23,7 +23,12 @@ while [ $# -gt 0 ]; do
         --effort) effort=$2 ;;
         --mode) mode=$2 ;;
         --base) base=$2 ;;
-        --provider) provider=$2 ;;
+        --provider)
+          case $2 in
+            claude | codex) provider=$2 ;;
+            *) echo "$usage" >&2; exit 2 ;;
+          esac
+          ;;
       esac
       shift 2
       ;;
@@ -112,7 +117,7 @@ if [ -z "$launcher" ]; then
       echo "spawn.sh: inside herdr but without its workspace, socket or CLI here, so the worker starts in the background: open it with claude attach $name." >&2
   fi
 fi
-if [ "$caller_provider" = codex ] && [ "$launcher" = bg ]; then
+if [ "$caller_provider" = codex ] && [ "$provider" = claude ] && [ "$launcher" = bg ]; then
   echo "A Codex Anderton needs herdr or tmux to start a Claude worker with a verifiable session." >&2
   exit 2
 fi
