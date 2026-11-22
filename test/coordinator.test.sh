@@ -224,8 +224,34 @@ mv "$tmp/updated-worker" "$clearable"
 clearable_stop "$clearable_pid" after-clear
 jq -e '.claudeSession.id == "before-clear"' "$clearable" >/dev/null
 mv "$tmp/current-worker" "$clearable"
+(
+  # shellcheck source=SCRIPTDIR/../skills/anderton/scripts/session-lib.sh
+  . "$script/session-lib.sh"
+  take_repository_lock "$PWD"
+  lock_worker "$clearable"
+  touch "$tmp/worker-lock-held"
+  for _ in $(seq 1 150); do
+    if [ -f "$tmp/release-worker-lock" ]; then exit 0; fi
+    sleep 0.1
+  done
+  exit 1
+) &
+busy_lock=$!
+for _ in $(seq 1 50); do
+  if [ -f "$tmp/worker-lock-held" ]; then break; fi
+  sleep 0.1
+done
+[ -f "$tmp/worker-lock-held" ]
 clearable_stop "$clearable_pid" after-clear > "$tmp/after-clear-hook" 2>&1 &
 after_clear_watch=$!
+for _ in $(seq 1 50); do
+  if [ -s "${clearable%.json}.after-clear.watch" ]; then break; fi
+  sleep 0.1
+done
+[ -s "${clearable%.json}.after-clear.watch" ]
+jq -e '.claudeSession.id == "before-clear"' "$clearable" >/dev/null
+touch "$tmp/release-worker-lock"
+wait "$busy_lock"
 wait_for_binding after-clear
 jq -e '.claudeSession.id == "after-clear" and (.claudeSession.transcript | endswith("/after-clear.jsonl"))
   and .claudeDirection == null' "$clearable" >/dev/null

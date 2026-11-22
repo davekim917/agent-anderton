@@ -288,6 +288,24 @@ live_claude_worker() {
   done
 }
 
+bind_claude_worker() (
+  local worker=$1 root=$2 session_id=$3 registry=$4 transcript=$5 process start updated
+  take_repository_lock "$root"
+  lock_worker "$worker" || exit 1
+  [ "$(live_claude_worker "$worker" --allow-rebind)" = "$registry" ] &&
+    [ "$(jq -r '.sessionId // empty' "$registry")" = "$session_id" ] || exit 1
+  process=$(jq -r .pid "$registry") || exit 1
+  start=$(proc_start "$process")
+  [ -n "$start" ] || exit 1
+  updated=$(mktemp "$worker.XXXXXX") || exit 1
+  if jq --arg sid "$session_id" --arg file "$transcript" --argjson pid "$process" --arg start "$start" '
+    .claudeSession = {id: $sid, transcript: $file, pid: $pid, procStart: $start} | .reportTransport = "transcript"
+    | if .claudeDirection != null and .claudeDirection.target != $sid then del(.claudeDirection) else . end
+    ' "$worker" > "$updated" && mv -f "$updated" "$worker"; then exit 0; fi
+  rm -f "$updated"
+  exit 1
+)
+
 has_ancestor() {
   local p=$1
   while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; do

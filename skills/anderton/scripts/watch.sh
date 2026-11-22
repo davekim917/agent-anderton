@@ -31,7 +31,7 @@ take_claude_worker_watch() {
 }
 
 watch_claude_worker() {
-  local worker root owner owner_provider transcript target updated pending tick worker_sid worker_pid worker_reg process_start now
+  local worker root owner owner_provider transcript target updated pending tick worker_sid worker_pid worker_reg now
   worker_sid=$sid
   worker_pid=$(session_pid "$worker_sid")
   [ -n "$worker_pid" ] || return 0
@@ -52,18 +52,7 @@ watch_claude_worker() {
   uses_claude_transcript "$worker" "$owner_provider" || return 0
   [ "$(live_claude_worker "$worker" --allow-rebind)" = "$worker_reg" ] || return 0
   take_claude_worker_watch "${worker%.json}.$worker_sid.watch" || return 0
-  # Only the Stop hook in this exact session can register the native transcript.
-  (
-    lock_worker "$worker" || exit 1
-    [ "$(live_claude_worker "$worker" --allow-rebind)" = "$worker_reg" ] &&
-      [ "$(jq -r '.sessionId // empty' "$worker_reg")" = "$worker_sid" ] || exit 1
-    process_start=$(proc_start "$worker_pid")
-    updated=$(mktemp "$worker.XXXXXX") || exit 1
-    jq --arg sid "$worker_sid" --arg file "$transcript" --argjson pid "$worker_pid" --arg start "$process_start" '
-      .claudeSession = {id: $sid, transcript: $file, pid: $pid, procStart: $start} | .reportTransport = "transcript"
-      | if .claudeDirection != null and .claudeDirection.target != $sid then del(.claudeDirection) else . end
-      ' "$worker" > "$updated" && mv -f "$updated" "$worker"
-  ) || return 0
+  bind_claude_worker "$worker" "$root" "$worker_sid" "$worker_reg" "$transcript" || return 0
   tick=${ANDERTON_WATCH_TICK:-30}
   while [ -f "$worker" ] && [ "$(live_claude_worker "$worker")" = "$worker_reg" ] &&
     [ "$(jq -r .sessionId "$worker_reg" 2>/dev/null)" = "$worker_sid" ]; do
