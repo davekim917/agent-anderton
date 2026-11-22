@@ -22,6 +22,7 @@ for arg in "$@"; do
     --all) all=1 ;;
     --blocked) blocked=1 ;;
     --codex-workers) worker_list=codex ;;
+    --transcript-workers) worker_list=transcript ;;
     --workers) worker_list=all ;;
     *) echo "usage: waiting.sh [--all] [--blocked | --codex-workers]" >&2; exit 2 ;;
   esac
@@ -57,10 +58,11 @@ if [ -n "$worker_list" ]; then
   [ -n "$mine" ] || exit 0
   for r in "$holders"/workers/*.json; do
     [ -f "$r" ] || continue
-    if { [ "$worker_list" = all ] || [ "$(record_provider "$r")" = "$worker_list" ]; } &&
-      worker_belongs "$r" "$root" "$mine"; then
-      printf '%s\n' "$r"
-    fi
+    case $worker_list in
+      codex) [ "$(record_provider "$r")" = codex ] || continue ;;
+      transcript) uses_claude_transcript "$r" "$(invoking_provider)" || continue ;;
+    esac
+    if worker_belongs "$r" "$root" "$mine"; then printf '%s\n' "$r"; fi
   done
   exit 0
 fi

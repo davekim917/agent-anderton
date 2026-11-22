@@ -279,6 +279,7 @@ def direction_seen(client, worker, pending):
         for entry in client.pages("thread/items/list", threadId=thread, turnId=turn["id"], limit=10):
             item = entry["item"]
             if item["type"] == "userMessage" and item.get("clientId") == pending["id"]:
+                # A terminal turn with the user item is a durable receipt, even when its response was interrupted.
                 return ("finished" if turn["status"] in {"completed", "interrupted", "failed"} else "pending"), None
         if turn["id"] == pending["previousTurn"]:
             break
@@ -437,6 +438,9 @@ def main():
     endpoint.add_argument("--baseline", action="store_true")
     endpoint.add_argument("--after")
     find.add_argument("--token")
+    launch = commands.add_parser("launch-matches")
+    launch.add_argument("record", type=Path)
+    launch.add_argument("thread")
     identity = commands.add_parser("identity")
     identity.add_argument("home", type=Path)
     identity.add_argument("thread")
@@ -476,6 +480,14 @@ def main():
         if thread is None:
             return 3
         print(thread)
+    elif args.command == "launch-matches":
+        worker = json.loads(args.record.read_text())
+        with Codex(Path(worker["codexHome"])) as client:
+            thread = thread_identity(client, args.thread)
+            if thread["dir"] != str(Path(worker["dir"]).resolve()):
+                raise ValueError("Codex worker launch directory differs from the thread")
+            marker = f"Anderton launch {uuid.UUID(worker['codexLaunchToken'])}"
+            return 0 if started_with(client, thread["id"], marker) else 3
     elif args.command == "identity":
         with Codex(args.home) as client:
             info = thread_identity(client, args.thread)

@@ -31,7 +31,7 @@ take_claude_worker_watch() {
 }
 
 watch_claude_worker() {
-  local worker owner transcript target updated pending tick worker_sid worker_pid worker_reg now
+  local worker owner owner_provider transcript target updated pending tick worker_sid worker_pid worker_reg now
   worker_sid=$sid
   worker_pid=$(session_pid "$worker_sid")
   [ -n "$worker_pid" ] || return 0
@@ -43,7 +43,9 @@ watch_claude_worker() {
   worker=$(worker_record "$target" "$cwd" "$worker_sid" "$worker_pid" "$(jq -r '.startedAt // empty | floor' "$worker_reg")")
   [ -n "$worker" ] && [ "$(record_provider "$worker")" = claude ] || return 0
   owner=$(answering_claim "$worker" "$(project_root "$cwd")")
-  [ -n "$owner" ] && [ "$(record_provider "$owner")" = codex ] || return 0
+  [ -n "$owner" ] || return 0
+  owner_provider=$(record_provider "$owner")
+  uses_claude_transcript "$worker" "$owner_provider" || return 0
   [ "$(live_claude_worker "$worker")" = "$worker_reg" ] || return 0
   take_claude_worker_watch "${worker%.json}.$worker_sid.watch" || return 0
   # Only the Stop hook in this exact session can register the native transcript.
@@ -52,10 +54,11 @@ watch_claude_worker() {
     [ "$(live_claude_worker "$worker")" = "$worker_reg" ] || exit 1
     updated=$(mktemp "$worker.XXXXXX") || exit 1
     jq --arg sid "$worker_sid" --arg file "$transcript" '
-      .claudeSession = {id: $sid, transcript: $file}
+      .claudeSession = {id: $sid, transcript: $file} | .reportTransport = "transcript"
       | if .claudeDirection != null and .claudeDirection.target != $sid then del(.claudeDirection) else . end
       ' "$worker" > "$updated" && mv -f "$updated" "$worker"
   ) || return 0
+  [ "$owner_provider" = codex ] || return 0
   tick=${ANDERTON_WATCH_TICK:-30}
   while [ -f "$worker" ] && [ "$(live_claude_worker "$worker")" = "$worker_reg" ] &&
     [ "$(jq -r .sessionId "$worker_reg" 2>/dev/null)" = "$worker_sid" ] && [ "$(record_provider "$owner")" = codex ]; do
@@ -104,6 +107,7 @@ else
   input=$(cat)
   sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
   cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null) || exit 0
+  claude_transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
   if [ -z "$sid" ] || [ -z "$cwd" ]; then exit 0; fi
 
   # The registry, not the record, says which session the holder's process runs now: /clear gives it a new id.
@@ -227,11 +231,8 @@ if [ "$runtime" = claude ]; then export CLAUDE_PID="$pid"; fi
 # holder, or when it printed nothing, so a bookmark never passes an item the holder has not been told about. A run
 # that timed out may have staged half a write, so its stage is dropped.
 scripts=$(cd "$(dirname "$0")" && pwd)
-if [ "$runtime" = codex ]; then
-  printf -v codex_probe '%q sweep' "$scripts/worker.sh"
-else
-  printf -v codex_probe '%q sweep' "$scripts/codex-workers.sh"
-fi
+printf -v codex_probe '%q sweep' "$scripts/codex-workers.sh"
+printf -v worker_probe '%q sweep' "$scripts/worker.sh"
 probe_out_max=6000
 probe_timeout=${ANDERTON_PROBE_TIMEOUT:-120}
 probe_fail_at=${ANDERTON_PROBE_FAILURES:-3}
@@ -342,10 +343,15 @@ commit_probe() {
   probe_run=""
 }
 
-owns_codex_workers() { # true when this holder owns a Codex worker; a holder with no Codex record anywhere reads none
+select_worker_probe() {
   if [ "$runtime" = codex ]; then
+    probe=$worker_probe
     [ -n "$(cd "$cwd" && "$scripts/waiting.sh" --workers)" ]
+  elif grep -qE '"(reportTransport|spawnerProvider)"[[:space:]]*:[[:space:]]*"(transcript|codex)"' "$holders"/workers/*.json 2>/dev/null &&
+    [ -n "$(cd "$cwd" && "$scripts/waiting.sh" --transcript-workers)" ]; then
+    probe=$worker_probe
   else
+    probe=$codex_probe
     grep -qE '"provider"[[:space:]]*:[[:space:]]*"codex"' "$holders"/workers/*.json 2>/dev/null &&
     [ -n "$(cd "$cwd" && "$scripts/waiting.sh" --codex-workers)" ]
   fi
@@ -382,6 +388,27 @@ clear_peer() {
   jq -e --arg id "$expected" '.peerMessage.id == $id' "$record" >/dev/null 2>&1 || return 0
   updated=$(mktemp "$record.XXXXXX") || return 1
   jq 'del(.peerMessage)' "$record" > "$updated" && mv -f "$updated" "$record"
+}
+
+claude_peer_ready() {
+  local attempt status=0
+  case $claude_transcript in "$home"/projects/*/"$sid.jsonl") ;; *) return 1 ;; esac
+  [ -r "$claude_transcript" ] || return 1
+  attempt=$(jq -r '.peerMessage.attemptedAt // 0' "$record") || return 1
+  [ "$attempt" != 0 ] || return 0
+  "$scripts/claude-worker.py" peer-received "$claude_transcript" "$sid" "$peer" || status=$?
+  if [ "$status" = 0 ]; then
+    (take_repository_lock "$(project_root "$cwd")"; still_holds_role && clear_peer "$peer")
+    return 1
+  fi
+  [ "$status" = 3 ] && [ "$(( $(date +%s) - attempt ))" -ge 60 ]
+}
+
+mark_peer_attempt() {
+  local updated
+  updated=$(mktemp "$record.XXXXXX") || return 1
+  jq --argjson now "$(date +%s)" '.peerMessage.attemptedAt = $now' "$record" > "$updated" &&
+    mv -f "$updated" "$record"
 }
 
 commit_blocked() {
@@ -443,6 +470,7 @@ while still_holds_role; do
   now=$(cd "$cwd" 2>/dev/null && "$(dirname "$0")/waiting.sh" --blocked 2>/dev/null | grep '^=== ')
   new=$(printf '%s\n' "$now" | grep -vxF -f "$reported" | grep .)
   peer=$(jq -r '.peerMessage.id // empty' "$record" 2>/dev/null)
+  if [ "$runtime" = claude ] && [ -n "$peer" ] && ! claude_peer_ready; then peer=""; fi
   probe_news="" probe_alert="" probe_run=""
   # A reporting probe ends this watch. Give the least recently run probe the first chance to wake it. A session already
   # blocked is told now: a probe can run for minutes, and the next watch runs the probes this one skipped.
@@ -453,7 +481,7 @@ while still_holds_role; do
   [ -z "$new$peer" ] || sources=()
   for source in ${sources[@]+"${sources[@]}"}; do
     if [ "$source" = codex ]; then
-      probe=$codex_probe every=${tick%%.*} probe_dir="$holders/$key.codex-probe"
+      every=${tick%%.*} probe_dir="$holders/$key.codex-probe"
     else
       probe=$(jq -r '.probe.command // empty' "$record" 2>/dev/null)
       [ -n "$probe" ] || continue
@@ -462,7 +490,7 @@ while still_holds_role; do
     fi
     last=$(probe_last "$probe_dir")
     # The interval holds across watches, so a busy source wakes the holder at most once per interval.
-    if [ "$(( $(date +%s) - last ))" -ge "${every:-60}" ] && { [ "$source" != codex ] || owns_codex_workers; }; then
+    if [ "$(( $(date +%s) - last ))" -ge "${every:-60}" ] && { [ "$source" != codex ] || select_worker_probe; }; then
       run_probe "$probe"
       # A run can take minutes: what it found is this holder's to hear only if the role and the watch are still its.
       if ! still_holds_role || [ "$(watch_owner)" != "$$" ] || orphaned "$$" "$parent_pid"; then
@@ -489,8 +517,8 @@ while still_holds_role; do
         (
           take_repository_lock "$(project_root "$cwd")"
           still_holds_role && [ "$(jq -r '.peerMessage.id // empty' "$record")" = "$peer" ] || exit 1
+          mark_peer_attempt || exit 1
           message >&2
-          clear_peer "$peer"
         ) || exit 0
       else
         message >&2

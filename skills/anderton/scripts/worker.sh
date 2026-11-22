@@ -12,14 +12,12 @@ name=${2:-}
 if [ "$action" = sweep ] && [ "$#" -eq 1 ]; then
   result=0
   "$anderton_scripts/codex-workers.sh" sweep || result=1
-  if [ "$(invoking_provider)" = codex ]; then
-    while IFS= read -r record; do
-      if [ -z "$record" ] || [ "$(record_provider "$record")" != claude ]; then continue; fi
-      "$anderton_scripts/claude-worker.py" sweep "$record" || result=1
-    done <<RECORDS
-$("$anderton_scripts/waiting.sh" --workers)
+  while IFS= read -r record; do
+    [ -n "$record" ] || continue
+    "$anderton_scripts/claude-worker.py" sweep "$record" || result=1
+  done <<RECORDS
+$("$anderton_scripts/waiting.sh" --transcript-workers)
 RECORDS
-  fi
   exit "$result"
 fi
 case $name in '' | -* | *[!a-z0-9-]*) usage ;; esac

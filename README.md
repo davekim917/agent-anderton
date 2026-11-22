@@ -33,8 +33,8 @@ Anderton hands that job to a Claude Code or Codex session in your repository. In
 - **Starts full worker sessions.** Each task gets a full Claude Code or Codex session in its own git
   worktree, started from `origin/HEAD`. It loads your user settings and the repo's committed config
   (CLAUDE.md, skills, hooks, plugins) and shares the repo's auto memory. Inside
-  [herdr](https://herdr.dev) or tmux it opens in a tab you can watch and type into; without either it
-  can only run in the background.
+  [herdr](https://herdr.dev) or tmux it opens in a tab you can watch and type into. A Claude Code
+  Anderton can also start Claude workers in the background.
 - **Receives milestones and blockers.** Workers report a result, a question, a blocker or an answer.
   Claude workers reporting to Claude use SendMessage. Codex workers and Claude workers
   reporting to Codex use their final replies, which the watch reads from the native runtime.
@@ -116,7 +116,8 @@ from a herdr or tmux pane in the repository and invoke `$agent-anderton:anderton
 The launcher gives that interactive thread the current pane's context for opening
 workers. For a separate Claude profile, set the same `CLAUDE_CONFIG_DIR` Claude
 uses before launching Codex. Both coordinators read their claims and worker
-records there, under `anderton/`.
+records there, under `anderton/`. A custom directory isolates standalone plugin
+state. NanoClaw deployment authority comes from `$HOME/.claude/anderton`.
 
 The Codex workflow uses the local thread APIs in Codex CLI 0.171.0 and needs
 Python 3. Anderton commands access the control socket, shared registry and worker
@@ -126,7 +127,13 @@ settings alone. Codex workers open with workspace writes and user-reviewed
 approvals. A Codex Anderton directs the operator to the worker pane for approvals
 and input requests.
 
+The watcher commits a Codex notification after its exact input is visible in a
+terminal turn on the claimed thread. A turn the operator interrupted still
+retains the notification in its history, so the watcher leaves it there for
+the operator to review.
+
 The repository Anderton sets the default worker provider for all of its projects.
+An inherited Codex default uses the daemon home of the repository Anderton.
 Use `--provider claude` or `--provider codex` to choose explicitly.
 `worker.sh` steers and inspects Codex workers, and steers Claude workers from
 Codex through the Claude worker's Anderton Stop hook. A Claude session you adopt
@@ -230,6 +237,8 @@ held it, and never from a live holder; any other session still claims it explici
 Codex records its daemon home, thread UUID and original directory. An unloaded
 thread still holds its role. If the daemon cannot answer, the claim is treated as
 unknown and blocks an ordinary takeover.
+An Anderton must release an adopted worker before that session can claim a role.
+A worker launched by Anderton must be retired before it can be replaced by a coordinator session.
 
 **`waiting.sh`** lists the live sessions in the caller's repository (`--all`: every repository) that
 wait on a person, leaving out every Anderton in the caller's repository, the repository's and each

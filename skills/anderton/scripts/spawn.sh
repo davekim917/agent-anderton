@@ -36,7 +36,17 @@ caller_provider=$(invoking_provider)
 role=$(caller_claim "$root")
 main=$(holder_record "$root")
 if [ -z "$provider" ]; then
-  if [ -n "$main" ]; then provider=$(record_provider "$main"); else provider=claude; fi
+  if [ -n "$main" ]; then
+    provider=$(record_provider "$main")
+    if [ "$provider" = codex ]; then
+      codex_home=$(jq -er '.codexHome | select(type == "string" and length > 0)' "$main") || {
+        echo "The repository's Codex Anderton has no registered daemon home." >&2
+        exit 1
+      }
+    fi
+  else
+    provider=claude
+  fi
 fi
 case $provider in
   claude | codex) ;;
@@ -102,6 +112,10 @@ if [ -z "$launcher" ]; then
       echo "spawn.sh: inside herdr but without its workspace, socket or CLI here, so the worker starts in the background: open it with claude attach $name." >&2
   fi
 fi
+if [ "$caller_provider" = codex ] && [ "$launcher" = bg ]; then
+  echo "A Codex Anderton needs herdr or tmux to start a Claude worker with a verifiable session." >&2
+  exit 2
+fi
 if [ "$provider" = codex ]; then
   if [ "$launcher" = bg ] || ! git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
     echo "Codex workers need a Git worktree and a herdr tab or tmux window." >&2
@@ -111,7 +125,7 @@ if [ "$provider" = codex ]; then
     echo "Codex workers need the codex CLI, its running local daemon, and python3." >&2
     exit 2
   fi
-  codex_home=$(cd "${CODEX_HOME:-$HOME/.codex}" && pwd -P)
+  codex_home=$(cd "${codex_home:-${CODEX_HOME:-$HOME/.codex}}" && pwd -P)
   if [ ! -S "$codex_home/app-server-control/app-server-control.sock" ]; then
     echo "Start the local Codex daemon before launching a Codex worker." >&2
     exit 2
@@ -223,20 +237,26 @@ $report_footer
 - Do not deploy, restart a service, or message anyone off this machine unless the task says to; \"$me\" owns those."
 
 write_record() {
+  if (write_launch_record); then reserved=""; else return 1; fi
+}
+
+write_launch_record() {
   local updated
+  if [ "$provider" = codex ] || [ "$caller_provider" = codex ]; then lock_worker "$record" || return 1; fi
   updated=$(mktemp "$record.XXXXXX")
   jq -nc --arg name "$name" --arg launcher "$launcher" --arg id "$id" --arg tab "$tab" --arg dir "$dir" --arg root "$root" \
     --arg socket "$socket" --arg server "$server" --arg base "$base" --arg spawner "$me" --arg label "$label" --argjson worktree "$worktree" \
     --arg pane "$pane" --arg spawner_session "$sid" --arg spawner_provider "$caller_provider" \
     --arg spawner_scope "$role_scope" --arg role "$role" \
     --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg provider "$provider" --arg codex "$codex_home" --arg baseline "$baseline" --arg token "$launch_token" \
-    '{name: $name, launcher: $launcher, id: $id, tab: $tab, socket: $socket, server: $server, dir: $dir, root: $root,
-      base: $base, worktree: $worktree, spawner: $spawner, spawnerSession: $spawner_session, label: $label, startedAt: $at}
+    --slurpfile previous "$record" '
+      ($previous[0] // {}) + {name: $name, launcher: $launcher, id: ($previous[0].id // $id), tab: $tab, socket: $socket, server: $server, dir: $dir, root: $root,
+      base: $base, worktree: $worktree, spawner: $spawner, spawnerSession: $spawner_session, label: $label, startedAt: ($previous[0].startedAt // $at)}
       + if $pane != "" then {pane: $pane} else {} end
       + if $role != "" then {spawnerProvider: $spawner_provider, spawnerScope: (if $spawner_scope == "" then null else $spawner_scope end)} else {} end
-      + if $provider == "codex" then {provider: $provider, codexHome: $codex, codexBaseline: $baseline, codexLaunchToken: $token} else {} end' > "$updated"
+      + if $provider == "claude" and $spawner_provider == "codex" then {reportTransport: "transcript"} else {} end
+      + if $provider == "codex" then {provider: $provider, codexHome: $codex, codexBaseline: $baseline, codexLaunchToken: $token} else {} end' > "$updated" || return 1
   mv -f "$updated" "$record"
-  reserved=""
 }
 
 failed() {
@@ -248,7 +268,8 @@ failed() {
   fi
   rm -f "$record"
   # Written last, once the name is released, so a rerun it admits can reserve the name.
-  if [ "$provider" = claude ] && [ "$launcher" = herdr ] && printf '%s %s\n' "$(date +%s)" "$root" 2>/dev/null >"$herdr_failed"; then
+  if [ "$provider" = claude ] && [ "$caller_provider" = claude ] && [ "$launcher" = herdr ] &&
+    printf '%s %s\n' "$(date +%s)" "$root" 2>/dev/null >"$herdr_failed"; then
     echo "Rerun with --bg to start it in the background instead." >&2
   fi
   exit 1
@@ -286,6 +307,7 @@ else
   fi
 fi
 # A tab or window id is unique only within its server, so the record keeps which server it was opened in.
+if [ "$provider" = codex ] || [ "$caller_provider" = codex ]; then write_record; fi
 if [ "$launcher" = herdr ]; then
   socket="${HERDR_SOCKET_PATH:-}"
   # A tab's or window's process takes its environment from its multiplexer, not from this script: a non-default
@@ -359,21 +381,13 @@ elif [ "$launcher" = tmux ]; then
   [ "$provider" = codex ] || [ -n "$listed" ] ||
     echo "Worker '$name' has not registered yet: it may be waiting at a startup prompt in its window." >&2
 else
-  if [ "$caller_provider" = codex ]; then write_record; fi
   out=$(cd "$dir" && claude --bg "$@" "$brief" 2>&1) || failed "$out"
   # `claude stop` and `claude rm` take the session's id, not its name.
   id=$(claude agents --json 2>/dev/null | jq -r --arg n "$name" 'first(.[] | select(.name == $n) | .id) // empty' 2>/dev/null || true)
   [ -n "$id" ] || id=$(printf '%s\n' "$out" | sed -n 's/^backgrounded · \([0-9a-f]*\) · .*/\1/p' | head -n 1)
   printf '%s\n' "$out"
   where="the background (${id:-id unknown})"
-  if [ "$caller_provider" = codex ]; then
-    lock_worker "$record"
-    updated=$(mktemp "$record.XXXXXX")
-    jq --arg id "$id" '.id = $id' "$record" > "$updated"
-    mv -f "$updated" "$record"
-  else
-    write_record
-  fi
+  write_record
 fi
 
 if [ "$provider" = codex ]; then

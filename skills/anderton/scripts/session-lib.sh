@@ -181,6 +181,48 @@ worker_belongs() {
     [ -n "$3" ] && [ "$(answering_claim "$1" "$2")" = "$3" ]
 }
 
+uses_claude_transcript() {
+  jq -e --arg owner "$2" '(.provider // "claude") == "claude" and
+    ($owner == "codex" or .reportTransport == "transcript" or .spawnerProvider == "codex")' "$1" >/dev/null 2>&1
+}
+
+managed_invoker() {
+  local root=$1 provider=$2 sid=$3 identity=$4 dir=$5 r p reg name cwd started status
+  if [ "$provider" = claude ]; then
+    p=$identity
+    reg="$sessions/$p.json"
+    name=$(jq -r '.name // empty' "$reg" 2>/dev/null || true)
+    cwd=$(jq -r '.cwd // empty' "$reg" 2>/dev/null || true)
+    started=$(jq -r '.startedAt // empty | floor' "$reg" 2>/dev/null || true)
+  fi
+  for r in "$holders"/workers/*.json; do
+    [ -f "$r" ] || continue
+    jq -e --arg root "$root" --arg provider "$provider" '
+      .root == $root and (.provider // "claude") == $provider' "$r" >/dev/null 2>&1 || continue
+    if [ "$provider" = codex ]; then
+      if jq -e --arg id "$sid" --arg home "$identity" '.id == $id and .codexHome == $home' "$r" >/dev/null; then
+        printf '%s\n' "$r"
+        return
+      fi
+      if jq -e --arg dir "$dir" --arg home "$identity" '
+        .id == "" and .dir == $dir and .codexHome == $home and (.codexLaunchToken // "") != ""' "$r" >/dev/null; then
+        status=0
+        "$anderton_scripts/codex-worker.py" launch-matches "$r" "$sid" >/dev/null 2>&1 || status=$?
+        if [ "$status" -ne 3 ]; then printf '%s\n' "$r"; return; fi
+      fi
+    elif jq -e --arg id "$sid" --arg pid "$p" --arg start "$started" '
+      .claudeSession.id == $id or (.adopted == true and
+        (.sessionId == $id or ($start != "" and (.pid | tostring) == $pid and
+          ((.sessionStartedAt // "") | tostring | split(".")[0]) == $start)))' "$r" >/dev/null; then
+      printf '%s\n' "$r"
+      return
+    elif [ "$r" = "$holders/workers/$name.json" ] && [ "$(worker_record "$name" "$cwd" "$sid" "$p" "$started")" = "$r" ]; then
+      printf '%s\n' "$r"
+      return
+    fi
+  done
+}
+
 live_claude_worker() {
   local file reg name dir sid pid started bound
   file=$1

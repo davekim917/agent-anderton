@@ -289,7 +289,9 @@ class WorkerTest(unittest.TestCase):
             self.assertFalse(worker_api.deliver_notice(self.client, claim, notice))
             self.assertEqual(["anderton-notice"], started)
             self.client.queue = []
-            self.client.turns = [{"id": "completed-notice", "status": "completed"}]
+            self.client.turns = [{"id": "completed-notice", "status": "interrupted"}]
+            self.client.items["completed-notice"] = []
+            self.assertFalse(worker_api.deliver_notice(self.client, claim, notice))
             self.client.items["completed-notice"] = [user_message("RESULT: fixture completed")]
             self.client.items["completed-notice"][0]["item"]["clientId"] = sent[0]
             self.assertTrue(worker_api.deliver_notice(self.client, claim, notice))

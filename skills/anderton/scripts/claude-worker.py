@@ -56,24 +56,21 @@ def sweep(worker, replies):
     started = instant(worker["startedAt"])
     latest = checkpoint
     for event_id, timestamp, text in replies:
+        if event_id == checkpoint:
+            passed_checkpoint = True
+            continue
         if timestamp and instant(timestamp) < started:
             continue
         latest = event_id
         if passed_checkpoint and REPORT.match(text):
             print(f"{worker['name']} (Claude {identity['id']}) report:\n{text[:2000]}")
-        if event_id == checkpoint:
-            passed_checkpoint = True
     if not passed_checkpoint:
         raise ValueError("Claude transcript no longer contains its report bookmark")
     if latest is not None and latest != checkpoint:
         stage.write_text(json.dumps(latest) + "\n")
 
 
-def acknowledged(worker):
-    direction = worker.get("claudeDirection") or {}
-    if not direction.get("attemptedAt"):
-        return False
-    marker = f"Direction {direction['id']} from your Anderton."
+def transcript_contains_notice(worker, marker):
     for event in transcript_events(worker):
         if event.get("type") == "queue-operation" and event.get("operation") == "enqueue":
             if marker in str(event.get("content", "")):
@@ -86,11 +83,25 @@ def acknowledged(worker):
     return False
 
 
+def acknowledged(worker):
+    direction = worker.get("claudeDirection") or {}
+    return (bool(direction.get("attemptedAt"))
+            and transcript_contains_notice(worker, f"Direction {direction['id']} from your Anderton."))
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("sweep", "output", "acknowledged"))
-    parser.add_argument("record", type=Path)
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name in ("sweep", "output", "acknowledged"):
+        commands.add_parser(name).add_argument("record", type=Path)
+    peer = commands.add_parser("peer-received")
+    peer.add_argument("transcript", type=Path)
+    peer.add_argument("session")
+    peer.add_argument("peer")
     args = parser.parse_args()
+    if args.command == "peer-received":
+        worker = {"claudeSession": {"id": args.session, "transcript": str(args.transcript)}}
+        return 0 if transcript_contains_notice(worker, f"Peer message {args.peer} from Anderton ") else 3
     worker = json.loads(args.record.read_text())
     if args.command == "acknowledged":
         return 0 if acknowledged(worker) else 3
