@@ -16,11 +16,13 @@ require_tools waiting.sh
 
 all=""
 blocked=""
+codex_workers=""
 for arg in "$@"; do
   case $arg in
     --all) all=1 ;;
     --blocked) blocked=1 ;;
-    *) echo "usage: waiting.sh [--all] [--blocked]" >&2; exit 2 ;;
+    --codex-workers) codex_workers=1 ;;
+    *) echo "usage: waiting.sh [--all] [--blocked | --codex-workers]" >&2; exit 2 ;;
   esac
 done
 
@@ -72,6 +74,18 @@ EOF
 answers_for() { # answers_for <name> <cwd> [session id] [pid] [start]: true when the caller's role answers for that session
   [ -z "$mine" ] || [ "$(answering_role "$@")" = "$mine" ]
 }
+
+if [ -n "$codex_workers" ]; then
+  [ -n "$mine" ] || exit 0
+  for r in "$holders"/workers/*.json; do
+    [ -f "$r" ] || continue
+    if jq -e --arg root "$root" '.provider == "codex" and .root == $root' "$r" >/dev/null 2>&1 &&
+      answers_for "$(jq -r .name "$r")" "$(jq -r .dir "$r")"; then
+      printf '%s\n' "$r"
+    fi
+  done
+  exit 0
+fi
 
 # Each entry is judged on one copy: Claude Code rewrites it as the session's status changes, and a session selected
 # as blocked but rendered from a newer entry reads as a call unanswered for over a minute, a header the watch never
@@ -281,7 +295,7 @@ last_activity() { # last_activity <record>: epoch seconds of the newest transcri
   if [ -n "$best" ]; then echo "$best"; fi
 }
 ready_to_retire() {
-  local r f name dir why at pid start pstart bname bcwd lines=""
+  local r f name dir why at pid start pstart bname bcwd provider lines=""
   # Without the list of background sessions, which have no registry entry, a busy one would read as idle.
   if ! agents_json=$(claude agents --json 2>/dev/null) || ! printf '%s' "$agents_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
     echo "waiting.sh: claude agents failed, so no worker is judged ready to retire" >&2
@@ -309,12 +323,17 @@ EOF
     if [ -z "$name" ] || [ -z "$dir" ]; then continue; fi
     if [ -z "$all" ] && [ "$(jq -r '.root // empty' "$r")" != "$root" ]; then continue; fi
     answers_for "$name" "$dir" || continue
-    if worker_busy "$r"; then continue; fi
+    provider=$(jq -r '.provider // "claude"' "$r")
+    if [ "$provider" = codex ]; then
+      "$(dirname "$0")/codex-worker.py" inactive "$r" || continue
+    elif worker_busy "$r"; then
+      continue
+    fi
     why=$(finished "$r" || true)
     # A PR still open is work in flight, however long it waits on review.
     if [ "$why" = open ]; then continue; fi
     # Work done in some other worktree leaves this one at its base, so a worker idle a day is listed too.
-    if [ -z "$why" ]; then
+    if [ -z "$why" ] && [ "$provider" = claude ]; then
       at=$(last_activity "$r" || true)
       if [ -n "$at" ] && [ $(( $(date +%s) - at )) -ge 86400 ]; then
         why="idle $(( ($(date +%s) - at) / 86400 ))d, no finished work found — check its PR"

@@ -31,16 +31,14 @@ set up a separate supervisor. Type `/anderton` and that session takes over.
 
 ## What it does
 
-- **Starts real sessions, not sub-agents.** Each task gets a full Claude Code session in its own git
+- **Starts full worker sessions.** Each task gets a full Claude Code or Codex session in its own git
   worktree, started from `origin/HEAD`. It loads your user settings and the repo's committed config
   (CLAUDE.md, skills, hooks, plugins) and shares the repo's auto memory. Inside
   [herdr](https://herdr.dev) or tmux it opens in a tab you can watch and type into; without either it
   can only run in the background.
-- **Has sessions report to it, and only when it matters.** Each brief tells the worker to message the
-  Anderton by name with a result, a question, a blocker or an answer, and not to deploy. A hook holds
-  any other message to the Anderton (acknowledgements, "still waiting"), from its workers and from any
-  other session in the repo, since each one wakes the Anderton and re-reads its whole context. You don't
-  have to check each worker's tab for questions.
+- **Receives milestones and blockers.** Workers report a result, a question, a blocker or an answer.
+  Claude workers use SendMessage. Codex workers report in their final replies, which the Anderton's
+  watch reads from the Codex daemon. You can open either worker's tab to see its work.
 - **Shows you what's waiting on you.** Before every status report it lists the sessions in the repo
   that have stopped for a person: a finished reply, a permission prompt, a multiple-choice question,
   a tool call stuck for over a minute, a blocked background session. Its own workers report to it
@@ -138,15 +136,21 @@ sent while no session had that name may not have arrived.
 
 **How do I stop everything?**
 
-Ask the Anderton to retire its workers. From a plain shell, `retire.sh <name>` does the same; it
+Ask the Anderton to retire its workers. A plain shell can also retire Claude workers with `retire.sh <name>`; it
 lives in the plugin's `skills/anderton/scripts/` folder under `~/.claude/plugins/cache/`. Then
 `/plugin uninstall agent-anderton@agent-anderton`. Uninstalling leaves `~/.claude/anderton/` (the role and
 worker records) and any worktree that was kept for unpushed work; delete those by hand.
 
-**Does it work with Codex or other agents?**
+**Can my Claude Code Anderton run a Codex worker?**
 
-No. The scripts read Claude Code's own session registry and `claude agents`, so it is Claude Code
-only.
+Yes, in herdr and tmux. Ask your Claude Code Anderton to use a Codex worker, or
+pass `--provider codex` to `spawn.sh`. This requires Python 3 and a running
+local Codex daemon with the thread and turn APIs in Codex CLI 0.171.0.
+
+The worker opens in its own worktree and tab. Anderton sends follow-ups to
+the worker's Codex thread ID and receives milestone replies and blocker
+alerts through its existing watch. Open the worker's tab to handle a Codex
+permission prompt or input request. The Anderton itself runs in Claude Code.
 
 **How is it different from firstmate?**
 

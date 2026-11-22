@@ -2433,5 +2433,28 @@ for n in gone-wt landed fresh dirty busy-done squashed reused renamed backport b
   [ ! -d "$work/wt-$n" ] || git -C "$rho" worktree remove --force "$work/wt-$n"
 done
 
+scheduler="$work/scheduler"
+mkdir -p "$scheduler" "${probe_record%.json}.codex-probe" "$probe_dir"
+cp "$scripts/watch.sh" "$scripts/session-lib.sh" "$scheduler/"
+cat >"$scheduler/waiting.sh" <<'FAKE'
+#!/usr/bin/env bash
+if [ "$1" = --codex-workers ]; then echo worker.json; fi
+FAKE
+cat >"$scheduler/codex-workers.sh" <<'FAKE'
+#!/usr/bin/env bash
+echo "Codex milestone"
+FAKE
+chmod +x "$scheduler/waiting.sh" "$scheduler/codex-workers.sh"
+probe_claim --take-over --probe "$work/probe.sh"
+echo news >"$work/probe.mode"
+echo 1 >"$probe_dir/last"
+echo 2 >"${probe_record%.json}.codex-probe/last"
+set +e
+out=$(watch_in ph-1 "$probed" | env ANDERTON_WATCH_TICK=1 "$scheduler/watch.sh" 2>&1)
+status=$?
+set -e
+check "a due custom probe runs before a more recently checked Codex probe" eval \
+  '[ "$status" -eq 2 ] && contains "item " && ! contains "Codex milestone"'
+
 [ "$failures" -eq 0 ] || { echo "$failures check(s) failed"; exit 1; }
 echo "all checks passed"

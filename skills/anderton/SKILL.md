@@ -151,6 +151,24 @@ as the rerun `spawn.sh` asks for after a tab fails to start: it refuses `--bg` t
 otherwise, since the user watches every worker through its tab. A project's Anderton
 labels the tab with its own name, as `<its name>/<worker>`.
 
+For a Codex worker in herdr or tmux, pass `--provider codex`. The worker runs
+with workspace writes and user approvals. It uses the configured Codex model
+unless the user names one, with the effort you pass. The local Codex daemon
+and Python 3 must be available. If startup stops before the worker gets a
+thread ID, inspect its tab. Once it has received the launch brief, run
+`scripts/codex-workers.sh register <name>` to bind it. If launch ended before
+the brief was submitted, resolve the startup issue, retire the worker, and retry.
+
+Steer a Codex worker with `scripts/codex-workers.sh message <name> "<instruction>"`.
+The script queues the message to its registered thread. Send the next direction
+after Codex finishes the preceding one. Read its status with
+`scripts/codex-workers.sh status <name>` and its recent assistant output with
+`scripts/codex-workers.sh output <name>`. Inspect the worker's diff directly
+when reviewing. Its final
+`RESULT:`, `QUESTION:`, `BLOCKED:`, and `ANSWER:` replies wake you through
+the watch. Send Codex permission and input requests to the user in the
+worker's tab. Retire it with `scripts/retire.sh <name>` after its active turn ends.
+
 **Adopt a session** the user opened when they ask you to take it on:
 `scripts/adopt.sh <name>`. You then answer for it as for a worker you started. Tell it
 by SendMessage that it now reports to you, with the four kinds below.

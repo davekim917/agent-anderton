@@ -122,7 +122,8 @@ export CLAUDE_PID="$pid"
 # ANDERTON_PROBE_STAGE, for each source it read in full. They move into the state once its output has woken the
 # holder, or when it printed nothing, so a bookmark never passes an item the holder has not been told about. A run
 # that timed out may have staged half a write, so its stage is dropped.
-probe_dir="$holders/$key.probe"
+scripts=$(cd "$(dirname "$0")" && pwd)
+printf -v codex_probe '%q sweep' "$scripts/codex-workers.sh"
 probe_out_max=6000
 probe_timeout=${ANDERTON_PROBE_TIMEOUT:-120}
 probe_fail_at=${ANDERTON_PROBE_FAILURES:-3}
@@ -233,6 +234,13 @@ commit_probe() {
   probe_run=""
 }
 
+probe_last() {
+  local last
+  last=$(cat "$1/last" 2>/dev/null)
+  case $last in '' | *[!0-9]*) last=0 ;; esac
+  printf '%s\n' "$last"
+}
+
 while is_holder "$reg" "$record"; do
   if orphaned "$$" "$PPID"; then exit 0; fi
   # Only the lock's owner watches: a watch that lost it leaves, and one whose lock vanished takes it back.
@@ -240,11 +248,22 @@ while is_holder "$reg" "$record"; do
   now=$(cd "$cwd" 2>/dev/null && "$(dirname "$0")/waiting.sh" --blocked 2>/dev/null | grep '^=== ')
   new=$(printf '%s\n' "$now" | grep -vxF -f "$reported" | grep .)
   probe_news="" probe_alert="" probe_run=""
-  probe=$(jq -r '.probe.command // empty' "$record" 2>/dev/null)
-  if [ -n "$probe" ]; then
-    every=$(jq -r '.probe.every // 60 | floor' "$record" 2>/dev/null)
-    last=$(cat "$probe_dir/last" 2>/dev/null)
-    case $last in '' | *[!0-9]*) last=0 ;; esac
+  # A reporting probe ends this watch. Give the least recently run probe the first chance to wake it.
+  sources=(codex custom)
+  if [ "$(probe_last "$holders/$key.probe")" -lt "$(probe_last "$holders/$key.codex-probe")" ]; then
+    sources=(custom codex)
+  fi
+  for source in "${sources[@]}"; do
+    if [ "$source" = codex ]; then
+      [ -n "$(cd "$cwd" && "$scripts/waiting.sh" --codex-workers)" ] || continue
+      probe=$codex_probe every=${tick%%.*} probe_dir="$holders/$key.codex-probe"
+    else
+      probe=$(jq -r '.probe.command // empty' "$record" 2>/dev/null)
+      [ -n "$probe" ] || continue
+      every=$(jq -r '.probe.every // 60 | floor' "$record" 2>/dev/null)
+      probe_dir="$holders/$key.probe"
+    fi
+    last=$(probe_last "$probe_dir")
     # The interval holds across watches, so a busy source wakes the holder at most once per interval.
     if [ "$(( $(date +%s) - last ))" -ge "${every:-60}" ]; then
       run_probe "$probe"
@@ -254,15 +273,17 @@ while is_holder "$reg" "$record"; do
         exit 0
       fi
       # And only if it is still the role's probe: a run of the one just replaced or removed tells nothing.
-      if [ "$(jq -r '.probe.command // empty' "$record" 2>/dev/null)" != "$probe" ]; then
+      if [ "$source" = custom ] && [ "$(jq -r '.probe.command // empty' "$record" 2>/dev/null)" != "$probe" ]; then
         rm -rf "$probe_run"
         rm -f "$probe_dir/failures" "$probe_dir/told"
         probe_news="" probe_alert=""
       fi
       # Nothing to tell, so nothing a bookmark could pass unheard.
-      if [ -z "$probe_news" ] && [ -z "$probe_alert" ]; then commit_probe; fi
+      if [ -n "$probe_news" ] || [ -n "$probe_alert" ]; then break; fi
+      commit_probe
+      probe_run=""
     fi
-  fi
+  done
   if [ -n "$new" ] || [ -n "$probe_news" ] || [ -n "$probe_alert" ]; then
     if [ -n "$new" ]; then
       # Append only, so a scan that misses a block cannot make it new again. A block that clears and returns has a
