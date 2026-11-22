@@ -2,6 +2,7 @@
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d /tmp/adtn-coord.XXXXXX)
+tmp=$(cd "$tmp" && pwd -P)
 claimer=""
 cleanup() {
   if [ -n "$claimer" ]; then kill "$claimer" 2>/dev/null || true; fi
