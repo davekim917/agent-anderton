@@ -10,7 +10,7 @@ set -euo pipefail
 
 require_tools spawn.sh
 usage="usage: spawn.sh --effort low|medium|high|xhigh|max [--provider claude|codex] [--model M] [--mode MODE] [--base REF] <name: a-z 0-9 -> [brief-file]"
-model="" effort="" mode="" base="" provider="" codex_home="" baseline="" launch_token=""
+model="" effort="" mode="" base="" provider="" codex_home="" launched_at="" launch_token=""
 while [ $# -gt 0 ]; do
   case $1 in
     --bg) echo "spawn.sh: --bg is unsupported. Start workers inside herdr or tmux." >&2; exit 2 ;;
@@ -221,14 +221,14 @@ write_launch_record() {
     --arg socket "$socket" --arg server "$server" --arg base "$base" --arg spawner "$me" --arg label "$label" --argjson worktree "$worktree" \
     --arg pane "$pane" --arg spawner_session "$sid" --arg spawner_provider "$caller_provider" \
     --arg spawner_scope "$role_scope" --arg role "$role" \
-    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg provider "$provider" --arg codex "$codex_home" --arg baseline "$baseline" --arg token "$launch_token" \
+    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg provider "$provider" --arg codex "$codex_home" --arg launched "$launched_at" --arg token "$launch_token" \
     --slurpfile previous "$record" '
       ($previous[0] // {}) + {name: $name, launcher: $launcher, id: ($previous[0].id // $id), tab: $tab, socket: $socket, server: $server, dir: $dir, root: $root,
       base: $base, worktree: $worktree, spawner: $spawner, spawnerSession: $spawner_session, label: $label, startedAt: ($previous[0].startedAt // $at)}
       + if $pane != "" then {pane: $pane} else {} end
       + if $role != "" then {spawnerProvider: $spawner_provider, spawnerScope: (if $spawner_scope == "" then null else $spawner_scope end)} else {} end
       + if $provider == "claude" and $spawner_provider == "codex" then {reportTransport: "transcript"} else {} end
-      + if $provider == "codex" then {provider: $provider, codexHome: $codex, codexBaseline: $baseline, codexLaunchToken: $token} else {} end' > "$updated" || return 1
+      + if $provider == "codex" then {provider: $provider, codexHome: $codex, codexLaunchedAt: ($launched | tonumber), codexLaunchToken: $token} else {} end' > "$updated" || return 1
   mv -f "$updated" "$record"
 }
 
@@ -256,7 +256,8 @@ id="" tab="" pane="" socket="" server=""
 if [ "$provider" = codex ]; then
   provider_name=Codex
   codex_worker="$(dirname "$0")/codex-worker.py"
-  baseline=$("$codex_worker" find "$codex_home" "$dir" --baseline) || failed "Could not read the Codex daemon."
+  # The worker's thread is the one created in its worktree since now; older ones there belong to an earlier worker.
+  launched_at=$(date +%s)
   launch_token=$(python3 -c 'import uuid; print(uuid.uuid4())') || failed "Could not create the Codex launch token."
   brief="Anderton launch $launch_token
 
@@ -353,7 +354,7 @@ fi
 if [ "$provider" = codex ]; then
   tries=$(( ${ANDERTON_START_WAIT:-30} * 2 ))
   while [ "$tries" -gt 0 ]; do
-    if id=$("$codex_worker" find "$codex_home" "$dir" --after "$baseline" --token "$launch_token"); then
+    if id=$("$codex_worker" find "$codex_home" "$dir" --since "$launched_at" --token "$launch_token"); then
       break
     else
       status=$?

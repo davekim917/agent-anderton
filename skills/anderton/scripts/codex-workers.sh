@@ -52,8 +52,14 @@ if [ "$action" = register ]; then
   thread=$expected_thread
   launch_token=$(jq -r '.codexLaunchToken // ""' "$record")
   if [ -z "$thread" ]; then
+    # A record written before spawn.sh kept its launch time has the newest earlier thread instead.
+    if launched_at=$(jq -er '.codexLaunchedAt' "$record"); then
+      endpoint=(--since "$launched_at")
+    else
+      endpoint=(--after "$(jq -r '.codexBaseline // ""' "$record")")
+    fi
     thread=$("$scripts/codex-worker.py" find "$(jq -r .codexHome "$record")" "$(jq -r .dir "$record")" \
-      --after "$(jq -r '.codexBaseline // ""' "$record")" --token "$launch_token") || {
+      "${endpoint[@]}" --token "$launch_token") || {
       echo "No verified Codex thread yet. Inspect the worker tab and check that it received the launch brief." >&2
       exit 1
     }

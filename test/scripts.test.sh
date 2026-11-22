@@ -2699,12 +2699,14 @@ mkdir -p "$cxs" "$cxhome/app-server-control"
 cp "$scripts/spawn.sh" "$scripts/session-lib.sh" "$cxs/"
 cat >"$cxs/codex-worker.py" <<FAKE
 #!/usr/bin/env bash
+echo "\$*" >>"$FAKE_LOG.codex-worker"
 case " \$* " in *" --token "*) echo "$cx_thread" ;; esac
 FAKE
 printf '#!/usr/bin/env bash\n' >"$work/bin/codex"
 chmod +x "$cxs/codex-worker.py" "$work/bin/codex"
 python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$cxhome/app-server-control/app-server-control.sock"
-rm -f "$FAKE_LOG.window"
+rm -f "$FAKE_LOG.window" "$FAKE_LOG.codex-worker"
+before=$(date +%s)
 set +e
 out=$(cd "$rho" && printf 'Task.\n' | env CLAUDE_CODE_SESSION_ID=rl-1 CLAUDE_PID="$p_rl" CODEX_HOME="$cxhome" TMUX=/tmp/fake-tmux,1,0 \
   FAKE_TMUX_WINDOW=@41 "$cxs/spawn.sh" --provider codex --effort low cx-titled 2>&1)
@@ -2713,6 +2715,11 @@ set -e
 check "spawn.sh starts a Codex worker in tmux" [ "$status" -eq 0 ]
 check "titling its tab with the thread id" grep -qxF 'tui.terminal_title=["thread-id"]' "$FAKE_LOG.window"
 check "and records the thread it registered" [ "$(jq -r .id "$CLAUDE_CONFIG_DIR/anderton/workers/cx-titled.json" 2>/dev/null)" = "$cx_thread" ]
+# Listing a worktree's threads by cwd scans the daemon's whole history when there are none, as in a new worktree.
+check "finding it among threads created since its launch, with no lookup by worktree first" eval \
+  '[ "$(wc -l <"$FAKE_LOG.codex-worker")" -eq 1 ] && grep -q -- " --since [0-9][0-9]* --token " "$FAKE_LOG.codex-worker"'
+check "and keeping that launch time for a later registration" \
+  [ "$(jq -r --argjson before "$before" '.codexLaunchedAt >= $before' "$CLAUDE_CONFIG_DIR/anderton/workers/cx-titled.json")" = true ]
 rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/cx-titled.json" "$work/bin/codex"
 rm -rf "$cxhome"
 [ ! -d "$work/wt-cx-titled" ] || git -C "$rho" worktree remove --force "$work/wt-cx-titled"
