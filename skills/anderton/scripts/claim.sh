@@ -130,7 +130,8 @@ else
 fi
 started=$(jq -r '.startedAt // empty | floor' "$sessions/$pid.json" 2>/dev/null || true)
 peer=null
-if [ -n "$record" ] && caller_matches_claim "$record"; then
+if [ -n "$record" ] && [ "$(jq -r '.sessionId // empty' "$record")" = "$sid" ] &&
+  { [ -n "$rebind" ] || caller_matches_claim "$record"; }; then
   peer=$(jq -c '.peerMessage // null' "$record")
 fi
 jq -nc --arg root "$root" --arg scope "$scope" --arg pid "$pid" --arg started "$started" --arg sid "$sid" \

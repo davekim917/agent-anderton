@@ -149,6 +149,19 @@ grep -q 'RESULT: inherited Claude fixture' "$tmp/wake"
 if grep -q 'RESULT: historical fixture' "$tmp/wake"; then exit 1; fi
 grep -qx '"after-readoption"' "$bookmarks/claude-inherited.json"
 
+sleep 60 &
+old_pid=$!
+jq --argjson old_pid "$old_pid" '
+  .pid = $old_pid | .peerMessage = {id:"pending-peer",text:"DEPLOY: retain across resume"}
+  ' "$root_claim" > "$tmp/previous"
+mv "$tmp/previous" "$root_claim"
+kill "$old_pid"
+wait "$old_pid" 2>/dev/null || true
+claude_role "$script/claim.sh" --rebind
+jq -e --argjson active "$claimer" '.pid == $active and .peerMessage.id == "pending-peer"' "$root_claim" >/dev/null
+codex_role "$script/claim.sh" --take-over
+jq -e '.provider == "codex" and .peerMessage == null' "$root_claim" >/dev/null
+
 jq -nc --arg dir "$PWD" '
   {name:"another-name",root:$dir,dir:$dir,adopted:true,sessionId:"fixture-claude"}' > "$claims/workers/another-name.json"
 refused_claim claude_role "$script/claim.sh" --project worker-scope
