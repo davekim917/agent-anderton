@@ -28,8 +28,10 @@ jq -e '.name == "agent-anderton" and ([.plugins[].name] == ["agent-anderton"])' 
 
 codex_manifest="$root/.codex-plugin/plugin.json"
 codex_marketplace="$root/.agents/plugins/marketplace.json"
-jq -e '.name == "agent-anderton" and .skills == "./skills/" and (has("hooks") | not)' "$codex_manifest" >/dev/null ||
+jq -e '.name == "agent-anderton" and .skills == "./skills/" and .hooks == "./.codex-plugin/hooks.json"' "$codex_manifest" >/dev/null ||
   fail "Codex must load the shared skill without Claude hooks"
+jq -e '.hooks == {}' "$root/.codex-plugin/hooks.json" >/dev/null ||
+  fail "Codex uses a detached watch and must not load plugin hooks"
 jq -e '.name == "agent-anderton" and .plugins == [.plugins[0]]
   and .plugins[0].name == "agent-anderton" and .plugins[0].source.path == "./"' "$codex_marketplace" >/dev/null ||
   fail "Codex marketplace must install the root plugin"

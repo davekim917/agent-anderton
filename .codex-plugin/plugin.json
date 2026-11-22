@@ -8,6 +8,7 @@
   "repository": "https://github.com/davekim917/agent-anderton",
   "license": "MIT",
   "skills": "./skills/",
+  "hooks": "./.codex-plugin/hooks.json",
   "interface": {
     "displayName": "Agent Anderton",
     "shortDescription": "Coordinate full Claude Code and Codex sessions",
