@@ -282,8 +282,10 @@ worktree_work() {
     echo unreadable
   elif case "
 $out" in *"
-"[[:lower:]]" "*) true ;; *) false ;; esac; then
-    # ls-files -v tags an assume-unchanged file in lower case: status hides its edits, and removal deletes them.
+"[[:lower:]]" "*) true ;; *"
+S "*) [ "$(git -C "$1" config --bool core.sparseCheckout 2>/dev/null)" != true ] ;; *) false ;; esac; then
+    # ls-files -v tags an assume-unchanged file in lower case and a skip-worktree one S: status hides edits to either,
+    # and removal deletes them. A sparse checkout marks the files it leaves out skip-worktree, so there S is not work.
     echo uncommitted
   elif ! out=$(git -C "$1" rev-list -1 HEAD --not --remotes "$2" 2>/dev/null); then
     echo unreadable

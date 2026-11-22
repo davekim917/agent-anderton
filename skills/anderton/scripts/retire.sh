@@ -102,8 +102,16 @@ if [ "$launcher" != bg ] && [ "$provider" = codex ]; then
     exit 1
   }
   if [ -z "$pane" ]; then
-    [ "$(place_state "$launcher" "$socket" "$tab" "$label" "$server")" = absent ] ||
+    # Without a pane id only the tab says whether it still runs, and a tab the user renamed still does: place_state
+    # reads its new label as absent, so a tab id still standing in the same server refuses too.
+    if [ "$(place_state "$launcher" "$socket" "$tab" "$label" "$server")" != absent ] || case $launcher in
+      herdr) HERDR_SOCKET_PATH="$socket" herdr tab get "$tab" 2>/dev/null | jq -e '.result.tab.label | type == "string"' >/dev/null 2>&1 ;;
+      tmux) tmux -S "$socket" list-windows -a -F '#{pid} #{window_id} #{window_name}' 2>/dev/null |
+        awk -v p="$server" -v w="$tab" '$1 == p && $2 == w { f = 1 } END { exit !f }' ;;
+      *) false ;;
+    esac; then
       refuse_pane "its $launcher tab $tab was recorded without its pane"
+    fi
   elif now=$(codex_pane) && [ "$now" != gone ]; then
     shows_thread "$now" ||
       refuse_pane "its $launcher pane $pane does not show thread ${id:-(none registered)} (another conversation was opened there, Codex left it, or $launcher cannot say)"

@@ -2529,6 +2529,16 @@ echo v2 >"$work/wt-hidden-edit/tracked.txt"
 run "$scripts/retire.sh" hidden-edit
 check "and an edit to a file marked assume-unchanged, which status hides" \
   eval '[ "$status" -eq 3 ] && [ "$(cat "$work/wt-hidden-edit/tracked.txt" 2>/dev/null)" = v2 ]'
+git -C "$work/wt-hidden-edit" update-index --no-assume-unchanged tracked.txt
+git -C "$work/wt-hidden-edit" update-index --skip-worktree tracked.txt
+run "$scripts/retire.sh" hidden-edit
+check "or to one marked skip-worktree outside a sparse checkout" \
+  eval '[ "$status" -eq 3 ] && [ "$(cat "$work/wt-hidden-edit/tracked.txt" 2>/dev/null)" = v2 ]'
+rm -f "$work/wt-hidden-edit/tracked.txt"
+git -C "$rho" config core.sparseCheckout true
+run "$scripts/retire.sh" hidden-edit
+check "but a sparse checkout's skip-worktree files are not work" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-hidden-edit" ]'
+git -C "$rho" config --unset core.sparseCheckout
 rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/hidden-edit.json"
 [ ! -d "$work/wt-hidden-edit" ] || git -C "$rho" worktree remove --force "$work/wt-hidden-edit"
 rho_worker bad-base
@@ -2647,6 +2657,11 @@ printf '#!/usr/bin/env bash\necho "%s"\n' "$CLAUDE_CONFIG_DIR/anderton/workers/c
 cx_retire cx-old
 check "a Codex worker recorded without its pane keeps its window until the user closes it" \
   eval '[ "$status" -eq 1 ] && contains "recorded without its pane" && [ ! -s "$FAKE_LOG.killed" ]'
+awk '$3 == "@23" { $4 = "renamed-by-user" } { print }' "$FAKE_LOG.windows-open" >"$FAKE_LOG.windows-open.tmp"
+mv "$FAKE_LOG.windows-open.tmp" "$FAKE_LOG.windows-open"
+cx_retire cx-old
+check "or renames it, which no longer marks it the worker's" \
+  eval '[ "$status" -eq 1 ] && contains "recorded without its pane" && [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-cx-old" ]'
 awk '$3 != "@23"' "$FAKE_LOG.windows-open" >"$FAKE_LOG.windows-open.tmp"
 mv "$FAKE_LOG.windows-open.tmp" "$FAKE_LOG.windows-open"
 cx_retire cx-old
