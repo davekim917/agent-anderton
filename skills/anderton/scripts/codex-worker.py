@@ -536,12 +536,14 @@ def main():
                 # retire.sh removes the worktree on this answer, so every thread in it is read, from the full listing:
                 # Codex can run a turn whose thread has no index row, and its order is not creation order (it sorts
                 # rollouts by local file time). A listing or read that fails keeps the worktree.
+                quiet = {"idle", "notLoaded"}
                 for thread in client.pages("thread/list", timeout=DIRECTORY_LIST_SECONDS, cwd=worker["dir"], limit=50):
-                    status = thread.get("status")
-                    if not isinstance(status, dict) or "type" not in status:
-                        status = client.call("thread/read", {"threadId": thread["id"], "includeTurns": False})[
-                            "thread"]["status"]
-                    if status["type"] not in {"idle", "notLoaded"}:
+                    listed = thread.get("status")
+                    if isinstance(listed, dict) and listed.get("type") not in quiet:
+                        return 1
+                    # A listing can still say idle for a turn that has started; only a live read settles it.
+                    live = client.call("thread/read", {"threadId": thread["id"], "includeTurns": False})["thread"]
+                    if live["status"]["type"] not in quiet:
                         return 1
                 return 0
             if args.command == "inactive":

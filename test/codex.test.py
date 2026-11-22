@@ -23,6 +23,7 @@ class FakeCodex:
         self.checked_queue = False
         self.listings = []
         self.listed = []
+        self.others = {}
 
     def __enter__(self):
         return self
@@ -39,6 +40,8 @@ class FakeCodex:
             self.checked_queue = True
             return {"data": self.queue}
         assert method == "thread/read"
+        if params["threadId"] in self.others:
+            return {"thread": self.others[params["threadId"]]}
         assert params["threadId"] == self.info["id"]
         return {"thread": self.info}
 
@@ -193,6 +196,7 @@ class WorkerTest(unittest.TestCase):
         self.record.write_text(json.dumps(self.worker))
         older = {"id": "00000000-0000-7000-8000-000000000a02", "cwd": self.worker["dir"], "createdAt": 600,
                  "status": {"type": "notLoaded"}}
+        self.client.others[older["id"]] = {**older}
         elsewhere = {"id": "00000000-0000-7000-8000-000000000a01", "cwd": str(self.state), "createdAt": 1001,
                      "status": {"type": "active", "activeFlags": []}}
         launch = {**self.client.info, "createdAt": 1001, "status": {"type": "idle"}}
@@ -204,16 +208,21 @@ class WorkerTest(unittest.TestCase):
                 return worker_api.main()
 
         self.assertEqual(0, inactive())
+        # The listing can still say idle for a turn that has started; the live read decides.
+        self.client.info["status"] = {"type": "active", "activeFlags": []}
+        self.assertEqual(1, inactive())
+        self.client.info["status"] = {"type": "idle"}
+        self.client.others[older["id"]]["status"] = {"type": "active", "activeFlags": []}
+        self.assertEqual(1, inactive())
+        self.client.others[older["id"]]["status"] = {"type": "notLoaded"}
         launch["status"] = {"type": "active", "activeFlags": ["waitingOnApproval"]}
         self.assertEqual(1, inactive())
         launch["status"] = {"type": "systemError"}
         self.assertEqual(1, inactive())
-        # A listing without a status is settled by reading the thread.
         del launch["status"]
-        self.client.info["status"] = {"type": "active", "activeFlags": []}
-        self.assertEqual(1, inactive())
-        self.client.info["status"] = {"type": "idle"}
         self.assertEqual(0, inactive())
+        self.client.info["status"] = {"type": "systemError"}
+        self.assertEqual(1, inactive())
         # Retirement removes the worktree on this answer: the full listing, which sees a thread the index lacks.
         for params in self.client.listings:
             self.assertEqual(self.worker["dir"], params["cwd"])
