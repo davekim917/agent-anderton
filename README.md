@@ -33,8 +33,8 @@ Anderton hands that job to a Claude Code or Codex session in your repository. In
 - **Starts full worker sessions.** Each task gets a full Claude Code or Codex session in its own git
   worktree, started from `origin/HEAD`. It loads your user settings and the repo's committed config
   (CLAUDE.md, skills, hooks, plugins) and shares the repo's auto memory. Inside
-  [herdr](https://herdr.dev) or tmux it opens in a tab you can watch and type into. A Claude Code
-  Anderton can also start Claude workers in the background.
+  [herdr](https://herdr.dev) or tmux it opens in a tab you can watch and type into. New worker
+  launches require one of those multiplexers.
 - **Receives milestones and blockers.** Workers report a result, a question, a blocker or an answer.
   Claude workers reporting to Claude use SendMessage. Codex workers and Claude workers
   reporting to Codex use their final replies, which the watch reads from the native runtime.
@@ -77,10 +77,8 @@ Installed before the rename, as `anderton@anderton`? Run the two lines above, th
 sessions load their hooks from the old install. The role and worker records in `~/.claude/anderton/`
 carry over.
 
-Run Claude Code inside [herdr](https://herdr.dev) or tmux. Anderton needs one to work properly:
-workers open in tabs you can watch and type into, and you can answer their permission prompts from
-the Anderton. Without one, workers can only run in the background, where you can't watch them or
-answer their prompts from here.
+Run Claude Code inside [herdr](https://herdr.dev) or tmux to launch workers. Each worker opens
+in a tab or window you can watch and type into.
 
 In the session you want in charge, give it a name (workers report to it by name), then start it:
 
@@ -98,7 +96,7 @@ It writes a brief for each task and starts a worker for each. From then on the w
 Anderton, not you. It answers what it can, brings you the decisions that are yours, reviews each
 PR, and deploys what passes.
 
-**Requirements:** Claude Code with background sessions (`claude --bg`, `claude agents`), built and
+**Requirements:** Claude Code with `claude agents`, built and
 tested on 2.1.312; `git`, `jq` and `gh`; and herdr or tmux. It runs on Linux and on macOS,
 including macOS's stock bash 3.2.
 
@@ -275,46 +273,40 @@ worktree leaves its own at its base. Idle time runs from the newest transcript e
 that may be it, else from when it was started. A line notes uncommitted work, or commits no remote branch has, which `retire.sh`
 would keep. `--blocked` leaves this section out.
 
-**`spawn.sh --effort LEVEL [--bg (not inside herdr)] [--model M] [--mode MODE] [--base REF] <name> [brief-file]`**
-starts a worker: a full Claude Code session named `<name>`, in a new git worktree at
+**`spawn.sh --effort LEVEL [--provider claude|codex] [--model M] [--mode MODE] [--base REF] <name> [brief-file]`**
+starts a full Claude Code or Codex worker labelled `<name>` in a new git worktree at
 `$ANDERTON_WORKTREES/wt-<name>` (default: the folder that holds the repository). The base is
 `origin/HEAD`, else `origin/main`, `origin/master` or `HEAD`.
 
 - Inside herdr (`HERDR_ENV=1`), the worker opens in a new tab of the caller's workspace, labelled
   `<name>`, or `<caller>/<name>` when the caller is a named project's Anderton, its name folded to
-  lowercase letters, digits and hyphens (`herdr tab create`, `herdr agent start --kind claude`, then `herdr agent prompt` with
-  the brief). If Claude Code stops at a startup prompt there, the spawn shows the screen, closes the
-  tab and fails, unless the session cannot be confirmed stopped, when it keeps the worktree and
-  record for `retire.sh`. A failed tab that is confirmed closed, including one herdr could not open,
-  says to rerun with `--bg`.
-- Inside herdr `--bg` is refused: you watch and type into every worker through its tab, so a caller
-  cannot hide one by choice. The one exception is that rerun: the failed start leaves a marker for its
-  name that admits one `--bg` spawn of that name from the same project within the hour; any later
-  spawn of the name uses it up or clears it. A name
-  herdr would refuse (not starting with a letter, or over 32 characters) is refused up front there.
-- Inside tmux (`$TMUX`, and not herdr), it opens in a new detached window with that same label. The spawn
+  lowercase letters, digits and hyphens. If Claude Code stops at a startup prompt, the spawn shows
+  the screen, closes the tab and fails. If it cannot confirm the session stopped, it keeps the
+  worktree and record for `retire.sh`. On a Codex startup issue, the spawn keeps the tab for
+  inspection. Worker names in herdr start with a letter and use at most 32 characters.
+- With tmux context and no usable herdr context, it opens a new detached tmux window with that same label. The spawn
   waits up to `$ANDERTON_START_WAIT` seconds (default 30) for the session to register: a window
   that closes first fails the spawn, and one still open is kept with a note that it may wait at a
   startup prompt.
-- Elsewhere, or with `--bg` outside herdr, it is a background session (`claude --bg`). Inside herdr
-  without its workspace, socket or CLI, and with no tmux, it starts in the background with a note.
-- It runs in the caller's permission mode, read from the caller's transcript.
+- A Claude Code Anderton starts Claude workers in its own permission mode unless `--mode` is
+  supplied. A Codex Anderton uses Claude Code's default mode for Claude workers unless `--mode`
+  is supplied. Codex workers use workspace writes and user-reviewed approvals.
 - `--effort` is required (`low`, `medium`, `high`, `xhigh` or `max`), so a worker never runs at the
   default just because nobody chose. The Anderton picks it from your request and says so; a level you
   name wins.
-- Workers run on Opus unless `--model` names another, whatever your Claude Code default is. The
-  Anderton passes `--model` only when you name a model.
-- The brief, from the file or stdin, gets closing rules: message the caller by name with SendMessage
-  only for a `RESULT:`, `QUESTION:`, `BLOCKED:` or `ANSWER:`, one message per milestone; give every
-  sub-agent an explicit effort and prefer one-shot sub-agents; and don't deploy, restart or message
-  anyone off the machine unless the task says to.
+- Claude workers default to Opus, and Codex workers use the configured Codex model. The Anderton
+  passes `--model` when you name a model.
+- The brief, from the file or stdin, asks the worker to report a `RESULT:`, `QUESTION:`,
+  `BLOCKED:` or `ANSWER:` at each milestone. Claude workers reporting to Claude Code use
+  SendMessage. Other pairings report in final replies. The brief also sets the rules for sub-agents
+  and external actions.
 - The worker is recorded in `~/.claude/anderton/workers/<name>.json`, with the herdr or tmux server
   it was opened in.
 
 **`retire.sh <name>`** stops that worker, then removes its worktree and record. A herdr tab or tmux
 window is closed only when it still carries the label it was opened with, in the server recorded at spawn, and
 the worker counts as stopped only when that tab or window is gone and its name has left
-`claude agents`; a background worker is stopped with `claude stop`. It exits 3 and keeps the
+`claude agents`; an existing background worker is stopped with `claude stop`. It exits 3 and keeps the
 worktree when the worktree has uncommitted changes, or commits since it started that no remote
 branch has. Untracked files count whatever `status.showUntrackedFiles` says, and a worktree git
 cannot read or compare with its base is kept too. Gitignored files don't count as changes.

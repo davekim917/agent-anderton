@@ -163,19 +163,18 @@ when the work is small and self-contained.
 
 **Start a session** with `scripts/spawn.sh --effort <level> <name> <brief-file>`
 (`--model`, `--base <ref>`). It makes a worktree beside the repository (under
-`$ANDERTON_WORKTREES` when set), starts a full session there in your permission
-mode, and appends to the brief that the worker reports to you by name. When you run
-inside herdr or tmux, the worker opens in a new tab or window the user can watch and
-type into. A Claude Code Anderton can start Claude workers in the background outside
-those multiplexers. In herdr, a Claude Code Anderton uses `--bg` only if `spawn.sh`
-offers it after a failed tab launch. A project's Anderton
+`$ANDERTON_WORKTREES` when set), starts a full session there, and appends to the
+brief that the worker reports to you by name. You must run
+inside herdr or tmux to launch workers. Each worker opens in a new tab or window
+the user can watch and type into. A project's Anderton
 labels the tab with its own name, as `<its name>/<worker>`.
 
 The default worker runtime follows the **repository's** Anderton, including for
 project Andertons on the other runtime. Pass `--provider claude` or
-`--provider codex` when picking a different runtime. A Claude worker under
-Codex starts in Claude's default permission mode and reports milestones in its
-final reply. A Codex worker requires herdr or tmux. It runs
+`--provider codex` when picking a different runtime. By default, a Claude worker
+under Claude Code inherits the Anderton's permission mode, and a Claude worker
+under Codex uses Claude's default permission mode. Claude workers under Codex
+report milestones in their final reply. A Codex worker runs
 with workspace writes and user approvals. It uses the configured Codex model
 unless the user names one, with the effort you pass. The local Codex daemon
 and Python 3 must be available. If startup stops before the worker gets a
@@ -238,7 +237,7 @@ After starting a worker:
   stop without reporting it. Subscribe once: the notice fires on any turn end, so when it
   comes, check the PR or the worktree instead of subscribing again. Each notice wakes you
   and re-reads your whole context.
-- The user can open a background worker with `claude attach <name>` or from their phone.
+- The user can open an existing background worker with `claude attach <name>` or from their phone.
 - Retire every worker `scripts/waiting.sh` lists under **Ready to retire**, and one
   whose work you dropped, with `scripts/retire.sh <name>`. A line that says `idle`
   found no finished work: ask the worker or check its PR first, and retire it once

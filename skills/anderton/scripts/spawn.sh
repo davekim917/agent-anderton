@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# Start a full worker in its own worktree of the caller's repository. Herdr and tmux open interactive workers
-# in a tab or window. Only Claude Code supports a background launch.
-# --bg asks for the background outside herdr; inside herdr it is refused, except once after spawn.sh itself failed to
-# start that name in a herdr tab and said to rerun with it. $ANDERTON_START_WAIT (seconds, default 30) bounds the wait for a tmux worker to register.
+# Start a full worker in its own worktree of the caller's repository, in a herdr tab or tmux window.
+# $ANDERTON_START_WAIT (seconds, default 30) bounds the wait for a tmux worker to register.
 # Claude workers run on Opus unless --model supplies another model. Codex workers use their configured model.
 # Worktrees go under $ANDERTON_WORKTREES, default the folder that holds the repository, as wt-<name>.
 # Portable to macOS's bash 3.2 and BSD userland.
@@ -11,11 +9,11 @@ set -euo pipefail
 . "$(dirname "$0")/session-lib.sh"
 
 require_tools spawn.sh
-usage="usage: spawn.sh --effort low|medium|high|xhigh|max [--provider claude|codex] [--bg (not inside herdr)] [--model M] [--mode MODE] [--base REF] <name: a-z 0-9 -> [brief-file]"
-model="" effort="" mode="" base="" launcher="" provider="" codex_home="" baseline="" launch_token=""
+usage="usage: spawn.sh --effort low|medium|high|xhigh|max [--provider claude|codex] [--model M] [--mode MODE] [--base REF] <name: a-z 0-9 -> [brief-file]"
+model="" effort="" mode="" base="" provider="" codex_home="" baseline="" launch_token=""
 while [ $# -gt 0 ]; do
   case $1 in
-    --bg) launcher="bg"; shift ;;
+    --bg) echo "spawn.sh: --bg is unsupported. Start workers inside herdr or tmux." >&2; exit 2 ;;
     --model | --effort | --mode | --base | --provider)
       [ $# -ge 2 ] || { echo "$usage" >&2; exit 2; }
       case $1 in
@@ -36,6 +34,31 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
+name="${1:-}"
+case $name in
+  '' | -* | *[!a-z0-9-]*) echo "$usage" >&2; exit 2 ;;
+esac
+# Required so a worker never runs at the default just because nobody chose: the user's level, else the caller's
+# judgment of the work.
+case $effort in
+  low | medium | high | xhigh | max) ;;
+  *) echo "$usage" >&2; exit 2 ;;
+esac
+if [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] && [ -n "${HERDR_SOCKET_PATH:-}" ] &&
+  command -v herdr >/dev/null 2>&1; then
+  launcher=herdr
+  # herdr refuses an agent name that does not start with a letter or is over 32 characters.
+  case $name in
+    [a-z]*) [ ${#name} -le 32 ] || { echo "spawn.sh: inside herdr a worker name is at most 32 characters." >&2; exit 2; } ;;
+    *) echo "spawn.sh: inside herdr a worker name starts with a letter." >&2; exit 2 ;;
+  esac
+elif [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+  launcher=tmux
+else
+  echo "spawn.sh: Start workers inside herdr or tmux." >&2
+  exit 2
+fi
+
 root=$(invoking_root)
 caller_provider=$(invoking_provider)
 role=$(caller_claim "$root")
@@ -61,69 +84,14 @@ if [ "$provider" = claude ] && ! command -v claude >/dev/null 2>&1; then
   echo "spawn.sh needs the claude CLI on PATH for a Claude worker." >&2
   exit 1
 fi
-if [ "$provider" = codex ] && { [ "$launcher" = bg ] || [ -n "$mode" ]; }; then
-  echo "Codex workers need a herdr tab or tmux window and use their own approval policy." >&2
+if [ "$provider" = codex ] && [ -n "$mode" ]; then
+  echo "Codex workers use their own approval policy. Omit --mode." >&2
   exit 2
 fi
-name="${1:-}"
-case $name in
-  '' | -* | *[!a-z0-9-]*) echo "$usage" >&2; exit 2 ;;
-esac
-# Required so a worker never runs at the default just because nobody chose: the user's level, else the caller's
-# judgment of the work.
-case $effort in
-  low | medium | high | xhigh | max) ;;
-  *) echo "$usage" >&2; exit 2 ;;
-esac
 if [ -n "${2:-}" ]; then brief=$(cat "$2"); else brief=$(cat); fi
-# The user watches and types into every worker through its tab, so inside herdr a caller cannot hide one by choice:
-# --bg there is admitted only by the marker a failed herdr start of the same name leaves, and only once.
-herdr_failed="$holders/workers/$name.herdr-failed"
-# Resolved once, so the marker's project and the worker's are the same one.
-# Taken by renaming, so of two reruns only one gets it; it admits only a rerun from the same project within the hour.
-admitted=""
-if [ "$launcher" = bg ] && [ "${HERDR_ENV:-}" = 1 ] && mv "$herdr_failed" "$herdr_failed.$$" 2>/dev/null; then
-  marker=$(cat "$herdr_failed.$$" 2>/dev/null || true)
-  rm -f "$herdr_failed.$$"
-  case ${marker%% *} in
-    '' | *[!0-9]*) ;;
-    *)
-      age=$(($(date +%s) - ${marker%% *}))
-      if [ "${marker#* }" = "$root" ] && [ "$age" -ge 0 ] && [ "$age" -lt 3600 ]; then admitted=1; fi
-      ;;
-  esac
-fi
-if [ "${HERDR_ENV:-}" = 1 ]; then
-  if [ "$launcher" = bg ] && [ -z "$admitted" ]; then
-    echo "spawn.sh: --bg is refused inside herdr; the worker opens in a tab the user can watch. It is accepted only for the rerun spawn.sh asks for after a herdr tab fails to start." >&2
-    exit 2
-  fi
-  # herdr refuses an agent name that does not start with a letter or is over 32 characters.
-  case $name in
-    [a-z]*) [ ${#name} -le 32 ] || { echo "spawn.sh: inside herdr a worker name is at most 32 characters." >&2; exit 2; } ;;
-    *) echo "spawn.sh: inside herdr a worker name starts with a letter." >&2; exit 2 ;;
-  esac
-fi
-rm -f "$herdr_failed"
-if [ -z "$launcher" ]; then
-  if [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] && [ -n "${HERDR_SOCKET_PATH:-}" ] &&
-    command -v herdr >/dev/null 2>&1; then
-    launcher=herdr
-  elif [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
-    launcher=tmux
-  else
-    launcher="bg"
-    [ "${HERDR_ENV:-}" != 1 ] ||
-      echo "spawn.sh: inside herdr but without its workspace, socket or CLI here, so the worker starts in the background: open it with claude attach $name." >&2
-  fi
-fi
-if [ "$caller_provider" = codex ] && [ "$provider" = claude ] && [ "$launcher" = bg ]; then
-  echo "A Codex Anderton needs herdr or tmux to start a Claude worker with a verifiable session." >&2
-  exit 2
-fi
 if [ "$provider" = codex ]; then
-  if [ "$launcher" = bg ] || ! git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Codex workers need a Git worktree and a herdr tab or tmux window." >&2
+  if ! git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Codex workers need a Git worktree." >&2
     exit 2
   fi
   if ! command -v codex >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
@@ -272,11 +240,6 @@ failed() {
     exit 1
   fi
   rm -f "$record"
-  # Written last, once the name is released, so a rerun it admits can reserve the name.
-  if [ "$provider" = claude ] && [ "$caller_provider" = claude ] && [ "$launcher" = herdr ] &&
-    printf '%s %s\n' "$(date +%s)" "$root" 2>/dev/null >"$herdr_failed"; then
-    echo "Rerun with --bg to start it in the background instead." >&2
-  fi
   exit 1
 }
 
@@ -351,7 +314,7 @@ It is not confirmed stopped, so $dir and its record are kept: close tab $tab, th
 $screen"
   fi
   where="herdr tab '$label' ($tab)"
-elif [ "$launcher" = tmux ]; then
+else
   socket="${TMUX%%,*}"
   server=$(printf '%s' "$TMUX" | cut -d, -f2)
   # Given as separate arguments, the window's command runs without a shell, so the brief needs no quoting. tmux still
@@ -385,14 +348,6 @@ elif [ "$launcher" = tmux ]; then
   where="tmux window '$label' ($tab)"
   [ "$provider" = codex ] || [ -n "$listed" ] ||
     echo "Worker '$name' has not registered yet: it may be waiting at a startup prompt in its window." >&2
-else
-  out=$(cd "$dir" && claude --bg "$@" "$brief" 2>&1) || failed "$out"
-  # `claude stop` and `claude rm` take the session's id, not its name.
-  id=$(claude agents --json 2>/dev/null | jq -r --arg n "$name" 'first(.[] | select(.name == $n) | .id) // empty' 2>/dev/null || true)
-  [ -n "$id" ] || id=$(printf '%s\n' "$out" | sed -n 's/^backgrounded · \([0-9a-f]*\) · .*/\1/p' | head -n 1)
-  printf '%s\n' "$out"
-  where="the background (${id:-id unknown})"
-  write_record
 fi
 
 if [ "$provider" = codex ]; then

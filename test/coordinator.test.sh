@@ -10,6 +10,7 @@ cleanup() {
 trap cleanup EXIT
 export HOME="$tmp/home" CLAUDE_CONFIG_DIR="$tmp/claude" CODEX_HOME="$tmp/codex"
 export ANDERTON_WORKTREES="$tmp/worktrees" ANDERTON_START_WAIT=1
+export FIXTURE_TMUX_LOG="$tmp/tmux.log"
 unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID TMUX HERDR_ENV
 export PATH="$tmp/bin:$PATH"
 mkdir -p "$HOME" "$tmp/bin" "$CLAUDE_CONFIG_DIR/sessions" "$CODEX_HOME/app-server-control" "$tmp/scripts" "$tmp/repo"
@@ -37,11 +38,11 @@ esac
 STUB
 cat > "$tmp/bin/claude" <<'STUB'
 #!/usr/bin/env bash
-case $1 in agents) echo '[]' ;; --bg) echo 'backgrounded · abc123 · fixture' ;; *) exit 2 ;; esac
+case $1 in agents) echo '[]' ;; *) exit 2 ;; esac
 STUB
 cat > "$tmp/bin/tmux" <<'STUB'
 #!/usr/bin/env bash
-case $1 in new-window) echo '@21 %21' ;; *) exit 2 ;; esac
+case $1 in new-window) printf '%s\n' "$@" > "$FIXTURE_TMUX_LOG"; echo '@21 %21' ;; *) exit 2 ;; esac
 STUB
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/codex"
 chmod +x "$tmp/scripts/codex-worker.py" "$tmp/bin/"*
@@ -68,9 +69,20 @@ claude_role "$script/claim.sh"
 refused_claim codex_role "$script/claim.sh"
 codex_role "$script/claim.sh" --project tools
 refused_claim codex_role "$script/claim.sh" --take-over
-if printf 'Fixture task.\n' | codex_role "$script/spawn.sh" --effort low --bg unsupported > "$tmp/refused" 2>&1; then exit 1; fi
-grep -q 'herdr or tmux' "$tmp/refused"
-[ ! -e "$ANDERTON_WORKTREES/wt-unsupported" ]
+for provider in claude codex; do
+  status=0
+  codex_role "$script/spawn.sh" --effort low --provider "$provider" "no-mux-$provider" </dev/null > "$tmp/refused" 2>&1 || status=$?
+  [ "$status" -eq 2 ]
+  grep -q 'inside herdr or tmux' "$tmp/refused"
+  status=0
+  codex_role env TMUX=/tmp/fixture-tmux,10,0 "$script/spawn.sh" --effort low --provider "$provider" --bg "bg-$provider" \
+    </dev/null > "$tmp/refused" 2>&1 || status=$?
+  [ "$status" -eq 2 ]
+  grep -q -- '--bg is unsupported' "$tmp/refused"
+done
+[ ! -e "$ANDERTON_WORKTREES" ]
+[ ! -e "$claims/workers" ]
+[ ! -e "$FIXTURE_TMUX_LOG" ]
 printf 'Fixture task.\n' | codex_role env TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 "$script/spawn.sh" --effort low from-claude-default
 jq -e '(.provider // "claude") == "claude" and .spawnerProvider == "codex" and .spawnerScope == "tools"' "$claims/workers/from-claude-default.json" >/dev/null
 codex_role "$script/role-message.sh" "DEPLOY: catalog fixture"
@@ -114,7 +126,8 @@ jq -nc --arg dir "$PWD" --arg home "$CODEX_HOME" '
 refused_claim env CODEX_THREAD_ID="$pending" MATCHING_LAUNCH="$pending" "$script/claim.sh" --project worker-scope
 grep -q "managed as worker 'registering-codex'" "$tmp/refused"
 rm "$claims/workers/registering-codex.json"
-printf 'Fixture task.\n' | claude_role "$script/spawn.sh" --effort low --bg --provider claude --mode default explicit-claude
+printf 'Fixture task.\n' | claude_role env TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 \
+  "$script/spawn.sh" --effort low --provider claude --mode default explicit-claude
 jq -e '(.provider // "claude") == "claude"' "$claims/workers/explicit-claude.json" >/dev/null
 if codex_role "$script/adopt.sh" --provider codex duplicate "$FIXTURE_WORKER" > "$tmp/refused" 2>&1; then exit 1; fi
 grep -q 'already has a worker record' "$tmp/refused"
