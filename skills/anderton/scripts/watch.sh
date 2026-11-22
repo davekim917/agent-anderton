@@ -234,6 +234,11 @@ commit_probe() {
   probe_run=""
 }
 
+owns_codex_workers() { # true when this holder owns a Codex worker; a holder with no Codex record anywhere reads none
+  grep -qE '"provider"[[:space:]]*:[[:space:]]*"codex"' "$holders"/workers/*.json 2>/dev/null &&
+    [ -n "$(cd "$cwd" && "$scripts/waiting.sh" --codex-workers)" ]
+}
+
 probe_last() {
   local last
   last=$(cat "$1/last" 2>/dev/null)
@@ -248,14 +253,15 @@ while is_holder "$reg" "$record"; do
   now=$(cd "$cwd" 2>/dev/null && "$(dirname "$0")/waiting.sh" --blocked 2>/dev/null | grep '^=== ')
   new=$(printf '%s\n' "$now" | grep -vxF -f "$reported" | grep .)
   probe_news="" probe_alert="" probe_run=""
-  # A reporting probe ends this watch. Give the least recently run probe the first chance to wake it.
+  # A reporting probe ends this watch. Give the least recently run probe the first chance to wake it. A session already
+  # blocked is told now: a probe can run for minutes, and the next watch runs the probes this one skipped.
   sources=(codex custom)
   if [ "$(probe_last "$holders/$key.probe")" -lt "$(probe_last "$holders/$key.codex-probe")" ]; then
     sources=(custom codex)
   fi
-  for source in "${sources[@]}"; do
+  [ -z "$new" ] || sources=()
+  for source in ${sources[@]+"${sources[@]}"}; do
     if [ "$source" = codex ]; then
-      [ -n "$(cd "$cwd" && "$scripts/waiting.sh" --codex-workers)" ] || continue
       probe=$codex_probe every=${tick%%.*} probe_dir="$holders/$key.codex-probe"
     else
       probe=$(jq -r '.probe.command // empty' "$record" 2>/dev/null)
@@ -265,7 +271,7 @@ while is_holder "$reg" "$record"; do
     fi
     last=$(probe_last "$probe_dir")
     # The interval holds across watches, so a busy source wakes the holder at most once per interval.
-    if [ "$(( $(date +%s) - last ))" -ge "${every:-60}" ]; then
+    if [ "$(( $(date +%s) - last ))" -ge "${every:-60}" ] && { [ "$source" != codex ] || owns_codex_workers; }; then
       run_probe "$probe"
       # A run can take minutes: what it found is this holder's to hear only if the role and the watch are still its.
       if ! is_holder "$reg" "$record" || [ "$(watch_owner)" != "$$" ] || orphaned "$$" "$PPID"; then

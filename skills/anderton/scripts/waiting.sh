@@ -45,21 +45,30 @@ $records
 EOF
 fi
 answering_role() { # answering_role <name> <cwd> [session id] [pid] [start]: the record of the role that answers for it
-  local spawner r hp w
+  # The spawner is the role held by the session that started it (a rename keeps the session), else by a session of
+  # its name (/clear keeps the name). Records written before spawnerSession have only the name.
+  local spawner spawner_session r hp w by
   w=$(worker_record "$@")
   [ -n "$w" ] || return 0
   spawner=$(jq -r '.spawner // empty' "$w" 2>/dev/null || true)
-  while IFS= read -r r; do
-    if [ -z "$r" ] || [ "$r" = "$project" ] || [ -z "$spawner" ]; then continue; fi
-    hp=$(jq -r '.pid // empty' "$r" 2>/dev/null || true)
-    if [ -n "$hp" ] && [ "$(jq -r '.name // empty' "$sessions/$hp.json" 2>/dev/null || true)" = "$spawner" ] &&
-      is_holder "$sessions/$hp.json" "$r"; then
-      printf '%s\n' "$r"
-      return
-    fi
-  done <<EOF
+  spawner_session=$(jq -r '.spawnerSession // empty' "$w" 2>/dev/null || true)
+  for by in ${spawner_session:+session} ${spawner:+name}; do
+    while IFS= read -r r; do
+      if [ -z "$r" ] || [ "$r" = "$project" ]; then continue; fi
+      hp=$(jq -r '.pid // empty' "$r" 2>/dev/null || true)
+      [ -n "$hp" ] || continue
+      case $by in
+        session) [ "$(jq -r '.sessionId // empty' "$r" 2>/dev/null || true)" = "$spawner_session" ] ;;
+        name) [ "$(jq -r '.name // empty' "$sessions/$hp.json" 2>/dev/null || true)" = "$spawner" ] ;;
+      esac || continue
+      if is_holder "$sessions/$hp.json" "$r"; then
+        printf '%s\n' "$r"
+        return
+      fi
+    done <<EOF
 $records
 EOF
+  done
   printf '%s\n' "$project"
 }
 held_by() { # held_by <session id>: true when an Anderton's record names that session
@@ -341,11 +350,12 @@ EOF
     fi
     [ -n "$why" ] || continue
     if [ -d "$dir" ]; then
-      if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]; then
-        why="$why, but has uncommitted work"
-      elif [ -n "$(git -C "$dir" rev-list -1 HEAD --not --remotes "$(jq -r '.base // empty' "$r")" 2>/dev/null)" ]; then
-        why="$why, but has commits no remote branch has"
-      fi
+      case $(worktree_work "$dir" "$(jq -r '.base // empty' "$r")") in
+        uncommitted) why="$why, but has uncommitted work" ;;
+        unpushed) why="$why, but has commits no remote branch has" ;;
+        flagged) why="$why, but git marks files in it assume-unchanged or skip-worktree, so retire.sh will keep it" ;;
+        unreadable) why="$why, but git could not read its worktree, so retire.sh will keep it" ;;
+      esac
     fi
     lines="$lines- $name: $why
 "

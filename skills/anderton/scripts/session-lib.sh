@@ -269,6 +269,22 @@ is_worker() {
   [ -n "$(worker_record "$@")" ]
 }
 
+# What in worktree $1, started at commit $2, retire.sh must keep: prints uncommitted, flagged (files git marks
+# assume-unchanged or skip-worktree), unpushed (commits no remote branch has) or unreadable, or nothing. Untracked files
+# count whatever status.showUntrackedFiles says, since git worktree remove deletes the ones status leaves out, and a git
+# command that fails is never read as "nothing to keep".
+worktree_work() {
+  local out
+  out=$(git -C "$1" status --porcelain --untracked-files=normal 2>/dev/null) || { echo unreadable; return; }
+  if [ -n "$out" ]; then echo uncommitted; return; fi
+  # Status hides edits to a file tagged assume-unchanged (lower case in ls-files -v) or skip-worktree (S), and removal
+  # deletes them. Only the tags are read, never the paths, and every reader takes its whole input.
+  out=$(set -o pipefail; git -C "$1" ls-files -v 2>/dev/null | cut -c1 | LC_ALL=C sort -u) || { echo unreadable; return; }
+  case $out in *[abcdefghijklmnopqrstuvwxyzS]*) echo flagged; return ;; esac
+  out=$(git -C "$1" rev-list -1 HEAD --not --remotes "$2" 2>/dev/null) || { echo unreadable; return; }
+  if [ -n "$out" ]; then echo unpushed; fi
+}
+
 lock_codex_worker() {
   codex_worker_lock="$1.lock"
   if ! mkdir -- "$codex_worker_lock" 2>/dev/null; then
