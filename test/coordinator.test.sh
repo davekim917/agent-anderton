@@ -138,6 +138,7 @@ jq -nc '
   def event($id; $day; $text): {sessionId:"inherited",uuid:$id,type:"assistant",
     timestamp:("2030-01-0" + $day + "T01:00:00Z"),message:{stop_reason:"end_turn",content:[{type:"text",text:$text}]}};
   event("before-readoption";"1";"RESULT: historical fixture"),
+  event("earlier-current";"2";"Ordinary reply"),
   event("after-readoption";"3";"RESULT: inherited Claude fixture")' > "$inherited_transcript"
 bookmarks="${root_claim%.json}.codex-probe/bookmarks"
 mkdir -p "$bookmarks"
@@ -148,6 +149,9 @@ stop_input | claude_role env ANDERTON_WATCH_TICK=1 "$script/watch.sh" > "$tmp/wa
 grep -q 'RESULT: inherited Claude fixture' "$tmp/wake"
 if grep -q 'RESULT: historical fixture' "$tmp/wake"; then exit 1; fi
 grep -qx '"after-readoption"' "$bookmarks/claude-inherited.json"
+mkdir "$tmp/quiet-stage"
+claude_role env ANDERTON_PROBE_STATE="$bookmarks" ANDERTON_PROBE_STAGE="$tmp/quiet-stage" "$script/worker.sh" sweep > "$tmp/quiet-output"
+[ ! -s "$tmp/quiet-output" ] && [ ! -e "$tmp/quiet-stage/claude-inherited.json" ]
 
 sleep 60 &
 old_pid=$!

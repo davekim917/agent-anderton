@@ -59,10 +59,10 @@ def sweep(worker, replies):
         if event_id == checkpoint:
             passed_checkpoint = True
             continue
-        if timestamp and instant(timestamp) < started:
+        if not passed_checkpoint or (timestamp and instant(timestamp) < started):
             continue
         latest = event_id
-        if passed_checkpoint and REPORT.match(text):
+        if REPORT.match(text):
             print(f"{worker['name']} (Claude {identity['id']}) report:\n{text[:2000]}")
     if not passed_checkpoint:
         raise ValueError("Claude transcript no longer contains its report bookmark")
