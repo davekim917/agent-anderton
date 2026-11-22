@@ -251,6 +251,40 @@ class WorkerTest(unittest.TestCase):
         with patch.object(worker_api.time, "time", return_value=1000 + worker_api.BLOCK_REMINDER_SECONDS):
             self.assertIn("still waiting on approval", self.scan()[0])
 
+    def test_verifies_a_full_codex_thread_at_its_original_directory(self):
+        Path(self.worker["dir"]).mkdir()
+        self.assertEqual(self.worker["dir"], worker_api.thread_identity(self.client, self.worker["id"])["dir"])
+        self.client.info["parentThreadId"] = "another-thread"
+        with self.assertRaisesRegex(ValueError, "full session"):
+            worker_api.thread_identity(self.client, self.worker["id"])
+
+    def test_reconciles_a_notice_after_a_lost_queue_acknowledgment(self):
+        claim = {"sessionId": self.worker["id"], "dir": self.worker["dir"], "name": "fixture"}
+        notice = self.stage / "notice"
+        notice.mkdir()
+        (notice / "message").write_text("RESULT: fixture completed")
+        original = self.client.call
+        sent = []
+
+        def lost_ack(method, params):
+            if method == "thread/queue/add":
+                sent.append(params["clientUserMessageId"])
+                self.client.queue = [{"clientUserMessageId": sent[0]}]
+                raise TimeoutError("acknowledgment lost")
+            return original(method, params)
+
+        with patch.object(self.client, "call", side_effect=lost_ack):
+            with self.assertRaises(TimeoutError):
+                worker_api.deliver_notice(self.client, claim, notice)
+            self.assertEqual(sent[0], json.loads((notice / "receipt.json").read_text())["id"])
+            self.assertFalse(worker_api.deliver_notice(self.client, claim, notice))
+            self.client.queue = []
+            self.client.turns = [{"id": "completed-notice", "status": "completed"}]
+            self.client.items["completed-notice"] = [user_message("RESULT: fixture completed")]
+            self.client.items["completed-notice"][0]["item"]["clientId"] = sent[0]
+            self.assertTrue(worker_api.deliver_notice(self.client, claim, notice))
+        self.assertEqual(1, len(sent))
+
 
 if __name__ == "__main__":
     unittest.main()

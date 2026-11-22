@@ -22,6 +22,8 @@ jobs:
         run: /bin/bash test/structure.test.sh
       - name: Scripts
         run: /bin/bash test/scripts.test.sh
+      - name: Mixed-provider coordination
+        run: /bin/bash test/coordinator.test.sh
       - name: Codex worker reports
         run: python3 -B test/codex.test.py
       - name: shellcheck

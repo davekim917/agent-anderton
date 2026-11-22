@@ -11,13 +11,8 @@ set -euo pipefail
 . "$(dirname "$0")/session-lib.sh"
 
 require_tools spawn.sh
-command -v claude >/dev/null 2>&1 || {
-  echo "spawn.sh needs the claude CLI on PATH." >&2
-  exit 1
-}
-
 usage="usage: spawn.sh --effort low|medium|high|xhigh|max [--provider claude|codex] [--bg (not inside herdr)] [--model M] [--mode MODE] [--base REF] <name: a-z 0-9 -> [brief-file]"
-model="" effort="" mode="" base="" launcher="" provider=claude codex_home="" baseline="" launch_token=""
+model="" effort="" mode="" base="" launcher="" provider="" codex_home="" baseline="" launch_token=""
 while [ $# -gt 0 ]; do
   case $1 in
     --bg) launcher="bg"; shift ;;
@@ -36,10 +31,21 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
+root=$(invoking_root)
+caller_provider=$(invoking_provider)
+role=$(caller_claim "$root")
+main=$(holder_record "$root")
+if [ -z "$provider" ]; then
+  if [ -n "$main" ]; then provider=$(record_provider "$main"); else provider=claude; fi
+fi
 case $provider in
   claude | codex) ;;
   *) echo "$usage" >&2; exit 2 ;;
 esac
+if [ "$provider" = claude ] && ! command -v claude >/dev/null 2>&1; then
+  echo "spawn.sh needs the claude CLI on PATH for a Claude worker." >&2
+  exit 1
+fi
 if [ "$provider" = codex ] && { [ "$launcher" = bg ] || [ -n "$mode" ]; }; then
   echo "Codex workers need a herdr tab or tmux window and use their own approval policy." >&2
   exit 2
@@ -59,7 +65,6 @@ if [ -n "${2:-}" ]; then brief=$(cat "$2"); else brief=$(cat); fi
 # --bg there is admitted only by the marker a failed herdr start of the same name leaves, and only once.
 herdr_failed="$holders/workers/$name.herdr-failed"
 # Resolved once, so the marker's project and the worker's are the same one.
-root=$(invoking_root)
 # Taken by renaming, so of two reruns only one gets it; it admits only a rerun from the same project within the hour.
 admitted=""
 if [ "$launcher" = bg ] && [ "${HERDR_ENV:-}" = 1 ] && mv "$herdr_failed" "$herdr_failed.$$" 2>/dev/null; then
@@ -117,39 +122,41 @@ if [ -z "$(printf '%s' "$brief" | tr -d '[:space:]')" ]; then
   exit 2
 fi
 
-sid="${CLAUDE_CODE_SESSION_ID:?not running inside a Claude Code session}"
-pid="${CLAUDE_PID:-$(session_pid "$sid")}"
-if [ -z "$pid" ]; then
-  echo "Cannot find the pid of session $sid under $sessions." >&2
-  exit 1
+sid=$(invoking_session)
+pid=$(invoking_pid)
+role_scope=""
+if [ -n "$role" ]; then role_scope=$(jq -r '.scope // empty' "$role"); fi
+if [ "$caller_provider" = codex ]; then
+  me=$(claim_name "${role:-/dev/null}")
+else
+  me=$(jq -r '.name // empty' "$sessions/$pid.json" 2>/dev/null || true)
 fi
-me=$(jq -r '.name // empty' "$sessions/$pid.json" 2>/dev/null || true)
 if [ -z "$me" ]; then
   echo "This session has no name for the worker to report to. Name it with /rename, then rerun." >&2
   exit 1
 fi
 
-if [ "$provider" = codex ]; then
-  claimed=""
-  while IFS= read -r r; do
-    if [ -n "$r" ] && is_holder "$sessions/$pid.json" "$r"; then claimed=1; break; fi
-  done <<EOF
-$(project_holders "$root")
-EOF
-  if [ -z "$claimed" ]; then
-    echo "Only the Anderton holding this repository or project can start a Codex worker." >&2
-    exit 1
-  fi
+if [ -z "$role" ] && { [ "$provider" = codex ] || [ "$caller_provider" = codex ]; }; then
+  echo "Only the Anderton holding this repository or project can start this worker." >&2
+  exit 1
 fi
 
 # A peer in another permission mode holds this session's messages for its user's approval, so the worker
 # runs in this session's mode, which its transcript records on each prompt.
-if [ "$provider" = claude ] && [ -z "$mode" ]; then
+if [ "$provider" = claude ] && [ -z "$mode" ] && [ "$caller_provider" = codex ]; then
+  mode=default
+elif [ "$provider" = claude ] && [ -z "$mode" ]; then
   for t in "$home"/projects/*/"$sid".jsonl; do
     [ -e "$t" ] || continue
     mode=$(tail -n 2000 "$t" | jq -r 'select(.permissionMode != null) | .permissionMode' 2>/dev/null | tail -n 1)
     break
   done
+fi
+if [ "$provider" = claude ] && [ "$caller_provider" = codex ]; then
+  case $mode in
+    default | acceptEdits | plan) ;;
+    *) echo "Claude workers under Codex use default, acceptEdits, or plan permission mode." >&2; exit 2 ;;
+  esac
 fi
 if [ "$provider" = claude ] && [ -z "$mode" ]; then
   echo "Cannot read this session's permission mode from its transcript; pass --mode." >&2
@@ -165,7 +172,8 @@ if ! (set -C && : > "$record") 2>/dev/null; then
 fi
 reserved=1
 trap '[ -z "$reserved" ] || rm -f "$record"' EXIT
-if claude agents --json 2>/dev/null | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null; then
+if command -v claude >/dev/null 2>&1 &&
+  claude agents --json 2>/dev/null | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null; then
   echo "A live session is already named '$name'; pick another name." >&2
   exit 1
 fi
@@ -197,7 +205,7 @@ fi
 
 report_instructions="- Message \"$me\" by SendMessage"
 report_footer="  Never send acknowledgements, \"still waiting\" or \"holding\", restated instructions, or FYIs that change nothing: each message wakes \"$me\" and re-reads its whole context. A hook holds any message to \"$me\" without one of those four kinds, or one that repeats your last. Nobody reads this session, so a question left only in your reply is never answered."
-if [ "$provider" = codex ]; then
+if [ "$provider" = codex ] || [ "$caller_provider" = codex ]; then
   report_instructions="- Put each milestone in your final reply. Anderton reads those replies"
   report_footer="  Skip acknowledgements, \"still waiting\" or \"holding\", restated instructions, and repeated reports. Each report wakes \"$me\"."
 fi
@@ -215,20 +223,29 @@ $report_footer
 - Do not deploy, restart a service, or message anyone off this machine unless the task says to; \"$me\" owns those."
 
 write_record() {
+  local updated
+  updated=$(mktemp "$record.XXXXXX")
   jq -nc --arg name "$name" --arg launcher "$launcher" --arg id "$id" --arg tab "$tab" --arg dir "$dir" --arg root "$root" \
     --arg socket "$socket" --arg server "$server" --arg base "$base" --arg spawner "$me" --arg label "$label" --argjson worktree "$worktree" \
-    --arg pane "$pane" --arg spawner_session "$sid" \
+    --arg pane "$pane" --arg spawner_session "$sid" --arg spawner_provider "$caller_provider" \
+    --arg spawner_scope "$role_scope" --arg role "$role" \
     --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg provider "$provider" --arg codex "$codex_home" --arg baseline "$baseline" --arg token "$launch_token" \
     '{name: $name, launcher: $launcher, id: $id, tab: $tab, socket: $socket, server: $server, dir: $dir, root: $root,
       base: $base, worktree: $worktree, spawner: $spawner, spawnerSession: $spawner_session, label: $label, startedAt: $at}
       + if $pane != "" then {pane: $pane} else {} end
-      + if $provider == "codex" then {provider: $provider, codexHome: $codex, codexBaseline: $baseline, codexLaunchToken: $token} else {} end' >| "$record"
+      + if $role != "" then {spawnerProvider: $spawner_provider, spawnerScope: (if $spawner_scope == "" then null else $spawner_scope end)} else {} end
+      + if $provider == "codex" then {provider: $provider, codexHome: $codex, codexBaseline: $baseline, codexLaunchToken: $token} else {} end' > "$updated"
+  mv -f "$updated" "$record"
   reserved=""
 }
 
 failed() {
   [ -z "${1:-}" ] || echo "$1" >&2
-  if [ "$worktree" = true ]; then git -C "$root" worktree remove --force "$dir"; fi
+  if [ "$worktree" = true ] && { [ -n "$(worktree_work "$dir" "$base")" ] || ! git -C "$root" worktree remove "$dir"; }; then
+    write_record
+    echo "Kept $dir and its worker record because Git could not safely remove it." >&2
+    exit 1
+  fi
   rm -f "$record"
   # Written last, once the name is released, so a rerun it admits can reserve the name.
   if [ "$provider" = claude ] && [ "$launcher" = herdr ] && printf '%s %s\n' "$(date +%s)" "$root" 2>/dev/null >"$herdr_failed"; then
@@ -240,16 +257,13 @@ failed() {
 # A named project's Anderton puts its own name on its workers' tabs, so the user can tell whose they are. herdr and
 # tmux report a label as one whitespace-free field, so the name is folded to a-z, 0-9 and hyphens.
 label=$name
-while IFS= read -r r; do
-  if [ -n "$r" ] && [ -n "$(jq -r '.scope // empty' "$r" 2>/dev/null)" ] && is_holder "$sessions/$pid.json" "$r"; then
-    label="$(printf '%s' "$me" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9-' '-' | sed 's/^-*//; s/-*$//')/$name"
-  fi
-done <<EOF
-$(project_holders "$root")
-EOF
+if [ -n "$role_scope" ]; then
+  label="$(printf '%s' "$me" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9-' '-' | sed 's/^-*//; s/-*$//')/$name"
+fi
 
 config_env="CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-}"
 provider_name="Claude Code"
+id="" tab="" pane="" socket="" server=""
 if [ "$provider" = codex ]; then
   provider_name=Codex
   codex_worker="$(dirname "$0")/codex-worker.py"
@@ -267,9 +281,11 @@ $brief"
   if [ -n "$model" ]; then set -- "$@" -m "$model"; fi
 else
   set -- -n "$name" --permission-mode "$mode" --effort "$effort" --model "${model:-opus}"
+  if [ "$caller_provider" = codex ]; then
+    set -- "$@" --plugin-dir "$(cd "$anderton_scripts/../../.." && pwd)"
+  fi
 fi
 # A tab or window id is unique only within its server, so the record keeps which server it was opened in.
-id="" tab="" pane="" socket="" server=""
 if [ "$launcher" = herdr ]; then
   socket="${HERDR_SOCKET_PATH:-}"
   # A tab's or window's process takes its environment from its multiplexer, not from this script: a non-default
@@ -343,12 +359,21 @@ elif [ "$launcher" = tmux ]; then
   [ "$provider" = codex ] || [ -n "$listed" ] ||
     echo "Worker '$name' has not registered yet: it may be waiting at a startup prompt in its window." >&2
 else
+  if [ "$caller_provider" = codex ]; then write_record; fi
   out=$(cd "$dir" && claude --bg "$@" "$brief" 2>&1) || failed "$out"
   # `claude stop` and `claude rm` take the session's id, not its name.
   id=$(claude agents --json 2>/dev/null | jq -r --arg n "$name" 'first(.[] | select(.name == $n) | .id) // empty' 2>/dev/null || true)
   [ -n "$id" ] || id=$(printf '%s\n' "$out" | sed -n 's/^backgrounded · \([0-9a-f]*\) · .*/\1/p' | head -n 1)
   printf '%s\n' "$out"
   where="the background (${id:-id unknown})"
+  if [ "$caller_provider" = codex ]; then
+    lock_worker "$record"
+    updated=$(mktemp "$record.XXXXXX")
+    jq --arg id "$id" '.id = $id' "$record" > "$updated"
+    mv -f "$updated" "$record"
+  else
+    write_record
+  fi
 fi
 
 if [ "$provider" = codex ]; then
@@ -367,6 +392,10 @@ if [ "$provider" = codex ]; then
     echo "Codex worker '$name' has no verified thread ID. Inspect $where for a startup prompt; the tab and worktree were kept." >&2
     exit 1
   fi
+  lock_worker "$record"
+  updated=$(mktemp "$record.XXXXXX")
+  jq -e --arg id "$id" --arg launch "$launch_token" '
+    select(.codexLaunchToken == $launch and (.id == "" or .id == $id)) | .id = $id' "$record" > "$updated"
+  mv -f "$updated" "$record"
 fi
-write_record
 echo "Started worker '$name' in $where, in $dir ($mode). It reports to '$me'."

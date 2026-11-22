@@ -9,51 +9,153 @@
 # shellcheck source=SCRIPTDIR/session-lib.sh
 . "$(dirname "$0")/session-lib.sh"
 
-input=$(cat)
-sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
-cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null) || exit 0
-if [ -z "$sid" ] || [ -z "$cwd" ]; then exit 0; fi
-
-# The registry, not the record, says which session the holder's process runs now: /clear gives it a new id.
-record="" pid="" reg=""
-while IFS= read -r r; do
-  [ -n "$r" ] || continue
-  p=$(jq -r '.pid // empty' "$r" 2>/dev/null)
-  [ -n "$p" ] || continue
-  if [ "$(jq -r '.sessionId // empty' "$sessions/$p.json" 2>/dev/null)" = "$sid" ] && is_holder "$sessions/$p.json" "$r"; then
-    record=$r pid=$p reg="$sessions/$p.json"
-    break
-  fi
-done <<EOF
-$(project_holders "$(project_root "$cwd")")
-EOF
-# The record follows the session, not only its process: after /clear the process has a new session id,
-# and after a resume or restart the session has a new process or start time. claim.sh --rebind brings
-# the record up to date under the claim lock, and never takes a role from a live holder or another session.
-rebind() { # rebind <record>: as this session; true once this session's process holds it
-  local p scope args
-  p=$(session_pid "$sid")
-  [ -n "$p" ] || return 1
-  scope=$(jq -r '.scope // empty' "$1" 2>/dev/null) || return 1
-  args=(--rebind)
-  if [ -n "$scope" ]; then args+=(--project "$scope"); fi
-  (cd "$cwd" && CLAUDE_CODE_SESSION_ID="$sid" CLAUDE_PID="$p" "$(dirname "$0")/claim.sh" "${args[@]}") >/dev/null 2>&1 &&
-    is_holder "$sessions/$p.json" "$1" && record=$1 pid=$p reg="$sessions/$p.json"
+claude_direction_unreceived() {
+  local status=0
+  "$anderton_scripts/claude-worker.py" acknowledged "$1" || status=$?
+  [ "$status" = 3 ]
 }
-if [ -n "$record" ]; then
-  if [ "$(jq -r '.sessionId // empty' "$record" 2>/dev/null)" != "$sid" ]; then rebind "$record" || true; fi
+
+take_claude_worker_watch() {
+  local previous process start
+  claude_worker_watch="$1"
+  claude_worker_watch_key="$$ $(proc_start "$$")"
+  if ! (set -C; printf '%s\n' "$claude_worker_watch_key" > "$claude_worker_watch") 2>/dev/null; then
+    previous=$(cat "$claude_worker_watch" 2>/dev/null) || return 1
+    read -r process start <<< "$previous"
+    if [ -n "$start" ] && [ "$(proc_start "$process")" = "$start" ]; then return 1; fi
+    [ "$(cat "$claude_worker_watch" 2>/dev/null)" = "$previous" ] || return 1
+    rm -f "$claude_worker_watch"
+    (set -C; printf '%s\n' "$claude_worker_watch_key" > "$claude_worker_watch") 2>/dev/null || return 1
+  fi
+  trap '[ "$(cat "$claude_worker_watch" 2>/dev/null)" != "$claude_worker_watch_key" ] || rm -f "$claude_worker_watch"' EXIT
+}
+
+watch_claude_worker() {
+  local worker owner transcript target updated pending tick worker_sid worker_pid worker_reg now
+  worker_sid=$sid
+  worker_pid=$(session_pid "$worker_sid")
+  [ -n "$worker_pid" ] || return 0
+  worker_reg="$sessions/$worker_pid.json"
+  target=$(jq -r '.name // empty' "$worker_reg") || return 0
+  transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty') || return 0
+  case $transcript in "$home"/projects/*/"$worker_sid.jsonl") ;; *) return 0 ;; esac
+  case $worker_sid in '' | *[!a-zA-Z0-9-]*) return 0 ;; esac
+  worker=$(worker_record "$target" "$cwd" "$worker_sid" "$worker_pid" "$(jq -r '.startedAt // empty | floor' "$worker_reg")")
+  [ -n "$worker" ] && [ "$(record_provider "$worker")" = claude ] || return 0
+  owner=$(answering_claim "$worker" "$(project_root "$cwd")")
+  [ -n "$owner" ] && [ "$(record_provider "$owner")" = codex ] || return 0
+  [ "$(live_claude_worker "$worker")" = "$worker_reg" ] || return 0
+  take_claude_worker_watch "${worker%.json}.$worker_sid.watch" || return 0
+  # Only the Stop hook in this exact session can register the native transcript.
+  (
+    lock_worker "$worker" || exit 1
+    [ "$(live_claude_worker "$worker")" = "$worker_reg" ] || exit 1
+    updated=$(mktemp "$worker.XXXXXX") || exit 1
+    jq --arg sid "$worker_sid" --arg file "$transcript" '
+      .claudeSession = {id: $sid, transcript: $file}
+      | if .claudeDirection != null and .claudeDirection.target != $sid then del(.claudeDirection) else . end
+      ' "$worker" > "$updated" && mv -f "$updated" "$worker"
+  ) || return 0
+  tick=${ANDERTON_WATCH_TICK:-30}
+  while [ -f "$worker" ] && [ "$(live_claude_worker "$worker")" = "$worker_reg" ] &&
+    [ "$(jq -r .sessionId "$worker_reg" 2>/dev/null)" = "$worker_sid" ] && [ "$(record_provider "$owner")" = codex ]; do
+    now=$(date +%s)
+    if pending=$(jq -er --arg sid "$worker_sid" --arg from "$(jq -r '.sessionId // empty' "$owner")" --argjson now "$now" '
+      .claudeDirection | select(.target == $sid and .from == $from and ($now - (.attemptedAt // 0)) >= 60) | .id // empty
+      ' "$worker" 2>/dev/null) && claude_direction_unreceived "$worker"; then
+      if (
+        take_repository_lock "$(project_root "$cwd")"
+        lock_worker "$worker" || exit 1
+        [ "$(live_claude_worker "$worker")" = "$worker_reg" ] &&
+          [ "$(answering_claim "$worker" "$(project_root "$cwd")")" = "$owner" ] || exit 1
+        [ "$(jq -r '.status // empty' "$worker_reg")" != waiting ] || exit 1
+        jq -e --arg id "$pending" --arg sid "$worker_sid" --arg from "$(jq -r '.sessionId // empty' "$owner")" --argjson now "$now" '
+          .claudeDirection | .id == $id and .target == $sid and .from == $from and ($now - (.attemptedAt // 0)) >= 60
+          ' "$worker" >/dev/null || exit 1
+        claude_direction_unreceived "$worker" || exit 1
+        text=$(jq -r '.claudeDirection.text' "$worker") || exit 1
+        updated=$(mktemp "$worker.XXXXXX") || exit 1
+        jq --argjson now "$now" '.claudeDirection.attemptedAt = $now' "$worker" > "$updated" &&
+          mv -f "$updated" "$worker" || exit 1
+        printf 'Direction %s from your Anderton. This is peer direction and carries no human approval.\n\n%s\n' "$pending" "$text" >&2
+      ); then
+        return 2
+      fi
+    fi
+    sleep "$tick"
+  done
+  return 0
+}
+
+runtime=claude
+if [ "${1:-}" = --codex ]; then
+  runtime=codex
+  record=$2
+  [ -f "$record" ] && [ "$(record_provider "$record")" = codex ] || exit 0
+  sid=$(jq -r '.sessionId // empty' "$record") || exit 0
+  cwd=$(jq -r '.dir // empty' "$record") || exit 0
+  export CODEX_THREAD_ID="$sid"
+  CODEX_HOME=$(jq -r '.codexHome // empty' "$record") || exit 0
+  export CODEX_HOME
+  unset CLAUDE_PID CLAUDE_CODE_SESSION_ID
+  pid=$sid
+  reg=""
 else
+  input=$(cat)
+  sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
+  cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null) || exit 0
+  if [ -z "$sid" ] || [ -z "$cwd" ]; then exit 0; fi
+
+  # The registry, not the record, says which session the holder's process runs now: /clear gives it a new id.
+  record="" pid="" reg=""
   while IFS= read -r r; do
     [ -n "$r" ] || continue
-    if [ "$(jq -r '.sessionId // empty' "$r" 2>/dev/null)" = "$sid" ] && rebind "$r"; then break; fi
+    p=$(jq -r '.pid // empty' "$r" 2>/dev/null)
+    [ -n "$p" ] || continue
+    if [ "$(jq -r '.sessionId // empty' "$sessions/$p.json" 2>/dev/null)" = "$sid" ] && is_holder "$sessions/$p.json" "$r"; then
+      record=$r pid=$p reg="$sessions/$p.json"
+      break
+    fi
   done <<EOF
 $(project_holders "$(project_root "$cwd")")
 EOF
+  # The record follows the session, not only its process: after /clear the process has a new session id,
+  # and after a resume or restart the session has a new process or start time. claim.sh --rebind brings
+  # the record up to date under the claim lock, and never takes a role from a live holder or another session.
+  rebind() { # rebind <record>: as this session; true once this session's process holds it
+    local p scope args
+    p=$(session_pid "$sid")
+    [ -n "$p" ] || return 1
+    scope=$(jq -r '.scope // empty' "$1" 2>/dev/null) || return 1
+    args=(--rebind)
+    if [ -n "$scope" ]; then args+=(--project "$scope"); fi
+    (cd "$cwd" && CLAUDE_CODE_SESSION_ID="$sid" CLAUDE_PID="$p" "$(dirname "$0")/claim.sh" "${args[@]}") >/dev/null 2>&1 &&
+      is_holder "$sessions/$p.json" "$1" && record=$1 pid=$p reg="$sessions/$p.json"
+  }
+  if [ -n "$record" ]; then
+    if [ "$(jq -r '.sessionId // empty' "$record" 2>/dev/null)" != "$sid" ]; then rebind "$record" || true; fi
+  else
+    while IFS= read -r r; do
+      [ -n "$r" ] || continue
+      if [ "$(jq -r '.sessionId // empty' "$r" 2>/dev/null)" = "$sid" ] && rebind "$r"; then break; fi
+    done <<EOF
+$(project_holders "$(project_root "$cwd")")
+EOF
+  fi
+  if [ -z "$record" ]; then
+    watch_claude_worker
+    exit $?
+  fi
 fi
-[ -n "$record" ] || exit 0
+still_holds_role() {
+  if [ "$runtime" = codex ]; then caller_matches_claim "$record"; else is_holder "$reg" "$record"; fi
+}
 
 key=$(basename "$record" .json)
 watcher="$holders/$key.watch"
+parent_pid=$PPID
+[ "$runtime" = claude ] || parent_pid=0
+pending="$holders/$key.$pid.pending"
 # Per holder: an earlier holder's last pass must not record a block this holder has not heard about.
 reported="$holders/$key.$pid.reported"
 reported_keep=200
@@ -64,13 +166,15 @@ limit=$(jq -r '.hooks.Stop[0].hooks[0].timeout // empty' "$(dirname "$0")/../../
 case $limit in '' | *[!0-9]*) limit=1209600 ;; esac
 renew=${ANDERTON_WATCH_RENEW:-$((limit - 86400))}
 started=$(date +%s)
+last_liveness_check=0
 mkdir -p "$holders" 2>/dev/null || exit 0
 [ -w "$holders" ] || exit 0
-take_watch() { (set -C; printf '%s %s %s\n' "$$" "$pid" "$PPID" > "$watcher") 2>/dev/null; }
+take_watch() { (set -C; printf '%s %s %s\n' "$$" "$pid" "$parent_pid" > "$watcher") 2>/dev/null; }
 watch_owner() { local p=""; { read -r p _ < "$watcher"; } 2>/dev/null; printf '%s' "$p"; }
 # Claude Code hears a hook's exit through the process that started it, so a watch that lost that process wakes no one.
 orphaned() { # orphaned <pid> <the parent it started under>
   local now
+  [ "$2" != 0 ] || return 1
   now=$(ps -o ppid= -p "$1" 2>/dev/null)
   [ -n "$now" ] && [ "$now" -ne "$2" ]
 }
@@ -80,7 +184,7 @@ same_script() { # same_script <command line>: true when it runs this watch.sh, f
   return 1
 }
 until take_watch; do
-  is_holder "$reg" "$record" || exit 0
+  still_holds_role || exit 0
   other=""; owner=""; parent=""
   { read -r other owner parent < "$watcher"; } 2>/dev/null
   # -ww: ps cuts its output at COLUMNS even into a pipe, and a cut path makes a live watch look dead.
@@ -115,7 +219,7 @@ trap '[ -z "$probe_pid" ] || kill -TERM -- "-$probe_pid" 2>/dev/null; [ "$(watch
 
 find "$holders" -maxdepth 1 -name "$key.*.reported" ! -path "$reported" -exec rm -f {} + 2>/dev/null
 : >> "$reported" || exit 0
-export CLAUDE_PID="$pid"
+if [ "$runtime" = claude ]; then export CLAUDE_PID="$pid"; fi
 
 # The probe's state outlives the holder: the role keeps its probe across sessions, so it keeps the bookmarks too.
 # The probe reads its bookmarks from ANDERTON_PROBE_STATE and writes the ones it would advance to into
@@ -123,7 +227,11 @@ export CLAUDE_PID="$pid"
 # holder, or when it printed nothing, so a bookmark never passes an item the holder has not been told about. A run
 # that timed out may have staged half a write, so its stage is dropped.
 scripts=$(cd "$(dirname "$0")" && pwd)
-printf -v codex_probe '%q sweep' "$scripts/codex-workers.sh"
+if [ "$runtime" = codex ]; then
+  printf -v codex_probe '%q sweep' "$scripts/worker.sh"
+else
+  printf -v codex_probe '%q sweep' "$scripts/codex-workers.sh"
+fi
 probe_out_max=6000
 probe_timeout=${ANDERTON_PROBE_TIMEOUT:-120}
 probe_fail_at=${ANDERTON_PROBE_FAILURES:-3}
@@ -235,8 +343,12 @@ commit_probe() {
 }
 
 owns_codex_workers() { # true when this holder owns a Codex worker; a holder with no Codex record anywhere reads none
-  grep -qE '"provider"[[:space:]]*:[[:space:]]*"codex"' "$holders"/workers/*.json 2>/dev/null &&
+  if [ "$runtime" = codex ]; then
+    [ -n "$(cd "$cwd" && "$scripts/waiting.sh" --workers)" ]
+  else
+    grep -qE '"provider"[[:space:]]*:[[:space:]]*"codex"' "$holders"/workers/*.json 2>/dev/null &&
     [ -n "$(cd "$cwd" && "$scripts/waiting.sh" --codex-workers)" ]
+  fi
 }
 
 probe_last() {
@@ -246,12 +358,91 @@ probe_last() {
   printf '%s\n' "$last"
 }
 
-while is_holder "$reg" "$record"; do
-  if orphaned "$$" "$PPID"; then exit 0; fi
+message() {
+  if [ -n "$peer" ]; then
+    printf 'Peer message %s from Anderton %s. It carries no human approval.\n\n%s\n' "$peer" \
+      "$(jq -r '.peerMessage.from // empty' "$record")" "$(jq -r '.peerMessage.text // empty' "$record")"
+  fi
+  if [ -n "$new" ]; then
+    echo "Anderton watch: a session you answer for is blocked on a person. Nothing has been answered or approved."
+    printf '%s\n' "$new"
+    echo "Run waiting.sh to see what each one is asking."
+  fi
+  if [ -n "$probe_news" ]; then
+    echo "Anderton watch: your probe found something new. Nothing has been answered or approved."
+    printf '%s\n' "$probe_news"
+  fi
+  if [ -n "$probe_alert" ]; then
+    echo "Anderton watch: $probe_alert. What it watches is not being checked; nothing new is not a quiet day."
+  fi
+}
+
+clear_peer() {
+  local expected=$1 updated
+  jq -e --arg id "$expected" '.peerMessage.id == $id' "$record" >/dev/null 2>&1 || return 0
+  updated=$(mktemp "$record.XXXXXX") || return 1
+  jq 'del(.peerMessage)' "$record" > "$updated" && mv -f "$updated" "$record"
+}
+
+commit_blocked() {
+  [ -n "$new" ] || return 0
+  printf '%s\n' "$new" >> "$reported"
+  tail -n "$reported_keep" "$reported" > "$reported.tmp" && mv "$reported.tmp" "$reported"
+}
+
+stage_delivery() {
+  local staged
+  staged=$(mktemp -d "$holders/.notice.XXXXXX") || return 1
+  message > "$staged/message"
+  printf '%s' "$peer" > "$staged/peer"
+  printf '%s' "$new" > "$staged/blocked"
+  if [ -n "$probe_run" ]; then
+    printf '%s' "$probe_dir" > "$staged/probe-dir"
+    printf '%s' "$probe_news" > "$staged/news"
+    printf '%s' "$probe_alert" > "$staged/alert"
+    printf '%s' "$probe_why" > "$staged/why"
+    printf '%s' "$probe_commit" > "$staged/commit"
+    mv "$probe_run" "$staged/probe" || return 1
+  fi
+  mv "$staged" "$pending"
+}
+
+deliver_pending() {
+  (
+    take_repository_lock "$(project_root "$cwd")"
+    still_holds_role && "$scripts/codex-worker.py" notice "$record" "$pending" || exit 1
+    if [ -s "$pending/peer" ]; then clear_peer "$(cat "$pending/peer")"; fi
+  ) || return 1
+  new=$(cat "$pending/blocked")
+  commit_blocked || return 1
+  if [ -d "$pending/probe" ]; then
+    probe_run="$pending/probe"
+    probe_dir=$(cat "$pending/probe-dir")
+    probe_news=$(cat "$pending/news")
+    probe_alert=$(cat "$pending/alert")
+    probe_why=$(cat "$pending/why")
+    probe_commit=$(cat "$pending/commit")
+    commit_probe
+  fi
+  rm -rf "$pending"
+}
+
+while still_holds_role; do
+  if orphaned "$$" "$parent_pid"; then exit 0; fi
+  if [ "$runtime" = codex ] && [ "$(( $(date +%s) - last_liveness_check ))" -ge 60 ]; then
+    last_liveness_check=$(date +%s)
+    if [ "$(claim_state "$record")" = gone ]; then exit 0; fi
+  fi
   # Only the lock's owner watches: a watch that lost it leaves, and one whose lock vanished takes it back.
   if [ "$(watch_owner)" != "$$" ] && ! take_watch; then exit 0; fi
+  if [ "$runtime" = codex ] && [ -d "$pending" ]; then
+    deliver_pending
+    sleep "$tick"
+    continue
+  fi
   now=$(cd "$cwd" 2>/dev/null && "$(dirname "$0")/waiting.sh" --blocked 2>/dev/null | grep '^=== ')
   new=$(printf '%s\n' "$now" | grep -vxF -f "$reported" | grep .)
+  peer=$(jq -r '.peerMessage.id // empty' "$record" 2>/dev/null)
   probe_news="" probe_alert="" probe_run=""
   # A reporting probe ends this watch. Give the least recently run probe the first chance to wake it. A session already
   # blocked is told now: a probe can run for minutes, and the next watch runs the probes this one skipped.
@@ -259,7 +450,7 @@ while is_holder "$reg" "$record"; do
   if [ "$(probe_last "$holders/$key.probe")" -lt "$(probe_last "$holders/$key.codex-probe")" ]; then
     sources=(custom codex)
   fi
-  [ -z "$new" ] || sources=()
+  [ -z "$new$peer" ] || sources=()
   for source in ${sources[@]+"${sources[@]}"}; do
     if [ "$source" = codex ]; then
       probe=$codex_probe every=${tick%%.*} probe_dir="$holders/$key.codex-probe"
@@ -274,7 +465,7 @@ while is_holder "$reg" "$record"; do
     if [ "$(( $(date +%s) - last ))" -ge "${every:-60}" ] && { [ "$source" != codex ] || owns_codex_workers; }; then
       run_probe "$probe"
       # A run can take minutes: what it found is this holder's to hear only if the role and the watch are still its.
-      if ! is_holder "$reg" "$record" || [ "$(watch_owner)" != "$$" ] || orphaned "$$" "$PPID"; then
+      if ! still_holds_role || [ "$(watch_owner)" != "$$" ] || orphaned "$$" "$parent_pid"; then
         rm -rf "$probe_run"
         exit 0
       fi
@@ -290,31 +481,26 @@ while is_holder "$reg" "$record"; do
       probe_run=""
     fi
   done
-  if [ -n "$new" ] || [ -n "$probe_news" ] || [ -n "$probe_alert" ]; then
-    if [ -n "$new" ]; then
-      # Append only, so a scan that misses a block cannot make it new again. A block that clears and returns has a
-      # new start time in its header, so it is still reported.
-      printf '%s\n' "$new" >> "$reported"
-      tail -n "$reported_keep" "$reported" > "$reported.tmp" && mv "$reported.tmp" "$reported"
+  if [ -n "$new$peer$probe_news$probe_alert" ]; then
+    if [ "$runtime" = codex ]; then
+      stage_delivery && deliver_pending
+    else
+      if [ -n "$peer" ]; then
+        (
+          take_repository_lock "$(project_root "$cwd")"
+          still_holds_role && [ "$(jq -r '.peerMessage.id // empty' "$record")" = "$peer" ] || exit 1
+          message >&2
+          clear_peer "$peer"
+        ) || exit 0
+      else
+        message >&2
+      fi
+      commit_blocked
+      commit_probe
+      exit 2
     fi
-    {
-      if [ -n "$new" ]; then
-        echo "Anderton watch: a session you answer for is blocked on a person. Nothing has been answered or approved."
-        printf '%s\n' "$new"
-        echo "Run waiting.sh to see what each one is asking."
-      fi
-      if [ -n "$probe_news" ]; then
-        echo "Anderton watch: your probe found something new. Nothing has been answered or approved."
-        printf '%s\n' "$probe_news"
-      fi
-      if [ -n "$probe_alert" ]; then
-        echo "Anderton watch: $probe_alert. What it watches is not being checked; nothing new is not a quiet day."
-      fi
-    } >&2
-    commit_probe
-    exit 2
   fi
-  if [ "$(( $(date +%s) - started ))" -ge "$renew" ]; then
+  if [ "$runtime" = claude ] && [ "$(( $(date +%s) - started ))" -ge "$renew" ]; then
     echo "Anderton watch: renewing before Claude Code's time limit on this watch. Nothing is new; end your turn and it starts again." >&2
     exit 2
   fi

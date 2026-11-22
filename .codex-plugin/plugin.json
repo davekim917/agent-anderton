@@ -1,0 +1,16 @@
+{
+  "name": "agent-anderton",
+  "description": "One repository coordinator to start and steer full Claude Code and Codex sessions, watch reports and blockers, and own deployment.",
+  "version": "0.1.0",
+  "author": {
+    "name": "David Kim"
+  },
+  "repository": "https://github.com/davekim917/agent-anderton",
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Agent Anderton",
+    "shortDescription": "Coordinate full Claude Code and Codex sessions",
+    "category": "Coding"
+  }
+}

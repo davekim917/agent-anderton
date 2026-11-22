@@ -39,8 +39,11 @@ if [ -z "$record" ]; then
 fi
 if [ "$action" = register ] || [ "$action" = message ]; then
   expected_thread=$(jq -r .id "$record")
-  lock_codex_worker "$record"
-  if ! jq -e --arg id "$expected_thread" '.provider == "codex" and .id == $id' "$record" >/dev/null; then
+  root=$(invoking_root)
+  take_repository_lock "$root"
+  lock_worker "$record"
+  if ! worker_belongs "$record" "$root" "$(caller_claim "$root")" ||
+    ! jq -e --arg id "$expected_thread" '.provider == "codex" and .id == $id' "$record" >/dev/null; then
     echo "Codex worker '$2' changed while acquiring its lock." >&2
     exit 1
   fi

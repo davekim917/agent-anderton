@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -168,6 +169,28 @@ def read_thread(client, worker):
     return info
 
 
+def thread_identity(client, thread_id):
+    if str(uuid.UUID(thread_id)) != thread_id:
+        raise ValueError("A canonical Codex thread UUID is required")
+    thread = client.call("thread/read", {"threadId": thread_id, "includeTurns": False})["thread"]
+    if (thread["id"] != thread_id or thread.get("parentThreadId") or thread.get("attachedToThreadId")
+            or thread.get("ephemeral") or thread.get("canAcceptDirectInput") is False):
+        raise ValueError("Expected the exact, addressable Codex thread of a full session")
+    directory = Path(thread["cwd"])
+    if not directory.is_absolute() or not directory.is_dir():
+        raise ValueError("The Codex thread's directory does not exist")
+    return {"id": thread_id, "dir": str(directory.resolve()), "name": thread.get("name") or thread_id}
+
+
+def archived(client, thread):
+    result = client.call("thread/list", {"archived": True, "includedThreadIds": [thread], "limit": 1})
+    return any(entry["id"] == thread for entry in result["data"])
+
+
+def claim_thread(claim):
+    return {"id": claim["sessionId"], "dir": claim["dir"], "name": claim["name"]}
+
+
 def has_message(client, thread, turn, marker, first_only=False):
     for entry in client.pages("thread/items/list", threadId=thread, turnId=turn, limit=10):
         item = entry["item"]
@@ -294,7 +317,7 @@ def queue_direction(client, record, worker, text):
         submitted = client.call("thread/queue/add", {
             "threadId": thread, "clientUserMessageId": token,
             "input": [{"type": "text", "text_elements": [], "text":
-                       "Direction from your Claude Code Anderton. Follow the existing approval policy.\n\n" + text}],
+                       "Direction from your Anderton. Follow the existing approval policy.\n\n" + text}],
         })["queuedSubmission"]
     except RequestRejected as error:
         # Protocol and request validation errors are returned before the queue is written.
@@ -310,6 +333,38 @@ def queue_direction(client, record, worker, text):
             print(f"Direction was queued. Could not resume worker: {error}", file=sys.stderr)
 
 
+def deliver_notice(client, claim, notice):
+    worker = claim_thread(claim)
+    thread = worker["id"]
+    info = read_thread(client, worker)
+    receipt_path = notice / "receipt.json"
+    if receipt_path.exists():
+        receipt = json.loads(receipt_path.read_text())
+        state = direction_seen(client, worker, receipt)
+        if state == "finished":
+            return True
+        if state == "pending":
+            if info["status"]["type"] == "notLoaded":
+                client.call("thread/resume", {"threadId": thread, "excludeTurns": True})
+            return False
+        if time.time() - receipt["sentAt"] < DIRECTION_LOST_AFTER_SECONDS:
+            return False
+    else:
+        turns = client.call("thread/turns/list", {
+            "threadId": thread, "limit": 1, "itemsView": "notLoaded",
+        })["data"]
+        receipt = {"id": str(uuid.uuid4()), "previousTurn": turns[0]["id"] if turns else None}
+    receipt["sentAt"] = int(time.time())
+    save_worker(receipt_path, receipt)
+    client.call("thread/queue/add", {
+        "threadId": thread, "clientUserMessageId": receipt["id"],
+        "input": [{"type": "text", "text_elements": [], "text": (notice / "message").read_text()}],
+    })
+    if info["status"]["type"] == "notLoaded":
+        client.call("thread/resume", {"threadId": thread, "excludeTurns": True})
+    return False
+
+
 def sweep_worker(worker, state_dir, stage_dir):
     thread = str(uuid.UUID(worker["id"]))
     name = worker["name"]
@@ -317,7 +372,7 @@ def sweep_worker(worker, state_dir, stage_dir):
         raise ValueError("Invalid worker name")
     bookmark = f"codex-{thread}.json"
     previous = state_dir / bookmark
-    state = json.loads(previous.read_text()) if previous.exists() else {}
+    state = json.loads(previous.read_text()) if previous.exists() else {"turn": worker.get("codexBaselineTurn")}
     events = []
     with Codex(Path(worker["codexHome"])) as client:
         info = read_thread(client, worker)
@@ -374,6 +429,18 @@ def main():
     endpoint.add_argument("--baseline", action="store_true")
     endpoint.add_argument("--after")
     find.add_argument("--token")
+    identity = commands.add_parser("identity")
+    identity.add_argument("home", type=Path)
+    identity.add_argument("thread")
+    identity.add_argument("--adopt", action="store_true")
+    claim_state = commands.add_parser("claim-state")
+    claim_state.add_argument("claim", type=Path)
+    notice = commands.add_parser("notice")
+    notice.add_argument("claim", type=Path)
+    notice.add_argument("notice", type=Path)
+    watch = commands.add_parser("start-watch")
+    watch.add_argument("script", type=Path)
+    watch.add_argument("claim", type=Path)
     for command in ("state", "inactive", "output", "message"):
         action = commands.add_parser(command)
         action.add_argument("record", type=Path)
@@ -383,7 +450,11 @@ def main():
     sweep.add_argument("records", nargs="+", type=Path)
     args = parser.parse_args()
 
-    if args.command == "find":
+    if args.command == "start-watch":
+        # The Codex command runner ends its tool's process group after the command returns.
+        subprocess.Popen([args.script, "--codex", args.claim], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif args.command == "find":
         directory = args.directory.resolve()
         with Codex(args.home) as client:
             if args.baseline:
@@ -397,6 +468,29 @@ def main():
         if thread is None:
             return 3
         print(thread)
+    elif args.command == "identity":
+        with Codex(args.home) as client:
+            info = thread_identity(client, args.thread)
+            if archived(client, info["id"]):
+                raise ValueError("The Codex thread is archived")
+            if args.adopt:
+                completed = next((turn for turn in client.pages("thread/turns/list", threadId=info["id"],
+                                  limit=10, itemsView="notLoaded") if turn["status"] != "inProgress"), None)
+                info["baseline"] = completed["id"] if completed else None
+            print(json.dumps(info))
+    elif args.command in {"claim-state", "notice"}:
+        claim = json.loads(args.claim.read_text())
+        with Codex(Path(claim["codexHome"])) as client:
+            worker = claim_thread(claim)
+            if archived(client, worker["id"]):
+                if args.command == "claim-state":
+                    print("gone")
+                    return 0
+                raise ValueError("The Codex coordinator thread is archived")
+            if args.command == "notice":
+                return 0 if deliver_notice(client, claim, args.notice) else 3
+            read_thread(client, worker)
+            print("live")
     elif args.command in {"state", "inactive", "output", "message"}:
         worker = json.loads(args.record.read_text())
         with Codex(Path(worker["codexHome"])) as client:
