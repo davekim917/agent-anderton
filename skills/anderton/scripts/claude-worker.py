@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read final reports from a registered Claude worker's native transcript."""
+"""Read milestone reports from a Claude worker's native transcript."""
 
 import argparse
 import datetime
@@ -11,6 +11,9 @@ import sys
 
 REPORT = re.compile(r"^(RESULT|QUESTION|BLOCKED|ANSWER):[ \t]*\S")
 
+def report_text(text):
+    return text.strip().lstrip(" \t*_#>`-")
+
 
 def transcript_events(worker):
     identity = worker.get("claudeSession") or {}
@@ -19,6 +22,8 @@ def transcript_events(worker):
     transcript = Path(identity["transcript"])
     if transcript.name != f"{identity['id']}.jsonl":
         raise ValueError("Claude worker's transcript identity changed")
+    if not transcript.exists():
+        return
     with transcript.open() as file:
         for line in file:
             try:
@@ -32,19 +37,100 @@ def transcript_events(worker):
             yield event
 
 
-def final_replies(worker):
-    for event in transcript_events(worker):
-        if event.get("type") != "assistant" or event.get("message", {}).get("stop_reason") != "end_turn":
-            continue
-        text = "\n".join(block["text"] for block in event["message"]["content"] if block["type"] == "text")
-        yield event["uuid"], event["timestamp"], text.strip()
-
-
 def instant(value):
     return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
 
+def legacy_launch_matches(worker):
+    if not worker.get("spawner"):
+        return False
+    brief = f'You are a worker the Anderton session "{worker["spawner"]}" started for the task above, in {worker["dir"]}.'
+    started = instant(worker["startedAt"])
+    # Older tmux launches wrote the record after starting the client in the new window.
+    if worker.get("launcher") == "tmux":
+        started -= datetime.timedelta(minutes=1)
+    for event in transcript_events(worker):
+        if event.get("type") != "user":
+            continue
+        content = event.get("message", {}).get("content")
+        if isinstance(content, str):
+            return (event.get("cwd") == worker["dir"] and instant(event["timestamp"]) >= started
+                    and brief in content.splitlines())
+    return False
 
-def sweep(worker, replies):
+
+def native_report_cutoff(worker, claim):
+    if claim.get("provider") != "codex" or worker.get("spawnerProvider", "claude") != "claude":
+        return None
+    previous = claim.get("claudeReportPreviousHolder") or {}
+    if "spawnerScope" in worker:
+        if worker["spawnerScope"] != claim.get("scope"):
+            return None
+    elif not previous.get("sessionId") or worker.get("spawnerSession") != previous["sessionId"]:
+        return None
+    report_since = claim.get("claudeReportSince") or claim.get("claimedAt")
+    return instant(report_since) if report_since else None
+
+
+def legacy_worker_transcript(worker, home, cutoff):
+    matches = []
+    for path in (home / "projects").glob("*/*.jsonl"):
+        if not re.fullmatch(r"[a-zA-Z0-9-]+", path.stem):
+            continue
+        identity = {"id": path.stem, "transcript": str(path)}
+        try:
+            if path.stat().st_mtime + 1 >= cutoff.timestamp() and legacy_launch_matches({**worker, "claudeSession": identity}):
+                matches.append(identity)
+        except (OSError, KeyError, TypeError, ValueError):
+            continue
+    return matches[0] if len(matches) == 1 else None
+
+
+def reports_and_replies(worker, previous=None, cutoff=None):
+    spawner = worker.get("spawner", "")
+    previous = previous or {}
+    socket_pid = previous.get("pid") if worker.get("spawnerSession") == previous.get("sessionId") else None
+    turn = None
+    earlier_sends = {}
+    delivered_earlier = set()
+    for event in transcript_events(worker):
+        if event.get("type") == "user" and not event.get("isMeta"):
+            content = event.get("message", {}).get("content", "")
+            result = event.get("toolUseResult")
+            if isinstance(content, str) or (isinstance(content, list) and
+                                            any(block["type"] != "tool_result" for block in content)):
+                turn = event.get("uuid")
+                earlier_sends.clear()
+                delivered_earlier.clear()
+            elif (isinstance(content, list) and earlier_sends and isinstance(result, dict) and result.get("success") is True
+                  and instant(event["timestamp"]) < cutoff):
+                for block in content:
+                    tool_id = block.get("tool_use_id")
+                    if tool_id in earlier_sends and not block.get("is_error"):
+                        delivered_earlier.add(earlier_sends[tool_id])
+        if event.get("type") != "assistant":
+            continue
+        message = event["message"]
+        event_id, timestamp = event["uuid"], event["timestamp"]
+        if message.get("stop_reason") == "end_turn":
+            text = "\n".join(block["text"] for block in message["content"] if block["type"] == "text")
+            yield event_id, timestamp, text.strip(), False, turn, report_text(text) in delivered_earlier
+        if not spawner:
+            continue
+        for block in message["content"]:
+            if block["type"] != "tool_use" or block.get("name") != "SendMessage":
+                continue
+            args = block.get("input", {})
+            to, text = args.get("to"), args.get("message")
+            if not isinstance(to, str) or not isinstance(text, str):
+                continue
+            prior_socket = socket_pid and to.startswith("uds:") and to.endswith(f"/{socket_pid}.sock")
+            if to == spawner or to.startswith(f"{spawner} [") or prior_socket:
+                if cutoff is not None and instant(timestamp) < cutoff:
+                    earlier_sends[block["id"]] = report_text(text)
+                yield f'{event_id}:{block["id"]}', timestamp, text.strip(), True, turn, False
+
+
+def sweep(worker, claim):
     identity = worker.get("claudeSession") or {}
     if "id" not in identity:
         return
@@ -55,14 +141,31 @@ def sweep(worker, replies):
     passed_checkpoint = checkpoint is None
     started = instant(worker["startedAt"])
     latest = checkpoint
-    for event_id, timestamp, text in replies:
+    cutoff = native_report_cutoff(worker, claim)
+    native = set()
+    last_turn = None
+    for event_id, timestamp, text, sent, turn, delivered in reports_and_replies(
+        worker, claim.get("claudeReportPreviousHolder"), cutoff,
+    ):
+        if turn != last_turn:
+            native.clear()
+            last_turn = turn
         if event_id == checkpoint:
             passed_checkpoint = True
+        if timestamp and instant(timestamp) < started:
             continue
-        if not passed_checkpoint or (timestamp and instant(timestamp) < started):
+        if sent and (cutoff is None or instant(timestamp) < cutoff):
+            continue
+        text = report_text(text)
+        duplicate = text in native
+        if sent and REPORT.match(text):
+            native.add(text)
+        if event_id == checkpoint:
+            continue
+        if not passed_checkpoint:
             continue
         latest = event_id
-        if REPORT.match(text):
+        if REPORT.match(text) and not (duplicate or delivered):
             print(f"{worker['name']} (Claude {identity['id']}) report:\n{text[:2000]}")
     if not passed_checkpoint:
         raise ValueError("Claude transcript no longer contains its report bookmark")
@@ -92,8 +195,15 @@ def acknowledged(worker):
 def main():
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("sweep", "output", "acknowledged"):
+    for name in ("output", "acknowledged"):
         commands.add_parser(name).add_argument("record", type=Path)
+    scan = commands.add_parser("sweep")
+    scan.add_argument("record", type=Path)
+    scan.add_argument("--claim", type=Path)
+    scan.add_argument("--legacy-home", type=Path)
+    legacy = commands.add_parser("legacy-launch-matches")
+    legacy.add_argument("record", type=Path)
+    legacy.add_argument("transcript", type=Path)
     peer = commands.add_parser("peer-received")
     peer.add_argument("transcript", type=Path)
     peer.add_argument("session")
@@ -103,18 +213,28 @@ def main():
         worker = {"claudeSession": {"id": args.session, "transcript": str(args.transcript)}}
         return 0 if transcript_contains_notice(worker, f"Peer message {args.peer} from Anderton ") else 3
     worker = json.loads(args.record.read_text())
+    if args.command == "legacy-launch-matches":
+        worker["claudeSession"] = {"id": args.transcript.stem, "transcript": str(args.transcript)}
+        return 0 if legacy_launch_matches(worker) else 3
     if args.command == "acknowledged":
         return 0 if acknowledged(worker) else 3
-    replies = final_replies(worker)
     if args.command == "sweep":
-        sweep(worker, replies)
+        claim = json.loads(args.claim.read_text()) if args.claim else {}
+        if args.legacy_home:
+            cutoff = native_report_cutoff(worker, claim)
+            identity = legacy_worker_transcript(worker, args.legacy_home, cutoff) if cutoff else None
+            if not identity:
+                return 0
+            worker["claudeSession"] = identity
+        sweep(worker, claim)
     else:
         last = None
-        for last in replies:
-            pass
+        for _, _, text, sent, _, _ in reports_and_replies(worker):
+            if not sent:
+                last = text
         if last is None:
             raise ValueError("No verified final reply for this Claude worker")
-        print(f"Claude session {worker['claudeSession']['id']} final reply:\n{last[2][:2000]}")
+        print(f"Claude session {worker['claudeSession']['id']} final reply:\n{last[:2000]}")
 
 
 if __name__ == "__main__":

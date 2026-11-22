@@ -1,5 +1,8 @@
+import contextlib
 import importlib.util
+import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -120,6 +123,49 @@ class WorkerTest(unittest.TestCase):
         self.delivered()
         self.client.info["status"] = {"type": "active", "activeFlags": ["waitingOnUserInput"]}
         self.assertIn("waiting on user input", self.scan()[0])
+
+    def test_readoption_uses_fresh_baseline_without_resetting_takeover_bookmarks(self):
+        self.client.turns = [{"id": "before-release", "status": "completed"}]
+        self.client.items["before-release"] = [message("RESULT: before release")]
+        self.worker["codexAdoptionId"] = "00000000-0000-4000-8000-000000000001"
+        self.assertIn("before release", self.scan()[0])
+        self.delivered()
+        self.assertEqual([], self.scan())
+
+        self.worker.update(codexAdoptionId="00000000-0000-4000-8000-000000000002",
+                           codexBaselineTurn="while-released")
+        self.client.turns[:0] = [{"id": "after-adoption", "status": "completed"},
+                                {"id": "while-released", "status": "completed"}]
+        self.client.items["after-adoption"] = [message("RESULT: after adoption")]
+        self.client.items["while-released"] = [message("RESULT: while released")]
+        events = self.scan()
+        self.assertEqual(["RESULT: after adoption"], [event.splitlines()[-1] for event in events])
+        self.delivered()
+        self.assertEqual([], self.scan())
+
+    def test_pending_notice_and_sweep_share_the_same_blocker_receipt(self):
+        self.client.turns = [{"id": "current-turn", "status": "inProgress"}]
+        self.client.info["status"] = {"type": "active", "activeFlags": ["waitingOnApproval"]}
+        self.client.latest = [{"item": {"id": "approval-first"}}]
+        self.assertIn("waiting on approval", self.scan()[0])
+        original_call = self.client.call
+        reported = self.state / "reported"
+        with patch.object(self.client, "call", side_effect=lambda method, params:
+                          {"data": self.client.turns} if method == "thread/turns/list" else original_call(method, params)):
+            with contextlib.redirect_stdout(io.StringIO()) as captured:
+                worker_api.blocker_during_notice(self.worker, self.stage, self.state)
+            self.assertEqual("", captured.getvalue())
+            self.client.latest = [{"item": {"id": "approval-next"}}]
+            with contextlib.redirect_stdout(io.StringIO()) as captured:
+                worker_api.blocker_during_notice(self.worker, self.stage, self.state)
+            self.assertIn("approval-next", captured.getvalue())
+            reported.write_text(captured.getvalue())
+        self.delivered()
+        with patch.dict(os.environ, {"ANDERTON_REPORTED_BLOCKS": str(reported)}):
+            self.assertEqual([], self.scan())
+            self.delivered()
+            self.client.latest = [{"item": {"id": "approval-third"}}]
+            self.assertIn("waiting on approval", self.scan()[0])
 
     def test_rejects_mismatched_thread_worktree(self):
         self.client.info["cwd"] = str(self.state)

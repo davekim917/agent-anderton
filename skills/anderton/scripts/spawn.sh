@@ -10,7 +10,7 @@ set -euo pipefail
 
 require_tools spawn.sh
 usage="usage: spawn.sh --effort low|medium|high|xhigh|max [--provider claude|codex] [--model M] [--mode MODE] [--base REF] <name: a-z 0-9 -> [brief-file]"
-model="" effort="" mode="" base="" provider="" codex_home="" launched_at="" launch_token=""
+model="" effort="" mode="" base="" provider="" codex_home="" launched_at="" launch_token="" claude_launch=""
 while [ $# -gt 0 ]; do
   case $1 in
     --bg) echo "spawn.sh: --bg is unsupported. Start workers inside herdr or tmux." >&2; exit 2 ;;
@@ -107,6 +107,16 @@ fi
 if [ -z "$(printf '%s' "$brief" | tr -d '[:space:]')" ]; then
   echo "spawn.sh: the brief is empty." >&2
   exit 2
+fi
+if [ "$provider" = claude ]; then
+  if command -v uuidgen >/dev/null 2>&1; then
+    claude_launch=$(uuidgen | tr '[:upper:]' '[:lower:]')
+  elif command -v python3 >/dev/null 2>&1; then
+    claude_launch=$(python3 -c 'import uuid; print(uuid.uuid4())')
+  else
+    echo "spawn.sh needs uuidgen or python3 to assign a Claude session ID." >&2
+    exit 2
+  fi
 fi
 
 sid=$(invoking_session)
@@ -215,18 +225,20 @@ write_record() {
 
 write_launch_record() {
   local updated
-  if [ "$provider" = codex ] || [ "$caller_provider" = codex ]; then lock_worker "$record" || return 1; fi
+  take_repository_lock "$root"
+  lock_worker "$record" || return 1
   updated=$(mktemp "$record.XXXXXX")
   jq -nc --arg name "$name" --arg launcher "$launcher" --arg id "$id" --arg tab "$tab" --arg dir "$dir" --arg root "$root" \
     --arg socket "$socket" --arg server "$server" --arg base "$base" --arg spawner "$me" --arg label "$label" --argjson worktree "$worktree" \
     --arg pane "$pane" --arg spawner_session "$sid" --arg spawner_provider "$caller_provider" \
-    --arg spawner_scope "$role_scope" --arg role "$role" \
+    --arg spawner_scope "$role_scope" --arg role "$role" --arg claude_launch "$claude_launch" \
     --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg provider "$provider" --arg codex "$codex_home" --arg launched "$launched_at" --arg token "$launch_token" \
     --slurpfile previous "$record" '
       ($previous[0] // {}) + {name: $name, launcher: $launcher, id: ($previous[0].id // $id), tab: $tab, socket: $socket, server: $server, dir: $dir, root: $root,
       base: $base, worktree: $worktree, spawner: $spawner, spawnerSession: $spawner_session, label: $label, startedAt: ($previous[0].startedAt // $at)}
       + if $pane != "" then {pane: $pane} else {} end
       + if $role != "" then {spawnerProvider: $spawner_provider, spawnerScope: (if $spawner_scope == "" then null else $spawner_scope end)} else {} end
+      + if $provider == "claude" then {claudeLaunchId: $claude_launch} else {} end
       + if $provider == "claude" and $spawner_provider == "codex" then {reportTransport: "transcript"} else {} end
       + if $provider == "codex" then {provider: $provider, codexHome: $codex, codexLaunchedAt: ($launched | tonumber), codexLaunchToken: $token} else {} end' > "$updated" || return 1
   mv -f "$updated" "$record"
@@ -270,13 +282,13 @@ $brief"
     -c 'tui.terminal_title=["thread-id"]'
   if [ -n "$model" ]; then set -- "$@" -m "$model"; fi
 else
-  set -- -n "$name" --permission-mode "$mode" --effort "$effort" --model "${model:-opus}"
+  set -- -n "$name" --permission-mode "$mode" --effort "$effort" --model "${model:-opus}" --session-id "$claude_launch"
   if [ "$caller_provider" = codex ]; then
     set -- "$@" --plugin-dir "$(cd "$anderton_scripts/../../.." && pwd)"
   fi
 fi
 # A tab or window id is unique only within its server, so the record keeps which server it was opened in.
-if [ "$provider" = codex ] || [ "$caller_provider" = codex ]; then write_record; fi
+write_record
 if [ "$launcher" = herdr ]; then
   socket="${HERDR_SOCKET_PATH:-}"
   # A tab's or window's process takes its environment from its multiplexer, not from this script: a non-default
@@ -336,7 +348,7 @@ else
   # The window closes when claude exits, so a worker that never registers and has no window failed to start.
   listed="" tries=$(( ${ANDERTON_START_WAIT:-30} * 2 ))
   while [ "$provider" = claude ] && [ "$tries" -gt 0 ]; do
-    if claude agents --json 2>/dev/null | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null 2>&1; then
+    if claude agents --json 2>/dev/null | jq -e --arg sid "$claude_launch" 'any(.[]; .sessionId == $sid)' >/dev/null 2>&1; then
       listed=1
       break
     fi

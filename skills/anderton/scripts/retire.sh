@@ -22,7 +22,8 @@ fi
 provider=$(jq -r '.provider // "claude"' "$record")
 mixed=""
 if [ "$(invoking_provider)" = codex ] || [ "$(jq -r '.spawnerProvider // "claude"' "$record")" = codex ]; then mixed=1; fi
-if [ "$provider" = codex ] || [ -n "$mixed" ]; then
+if [ "$provider" = codex ] || [ -n "$mixed" ] ||
+  jq -e '.claudeLaunchId != null' "$record" >/dev/null 2>&1; then
   take_repository_lock "$(invoking_root)"
   lock_worker "$record"
 fi

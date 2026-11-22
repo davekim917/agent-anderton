@@ -335,13 +335,17 @@ EOF
 }
 [ -n "$blocked" ] || ready_to_retire
 
-if [ -n "$mine" ] && [ -z "$blocked" ]; then
+if [ -n "$mine" ] && { [ -z "$blocked" ] || [ -n "${ANDERTON_PENDING_PROBE_STAGE:-}" ]; }; then
   while IFS= read -r r; do
     [ -n "$r" ] || continue
     name=$(jq -r .name "$r")
     id=$(jq -r '.id // empty' "$r")
     if [ -z "$id" ]; then
-      printf '=== %s (Codex, waiting for thread registration)\n' "$name"
+      [ -n "$blocked" ] || printf '=== %s (Codex, waiting for thread registration)\n' "$name"
+      continue
+    fi
+    if [ -n "$blocked" ]; then
+      "$anderton_scripts/codex-worker.py" blocker-during-notice "$r" "$ANDERTON_PENDING_PROBE_STAGE" "$ANDERTON_BLOCKER_BOOKMARKS" || true
       continue
     fi
     if ! state=$("$anderton_scripts/codex-worker.py" state "$r" 2>/dev/null); then

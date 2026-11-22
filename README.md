@@ -97,7 +97,8 @@ Anderton, not you. It answers what it can, brings you the decisions that are you
 PR, and deploys what passes.
 
 **Requirements:** Claude Code with `claude agents`, built and
-tested on 2.1.312; `git`, `jq` and `gh`; and herdr or tmux. It runs on Linux and on macOS,
+tested on 2.1.312, and support for `--session-id`; `git`, `jq`, `gh`, and `uuidgen` or Python 3;
+and herdr or tmux. It runs on Linux and on macOS,
 including macOS's stock bash 3.2.
 
 ### Open a Codex Anderton
@@ -237,6 +238,7 @@ thread still holds its role. If the daemon cannot answer, the claim is treated a
 unknown and blocks an ordinary takeover.
 An Anderton must release an adopted worker before that session can claim a role.
 A worker launched by Anderton must be retired before it can be replaced by a coordinator session.
+Changing the worker's Claude display name leaves that claim restriction in place.
 
 **`waiting.sh`** lists the live sessions in the caller's repository (`--all`: every repository) that
 wait on a person, leaving out every Anderton in the caller's repository, the repository's and each
@@ -301,7 +303,13 @@ starts a full Claude Code or Codex worker labelled `<name>` in a new git worktre
   SendMessage. Other pairings report in final replies. The brief also sets the rules for sub-agents
   and external actions.
 - The worker is recorded in `~/.claude/anderton/workers/<name>.json`, with the herdr or tmux server
-  it was opened in.
+  it was opened in. For Claude the record reserves its session UUID before opening the worker.
+  The startup hook records its process identity, so `/clear` can change the UUID in the same process.
+  For an older worker with no verified session binding, direct it in its own pane or retire it
+  and start a fresh worker.
+- After a Codex takeover of a Claude role, that role also reads new native milestone messages
+  addressed to the former Claude holder. It can read an older unbound worker's reports when one
+  transcript matches its original launch brief, including after the worker closes.
 
 **`retire.sh <name>`** stops that worker, then removes its worktree and record. A herdr tab or tmux
 window is closed only when it still carries the label it was opened with, in the server recorded at spawn, and
@@ -320,9 +328,13 @@ the name or the pid gains nothing; renaming it, or a `/clear` followed by a resu
 role, another Anderton, and a session another Anderton already answers for. The Anderton then tells
 the session by SendMessage that it reports there. `retire.sh <name>` releases an adopted session
 without stopping it.
+Re-adopting a Codex thread starts reporting at the new adoption point. A change in Anderton for an
+existing adoption keeps its report bookmark.
 
-**`watch.sh`** is a background `Stop` hook. It runs in every session and exits
-at once, in about 50 ms, in any session that holds no Anderton role. In an Anderton, the
+**`watch.sh`** runs as Claude's background `Stop` hook and as the Codex coordinator's detached watcher.
+The Codex watcher keeps checking for blockers while a notice is pending. Consecutive requests can
+appear as one if the Codex daemon exposes the same turn, request kind and tool item for both.
+The Claude hook exits quickly in an ordinary session. In an Anderton, the
 repository's or a project's, it keeps running and checks `waiting.sh --blocked` every 30 seconds,
 about 0.8 seconds of work on a repository of a dozen sessions. When a session it answers for newly
 blocks on a permission prompt or `AskUserQuestion`,

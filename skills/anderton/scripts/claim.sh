@@ -130,16 +130,31 @@ else
 fi
 started=$(jq -r '.startedAt // empty | floor' "$sessions/$pid.json" 2>/dev/null || true)
 peer=null
+claude_report_since=""
+previous_claude=null
+if [ "$provider" = codex ]; then
+  if [ -n "$record" ]; then
+    if [ "$(record_provider "$record")" = codex ]; then
+      claude_report_since=$(jq -r '.claudeReportSince // .claimedAt // empty' "$record")
+      previous_claude=$(jq -c '.claudeReportPreviousHolder // null' "$record")
+    else
+      previous_claude=$(jq -c '{sessionId,pid}' "$record")
+    fi
+  fi
+  claude_report_since=${claude_report_since:-$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat())')}
+fi
 if [ -n "$record" ] && [ "$(jq -r '.sessionId // empty' "$record")" = "$sid" ] &&
   { [ -n "$rebind" ] || caller_matches_claim "$record"; }; then
   peer=$(jq -c '.peerMessage // null' "$record")
 fi
 jq -nc --arg root "$root" --arg scope "$scope" --arg pid "$pid" --arg started "$started" --arg sid "$sid" \
   --arg provider "$provider" --arg codex_home "$codex_home" --arg codex_dir "$codex_dir" --arg name "$name" \
+  --arg claude_report_since "$claude_report_since" --argjson previous_claude "$previous_claude" \
   --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson probe "${kept:-null}" --argjson peer "$peer" \
   '{root: $root, scope: (if $scope == "" then null else $scope end), provider: $provider,
     sessionId: $sid, claimedAt: $at}
-   + (if $provider == "codex" then {codexHome: $codex_home, dir: $codex_dir, name: $name}
+   + (if $provider == "codex" then {codexHome: $codex_home, dir: $codex_dir, name: $name, claudeReportSince: $claude_report_since,
+                                    claudeReportPreviousHolder: $previous_claude}
       else {pid: ($pid | tonumber), startedAt: ($started | tonumber? // null)} end)
    + (if $probe == null then {} else {probe: $probe} end)
    + (if $peer == null then {} else {peerMessage: $peer} end)' > "$state.tmp"

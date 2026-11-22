@@ -210,7 +210,9 @@ If either end is Codex, tell it to use the four kinds below at the start of its
 final replies. Use `scripts/worker.sh message <name> "<instruction>"` for the
 direction and `status` or `output` to inspect it. A Claude worker must load the
 Anderton plugin and end a turn before a Codex Anderton can steer it through its
-Stop hook.
+Stop hook. Workers started before Claude session UUIDs were recorded may have
+a verifiable transcript for reports. Direct an unbound worker in its own pane
+or retire it and start a fresh worker.
 `scripts/retire.sh <name>` releases it and leaves it running.
 
 **Choose the effort yourself for every worker.** `spawn.sh` refuses to start without

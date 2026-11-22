@@ -9,6 +9,39 @@
 # shellcheck source=SCRIPTDIR/session-lib.sh
 . "$(dirname "$0")/session-lib.sh"
 
+# A startup hook can arrive before Claude writes its registry. Its native session id, PID and
+# ancestry pin the launched process so a later /clear can keep custody after the ID changes.
+register_claude_launch() {
+  local payload=$1 sid pid cwd transcript start worker
+  sid=$(jq -r '.session_id // empty' <<< "$payload") || return 1
+  pid=${CLAUDE_PID:-}
+  case $sid in '' | *[!a-f0-9-]*) return 1 ;; esac
+  case $pid in '' | *[!0-9]*) return 1 ;; esac
+  [ "$sid" = "${CLAUDE_CODE_SESSION_ID:-}" ] && has_ancestor "$$" "$pid" || return 1
+  cwd=$(jq -r '.cwd // empty' <<< "$payload") || return 1
+  transcript=$(jq -r '.transcript_path // empty' <<< "$payload") || return 1
+  case $transcript in "$home"/projects/*/"$sid.jsonl") ;; *) return 1 ;; esac
+  start=$(proc_start "$pid")
+  [ -n "$start" ] || return 1
+  for worker in "$holders"/workers/*.json; do
+    [ -f "$worker" ] || continue
+    jq -e --arg sid "$sid" --arg cwd "$cwd" '
+      .claudeLaunchId == $sid and .dir == $cwd and .claudeSession == null' "$worker" >/dev/null 2>&1 || continue
+    take_repository_lock "$(project_root "$cwd")"
+    lock_worker "$worker" || return 1
+    process_start_matches "$pid" "$start" &&
+      jq -e --arg sid "$sid" --arg cwd "$cwd" '
+        .claudeLaunchId == $sid and .dir == $cwd and .claudeSession == null' "$worker" >/dev/null 2>&1 &&
+      bind_claude_worker "$worker" "$sid" "$pid" "$start" "$transcript"
+    return
+  done
+}
+
+if [ "${1:-}" = --claude-start ]; then
+  register_claude_launch "$(cat)" >/dev/null 2>&1
+  exit 0
+fi
+
 claude_direction_unreceived() {
   local status=0
   "$anderton_scripts/claude-worker.py" acknowledged "$1" || status=$?
@@ -64,17 +97,17 @@ watch_claude_worker() {
   [ -f "$transcript" ] && [ -r "$transcript" ] || return 0
   [ -z "${CLAUDE_CODE_SESSION_ID:-}" ] || [ "$CLAUDE_CODE_SESSION_ID" = "$worker_sid" ] || return 0
   [ -z "${CLAUDE_PID:-}" ] || [ "$CLAUDE_PID" = "$worker_pid" ] || return 0
-  worker=$(worker_record "$target" "$cwd" "$worker_sid" "$worker_pid" "$(jq -r '.startedAt // empty | floor' "$worker_reg")")
+  worker=$(worker_record "$target" "$(jq -r '.cwd // empty' "$worker_reg")" "$worker_sid" "$worker_pid" "$(jq -r '.startedAt // empty | floor' "$worker_reg")")
   [ -n "$worker" ] && [ "$(record_provider "$worker")" = claude ] || return 0
-  root=$(project_root "$cwd")
+  root=$(jq -r '.root // empty' "$worker")
   owner=$(answering_claim "$worker" "$root")
   [ -n "$owner" ] || return 0
   owner_provider=$(record_provider "$owner")
-  uses_claude_transcript "$worker" "$owner_provider" || return 0
   claude_stop_matches "$worker" "$worker_sid" "$worker_pid" "$worker_start" || return 0
   take_claude_worker_watch "${worker%.json}.$worker_sid.watch" || return 0
   with_claude_worker_lock "$root" "$worker" "$worker_sid" "$worker_pid" "$worker_start" \
     bind_claude_worker "$worker" "$worker_sid" "$worker_pid" "$worker_start" "$transcript" || return 0
+  uses_claude_transcript "$worker" "$owner_provider" || return 0
   tick=${ANDERTON_WATCH_TICK:-30}
   while [ -f "$worker" ] && claude_stop_matches "$worker" "$worker_sid" "$worker_pid" "$worker_start"; do
     owner=$(answering_claim "$worker" "$root")
@@ -166,6 +199,7 @@ watcher="$holders/$key.watch"
 parent_pid=$PPID
 [ "$runtime" = claude ] || parent_pid=0
 pending="$holders/$key.$pid.pending"
+blocked_backlog="$holders/$key.$pid.blocked"
 # Per holder: an earlier holder's last pass must not record a block this holder has not heard about.
 reported="$holders/$key.$pid.reported"
 reported_keep=200
@@ -267,7 +301,7 @@ run_probe() { # run_probe <command>: sets $probe_news, $probe_alert, $probe_why,
   date +%s > "$probe_dir/last"
   # Its own process group, so a timeout ends whatever the probe started as well.
   set -m
-  (cd "$cwd" && ANDERTON_PROBE_STATE="$probe_dir/bookmarks" ANDERTON_PROBE_STAGE="$probe_run/stage" \
+  (cd "$cwd" && ANDERTON_PROBE_STATE="$probe_dir/bookmarks" ANDERTON_PROBE_STAGE="$probe_run/stage" ANDERTON_REPORTED_BLOCKS="$reported" \
     exec bash -c "$1") < /dev/null > "$probe_run/out" 2> "$probe_run/err" &
   p=$!
   set +m
@@ -377,7 +411,7 @@ message() {
   fi
   if [ -n "$new" ]; then
     echo "Anderton watch: a session you answer for is blocked on a person. Nothing has been answered or approved."
-    printf '%s\n' "$new"
+    printf '%s\n' "$new" | cut -f1
     echo "Run waiting.sh to see what each one is asking."
   fi
   if [ -n "$probe_news" ]; then
@@ -469,12 +503,22 @@ while still_holds_role; do
   # Only the lock's owner watches: a watch that lost it leaves, and one whose lock vanished takes it back.
   if [ "$(watch_owner)" != "$$" ] && ! take_watch; then exit 0; fi
   if [ "$runtime" = codex ] && [ -d "$pending" ]; then
+    now=$(cd "$cwd" 2>/dev/null &&
+      ANDERTON_PENDING_PROBE_STAGE="$pending/probe/stage" ANDERTON_BLOCKER_BOOKMARKS="$holders/$key.codex-probe/bookmarks" \
+        "$scripts/waiting.sh" --blocked 2>/dev/null | grep '^=== ')
+    # The receipt stays with the message already submitted. Keep later blockers for the next message,
+    # even if the user answers them in their pane while this receipt is still pending.
+    new=$(printf '%s\n' "$now" | grep -vxF -f "$reported" -f "$pending/blocked" | grep .)
+    if [ -n "$new" ]; then
+      { cat "$blocked_backlog" 2>/dev/null; printf '%s\n' "$new"; } |
+        sort -u > "$blocked_backlog.tmp" && mv -f "$blocked_backlog.tmp" "$blocked_backlog"
+    fi
     deliver_pending
     sleep "$tick"
     continue
   fi
-  now=$(cd "$cwd" 2>/dev/null && "$(dirname "$0")/waiting.sh" --blocked 2>/dev/null | grep '^=== ')
-  new=$(printf '%s\n' "$now" | grep -vxF -f "$reported" | grep .)
+  now=$(cd "$cwd" 2>/dev/null && "$scripts/waiting.sh" --blocked 2>/dev/null | grep '^=== ')
+  new=$( { printf '%s\n' "$now"; cat "$blocked_backlog" 2>/dev/null; } | grep -vxF -f "$reported" | sort -u | grep .)
   peer=$(jq -r '.peerMessage.id // empty' "$record" 2>/dev/null)
   if [ "$runtime" = claude ] && [ -n "$peer" ] && ! claude_peer_ready; then peer=""; fi
   probe_news="" probe_alert="" probe_run=""
@@ -517,7 +561,10 @@ while still_holds_role; do
   done
   if [ -n "$new$peer$probe_news$probe_alert" ]; then
     if [ "$runtime" = codex ]; then
-      stage_delivery && deliver_pending
+      if stage_delivery; then
+        rm -f "$blocked_backlog"
+        deliver_pending
+      fi
     else
       if [ -n "$peer" ]; then
         (

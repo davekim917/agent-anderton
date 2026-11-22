@@ -237,7 +237,7 @@ bind_codex_worker() {
 }
 
 managed_invoker() {
-  local root=$1 provider=$2 sid=$3 identity=$4 dir=$5 r p reg name cwd started
+  local root=$1 provider=$2 sid=$3 identity=$4 dir=$5 r p reg name cwd started file
   if [ "$provider" = codex ]; then codex_worker_record "$identity" "$sid" "$dir"; return; fi
   p=$identity
   reg="$sessions/$p.json"
@@ -246,18 +246,27 @@ managed_invoker() {
   started=$(jq -r '.startedAt // empty | floor' "$reg" 2>/dev/null || true)
   for r in "$holders"/workers/*.json; do
     [ -f "$r" ] || continue
-    jq -e --arg root "$root" '
-      .root == $root and (.provider // "claude") == "claude"' "$r" >/dev/null 2>&1 || continue
-    if jq -e --arg id "$sid" --arg pid "$p" --arg start "$started" '
-      .claudeSession.id == $id or (.adopted == true and
-        (.sessionId == $id or ($start != "" and (.pid | tostring) == $pid and
-          ((.sessionStartedAt // "") | tostring | split(".")[0]) == $start)))' "$r" >/dev/null; then
-      printf '%s\n' "$r"
-      return
-    elif [ "$r" = "$holders/workers/$name.json" ] && [ "$(worker_record "$name" "$cwd" "$sid" "$p" "$started")" = "$r" ]; then
+    [ "$(record_provider "$r")" = claude ] || continue
+    if claude_worker_identity_matches "$r" "$sid" "$p" "$started"; then
       printf '%s\n' "$r"
       return
     fi
+    # A launch predating session UUIDs cannot be identified by name after a rename.
+    # Its dedicated checkout remains managed until it is retired.
+    dir=$(jq -r --arg root "$root" 'select(.root == $root and .adopted != true and
+      .claudeLaunchId == null and .claudeSession == null) | .dir // empty' "$r")
+    [ -n "$dir" ] && [[ $cwd == "$dir" || $cwd == "$dir/"* ]] || continue
+    if jq -e --arg name "$name" '.worktree == true or .name == $name' "$r" >/dev/null; then
+      printf '%s\n' "$r"
+      return
+    fi
+    case $sid in '' | *[!a-zA-Z0-9-]*) continue ;; esac
+    for file in "$home"/projects/*/"$sid.jsonl"; do
+      if [ -f "$file" ] && "$anderton_scripts/claude-worker.py" legacy-launch-matches "$r" "$file" >/dev/null 2>&1; then
+        printf '%s\n' "$r"
+        return
+      fi
+    done
   done
 }
 
@@ -267,6 +276,16 @@ claude_binding_process_matches() {
   [ -n "$start" ] || return 1
   jq -e --arg pid "$pid" --arg start "$start" '
     .claudeSession | (.pid | tostring) == $pid and .procStart == $start' "$file" >/dev/null
+}
+
+claude_worker_identity_matches() {
+  local file=$1 sid=$2 pid=$3 started=$4
+  jq -e --arg sid "$sid" --arg pid "$pid" --arg start "$started" '
+    ($sid != "" and (.claudeLaunchId == $sid or .claudeSession.id == $sid or
+      (.adopted == true and .sessionId == $sid))) or
+    (.adopted == true and $pid != "" and $start != "" and
+      (.pid | tostring) == $pid and ((.sessionStartedAt // "") | tostring | split(".")[0]) == $start)
+    ' "$file" >/dev/null 2>&1 || { [ -n "$pid" ] && claude_binding_process_matches "$file" "$pid"; }
 }
 
 live_claude_worker() {
@@ -281,7 +300,9 @@ live_claude_worker() {
     sid=$(jq -r '.sessionId // empty' "$reg")
     pid=$(jq -r '.pid // empty' "$reg")
     started=$(jq -r '.startedAt // empty | floor' "$reg")
-    if [ -z "$sid" ] || [ -z "$pid" ] || ! is_worker "$name" "$dir" "$sid" "$pid" "$started"; then continue; fi
+    if [ -z "$sid" ] || [ -z "$pid" ] ||
+      [ "$(worker_record "$name" "$dir" "$sid" "$pid" "$started")" != "$file" ] ||
+      ! claude_worker_identity_matches "$file" "$sid" "$pid" "$started"; then continue; fi
     if [ -n "$bound" ] && [ "$sid" != "$bound" ]; then
       [ "$binding" = --allow-rebind ] || continue
       claude_binding_process_matches "$file" "$pid" || continue
@@ -325,7 +346,7 @@ bind_claude_worker() {
   local worker=$1 session_id=$2 process=$3 start=$4 transcript=$5 updated
   updated=$(mktemp "$worker.XXXXXX") || return 1
   if jq --arg sid "$session_id" --arg file "$transcript" --argjson pid "$process" --arg start "$start" '
-    .claudeSession = {id: $sid, transcript: $file, pid: $pid, procStart: $start} | .reportTransport = "transcript"
+    .claudeSession = {id: $sid, transcript: $file, pid: $pid, procStart: $start}
     | if .claudeDirection != null and .claudeDirection.target != $sid then del(.claudeDirection) else . end
     ' "$worker" > "$updated" && mv -f "$updated" "$worker"; then return 0; fi
   rm -f "$updated"
@@ -523,10 +544,9 @@ worker_record() {
     dir=$(jq -r '.dir // empty' "$f" 2>/dev/null || true)
     case $2 in
       "$dir" | "$dir"/*)
-        if [ -n "$dir" ] && { [ "$(jq -r '.adopted // false' "$f" 2>/dev/null || true)" != true ] ||
-          jq -e --arg sid "${3:-}" --arg pid "${4:-}" --arg start "${5:-}" '($sid != "" and .sessionId == $sid)
-            or ($pid != "" and $start != "" and (.pid | tostring) == $pid
-                and ((.sessionStartedAt // "") | tostring | split(".")[0]) == $start)' "$f" >/dev/null 2>&1; }; then
+        if [ -n "$dir" ] && { jq -e '
+          .adopted != true and .claudeLaunchId == null and .claudeSession == null' "$f" >/dev/null 2>&1 ||
+          claude_worker_identity_matches "$f" "${3:-}" "${4:-}" "${5:-}"; }; then
           printf '%s\n' "$f"
           return
         fi

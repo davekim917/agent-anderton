@@ -128,7 +128,16 @@ case $1 in
   new-window)
     printf '%s\n' "$@" > "$FAKE_LOG.window"
     if [ -n "${FAKE_TMUX_FAIL:-}" ]; then echo "no server" >&2; exit 1; fi
-    if [ -n "${FAKE_TMUX_LIVE:-}" ]; then printf '[{"kind":"interactive","name":"%s","id":null}]\n' "$7" > "$FAKE_AGENTS"; fi
+    if [ -n "${FAKE_TMUX_LIVE:-}" ]; then
+      previous=""
+      for arg; do
+        if [ "$previous" = --session-id ]; then
+          jq -nc --arg name "$7" --arg sid "$arg" '[{kind:"interactive",name:$name,sessionId:$sid,id:null}]' > "$FAKE_AGENTS"
+          break
+        fi
+        previous=$arg
+      done
+    fi
     window=${FAKE_TMUX_WINDOW:-@7}
     if [ -z "${FAKE_TMUX_GONE:-}" ]; then
       echo "${TMUX%%,*} $(printf '%s' "$TMUX" | cut -d, -f2) $window $7" >> "$FAKE_LOG.windows-open"
@@ -503,7 +512,8 @@ check "at the effort it was given" [ "$(grep -A1 -x -- --effort "$FAKE_LOG.windo
 check "on Opus when no model is named" [ "$(grep -A1 -x -- --model "$FAKE_LOG.window" | tail -n 1)" = opus ]
 
 # report-gate.sh: the worker's messages to its lead must be a result, question, blocker or answer.
-spawn; p_worker=$pid; session "$p_worker" worker-1 "$work/wt-fix-login" fix-login
+worker_sid=$(jq -r .claudeLaunchId "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.json")
+spawn; p_worker=$pid; session "$p_worker" "$worker_sid" "$work/wt-fix-login" fix-login
 calls=0
 gate() { # gate <session id> <cwd> <to> <message JSON value> [event, default PreToolUse]: sets $out, $status and $call
   if [ "${5:-PreToolUse}" = PreToolUse ]; then calls=$((calls + 1)); call="toolu_test$calls"; fi
@@ -522,69 +532,69 @@ send() { # send <session id> <cwd> <to> <message JSON value>: the hook before th
   if [ "$s" -eq 0 ]; then gate "$1" "$2" "$3" "$4" PostToolUse; fi
   status=$s out=$o
 }
-gate worker-1 "$work/wt-fix-login" lead-session '"Got it, starting now."'
+gate "$worker_sid" "$work/wt-fix-login" lead-session '"Got it, starting now."'
 check "report-gate blocks an acknowledgement to the lead" [ "$status" -eq 2 ]
 check "and tells the worker the four kinds" contains "RESULT: a milestone done"
 check "a worker is not offered DIRECTION" eval '! contains "DIRECTION:"'
-gate worker-1 "$work/wt-fix-login/src" lead-session '"Still holding for the merge."'
+gate "$worker_sid" "$work/wt-fix-login/src" lead-session '"Still holding for the merge."'
 check "from a subdirectory of the worker's worktree too" [ "$status" -eq 2 ]
-gate worker-1 "$work/wt-fix-login" "lead-session [a1b2c3]" '"FYI: tests are running."'
+gate "$worker_sid" "$work/wt-fix-login" "lead-session [a1b2c3]" '"FYI: tests are running."'
 check "to the lead named with its listing ref too" [ "$status" -eq 2 ]
-gate worker-1 "$work/wt-fix-login" "uds:/run/user/1000/cc-socks/$p_lead.sock" '"Thanks!"'
+gate "$worker_sid" "$work/wt-fix-login" "uds:/run/user/1000/cc-socks/$p_lead.sock" '"Thanks!"'
 check "to the lead's socket address, as a reply copies it" [ "$status" -eq 2 ]
-send worker-1 "$work/wt-fix-login" "uds:/run/user/1000/cc-socks/$p_lead.sock" '"ANSWER: yes, the redirect test is the one."'
+send "$worker_sid" "$work/wt-fix-login" "uds:/run/user/1000/cc-socks/$p_lead.sock" '"ANSWER: yes, the redirect test is the one."'
 check "lets an answer through to the socket address" [ "$status" -eq 0 ]
 check "printing nothing" [ -z "$out" ]
-send worker-1 "$work/wt-fix-login" lead-session '"RESULT: PR ready https://example.invalid/pr/1, redirect test passes"'
+send "$worker_sid" "$work/wt-fix-login" lead-session '"RESULT: PR ready https://example.invalid/pr/1, redirect test passes"'
 check "lets a result through" [ "$status" -eq 0 ]
 check "printing nothing when it allows" [ -z "$out" ]
-send worker-1 "$work/wt-fix-login" lead-session '"RESULT: PR ready https://example.invalid/pr/1, redirect test passes"'
+send "$worker_sid" "$work/wt-fix-login" lead-session '"RESULT: PR ready https://example.invalid/pr/1, redirect test passes"'
 check "holds the same report sent again" [ "$status" -eq 2 ]
 check "saying so" contains "repeats, word for word"
-send worker-1 "$work/wt-fix-login" lead-session '"RESULT: PR ready https://example.invalid/pr/1, redirect test passes\nand the follow-up fix is in"'
+send "$worker_sid" "$work/wt-fix-login" lead-session '"RESULT: PR ready https://example.invalid/pr/1, redirect test passes\nand the follow-up fix is in"'
 check "lets a report with the same first line and new text through" [ "$status" -eq 0 ]
-send worker-1 "$work/wt-fix-login" lead-session '"\n**QUESTION:** keep the old cookie name? I recommend yes."'
+send "$worker_sid" "$work/wt-fix-login" lead-session '"\n**QUESTION:** keep the old cookie name? I recommend yes."'
 check "lets a question through after blank lines and markdown" [ "$status" -eq 0 ]
-gate worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: CI cannot reach the registry; a rerun would unblock it"'
+gate "$worker_sid" "$work/wt-fix-login" lead-session '"BLOCKED: CI cannot reach the registry; a rerun would unblock it"'
 check "lets a blocker through" [ "$status" -eq 0 ]
-gate worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: CI cannot reach the registry; a rerun would unblock it"'
+gate "$worker_sid" "$work/wt-fix-login" lead-session '"BLOCKED: CI cannot reach the registry; a rerun would unblock it"'
 check "lets a retry through when the first send never completed" [ "$status" -eq 0 ]
-ANDERTON_REPEAT_WINDOW=0 send worker-1 "$work/wt-fix-login" lead-session '"\n**QUESTION:** keep the old cookie name? I recommend yes."'
+ANDERTON_REPEAT_WINDOW=0 send "$worker_sid" "$work/wt-fix-login" lead-session '"\n**QUESTION:** keep the old cookie name? I recommend yes."'
 check "lets a repeat through once its window has passed" [ "$status" -eq 0 ]
 # SendMessage reports a failed delivery as a result whose body says "success": false, as an object or inside its text.
 GATE_RESPONSE='[{"type":"text","text":"{\"success\":false,\"message\":\"Failed to send: ENOENT\"}"}]' \
-  send worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: the build cache is full; clearing it would unblock me"'
+  send "$worker_sid" "$work/wt-fix-login" lead-session '"BLOCKED: the build cache is full; clearing it would unblock me"'
 check "a send whose delivery failed is let through" [ "$status" -eq 0 ]
-send worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: the build cache is full; clearing it would unblock me"'
+send "$worker_sid" "$work/wt-fix-login" lead-session '"BLOCKED: the build cache is full; clearing it would unblock me"'
 check "and its retry is not a repeat, since it was never delivered" [ "$status" -eq 0 ]
 GATE_RESPONSE='{"success":false,"message":"no such peer"}' \
-  send worker-1 "$work/wt-fix-login" lead-session '"RESULT: cache cleared, the build passes"'
-send worker-1 "$work/wt-fix-login" lead-session '"RESULT: cache cleared, the build passes"'
+  send "$worker_sid" "$work/wt-fix-login" lead-session '"RESULT: cache cleared, the build passes"'
+send "$worker_sid" "$work/wt-fix-login" lead-session '"RESULT: cache cleared, the build passes"'
 check "nor after a failure reported as an object" [ "$status" -eq 0 ]
 GATE_RESPONSE='[{"type":"text","text":"{\"success\":true,\"message\":\"sent\"}"}]' \
-  send worker-1 "$work/wt-fix-login" lead-session '"RESULT: the deploy note is written"'
-send worker-1 "$work/wt-fix-login" lead-session '"RESULT: the deploy note is written"'
+  send "$worker_sid" "$work/wt-fix-login" lead-session '"RESULT: the deploy note is written"'
+send "$worker_sid" "$work/wt-fix-login" lead-session '"RESULT: the deploy note is written"'
 check "a send reported as delivered is recorded, so its repeat is held" [ "$status" -eq 2 ]
-send worker-1 "$work/wt-fix-login" lead-session '"ANSWER: yes"'
-send worker-1 "$work/wt-fix-login" lead-session '"ANSWER: yes"'
+send "$worker_sid" "$work/wt-fix-login" lead-session '"ANSWER: yes"'
+send "$worker_sid" "$work/wt-fix-login" lead-session '"ANSWER: yes"'
 check "lets the same short answer through twice: answers to two questions can match" [ "$status" -eq 0 ]
 mkdir -p "$work/nosed"
 printf '#!/bin/sh\nexit 1\n' > "$work/nosed/sed"
 chmod +x "$work/nosed/sed"
-PATH="$work/nosed:$PATH" gate worker-1 "$work/wt-fix-login" lead-session '"Got it."'
+PATH="$work/nosed:$PATH" gate "$worker_sid" "$work/wt-fix-login" lead-session '"Got it."'
 check "allows a message when it cannot read its kind" [ "$status" -eq 0 ]
-send worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: the staging database is down; a restart would unblock it"'
+send "$worker_sid" "$work/wt-fix-login" lead-session '"BLOCKED: the staging database is down; a restart would unblock it"'
 two_days_ago=$(date -r $((now_s - 172800)) +%Y%m%d%H%M 2>/dev/null || date -d "@$((now_s - 172800))" +%Y%m%d%H%M)
 find "$CLAUDE_CONFIG_DIR/anderton/reports" -maxdepth 1 -type f -newer "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.json" \
   -exec touch -t "$two_days_ago" {} +
-ANDERTON_REPEAT_WINDOW=259200 send worker-1 "$work/wt-fix-login" lead-session '"BLOCKED: the staging database is down; a restart would unblock it"'
+ANDERTON_REPEAT_WINDOW=259200 send "$worker_sid" "$work/wt-fix-login" lead-session '"BLOCKED: the staging database is down; a restart would unblock it"'
 check "keeps a record for as long as a window longer than a day" [ "$status" -eq 2 ]
-gate worker-1 "$work/wt-fix-login" someone-else '"Got it."'
+gate "$worker_sid" "$work/wt-fix-login" someone-else '"Got it."'
 check "leaves a message to anyone else alone" [ "$status" -eq 0 ]
 check "silently" [ -z "$out" ]
-gate worker-1 "$work/wt-fix-login" lead-session '""'
+gate "$worker_sid" "$work/wt-fix-login" lead-session '""'
 check "leaves a pure idle subscription alone" [ "$status" -eq 0 ]
-gate worker-1 "$work/wt-fix-login" lead-session '{"type":"shutdown_response","request_id":"r1","approve":true}'
+gate "$worker_sid" "$work/wt-fix-login" lead-session '{"type":"shutdown_response","request_id":"r1","approve":true}'
 check "leaves a structured protocol reply alone" [ "$status" -eq 0 ]
 gate lead-1 "$alpha" fix-login '"Got it."'
 check "leaves a session that is not a worker alone" [ "$status" -eq 0 ]
@@ -740,7 +750,8 @@ check "in a new tab of the caller's workspace" grep -qx -- "w9" "$FAKE_LOG.tab"
 check "opened on its worktree" grep -qx -- "$work/wt-tab-worker" "$FAKE_LOG.tab"
 check "labelled with its name" grep -qx -- "tab-worker" "$FAKE_LOG.tab"
 check "passing on the caller's Claude home, which the tab would not inherit" grep -qx -- "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR" "$FAKE_LOG.tab"
-check "running claude in that tab's pane" [ "$(tr '\n' ' ' < "$FAKE_LOG.start")" = "agent start tab-worker --kind claude --pane w9:p5 --timeout 120000 -- -n tab-worker --permission-mode acceptEdits --effort high --model opus " ]
+tab_session=$(jq -r .claudeLaunchId "$CLAUDE_CONFIG_DIR/anderton/workers/tab-worker.json")
+check "running claude in that tab's pane with the recorded session ID" [ "$(tr '\n' ' ' < "$FAKE_LOG.start")" = "agent start tab-worker --kind claude --pane w9:p5 --timeout 120000 -- -n tab-worker --permission-mode acceptEdits --effort high --model opus --session-id $tab_session " ]
 check "given the brief" grep -qF "Tidy the README." "$FAKE_LOG.prompt"
 check "and told to report to the caller by name" grep -qF 'Message "lead-session" by SendMessage only when' "$FAKE_LOG.prompt"
 check "not started in the background" [ ! -e "$FAKE_LOG.bg" ]
@@ -972,7 +983,7 @@ echo "Task." | env CLAUDE_CODE_SESSION_ID=lead-1 CLAUDE_PID="$p_lead" TMUX=/tmp/
   ANDERTON_START_WAIT=30 "$scripts/spawn.sh" --effort high cut-short >/dev/null 2>&1 &
 cut=$!
 for _ in $(seq 1 100); do
-  if jq -e '.launcher == "tmux"' "$CLAUDE_CONFIG_DIR/anderton/workers/cut-short.json" >/dev/null 2>&1; then break; fi
+  if jq -e '.launcher == "tmux" and .tab == "@12"' "$CLAUDE_CONFIG_DIR/anderton/workers/cut-short.json" >/dev/null 2>&1; then break; fi
   sleep 0.1
 done
 kill -TERM "$cut" 2>/dev/null || true
