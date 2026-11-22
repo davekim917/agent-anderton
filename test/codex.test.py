@@ -61,7 +61,7 @@ class WorkerTest(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        directory = Path(temporary.name)
+        directory = Path(temporary.name).resolve()
         self.state = directory / "state"
         self.stage = directory / "stage"
         self.state.mkdir()
