@@ -269,6 +269,23 @@ is_worker() {
   [ -n "$(worker_record "$@")" ]
 }
 
+# True when ls-files -v listing $2 of worktree $1 tags a file whose edits status hides and removal deletes: an
+# assume-unchanged one (a lower-case tag), or a skip-worktree one (S) on disk. A sparse checkout's skipped files are
+# normally absent; one git quotes for its name counts as present.
+hidden_edit() {
+  local path
+  case "
+$2" in *"
+"[[:lower:]]" "*) return 0 ;; esac
+  while IFS= read -r path; do
+    case $path in '') continue ;; '"'*) return 0 ;; esac
+    if [ -e "$1/$path" ] || [ -L "$1/$path" ]; then return 0; fi
+  done <<EOF
+$(printf '%s\n' "$2" | sed -n 's/^S //p')
+EOF
+  return 1
+}
+
 # What in worktree $1, started at commit $2, retire.sh must keep: prints uncommitted, unpushed (commits no remote
 # branch has) or unreadable, or nothing. Untracked files count whatever status.showUntrackedFiles says, since git
 # worktree remove deletes the ones status leaves out, and a git command that fails is never read as "nothing to keep".
@@ -280,12 +297,7 @@ worktree_work() {
     echo uncommitted
   elif ! out=$(git -C "$1" ls-files -v 2>/dev/null); then
     echo unreadable
-  elif case "
-$out" in *"
-"[[:lower:]]" "*) true ;; *"
-S "*) [ "$(git -C "$1" config --bool core.sparseCheckout 2>/dev/null)" != true ] ;; *) false ;; esac; then
-    # ls-files -v tags an assume-unchanged file in lower case and a skip-worktree one S: status hides edits to either,
-    # and removal deletes them. A sparse checkout marks the files it leaves out skip-worktree, so there S is not work.
+  elif hidden_edit "$1" "$out"; then
     echo uncommitted
   elif ! out=$(git -C "$1" rev-list -1 HEAD --not --remotes "$2" 2>/dev/null); then
     echo unreadable

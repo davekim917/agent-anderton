@@ -171,6 +171,8 @@ the watch. Send Codex permission and input requests to the user in the
 worker's tab. Retire it with `scripts/retire.sh <name>` after its active turn ends.
 It closes only the worker's own pane, and only while that pane still shows its
 thread; when it refuses, ask the user to close the pane, then rerun it.
+Before retiring any worker, have the user leave its checkout in every other pane:
+a clean, pushed checkout is removed even while another pane works in it.
 
 **Adopt a session** the user opened when they ask you to take it on:
 `scripts/adopt.sh <name>`. You then answer for it as for a worker you started. Tell it

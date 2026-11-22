@@ -2534,11 +2534,16 @@ git -C "$work/wt-hidden-edit" update-index --skip-worktree tracked.txt
 run "$scripts/retire.sh" hidden-edit
 check "or to one marked skip-worktree outside a sparse checkout" \
   eval '[ "$status" -eq 3 ] && [ "$(cat "$work/wt-hidden-edit/tracked.txt" 2>/dev/null)" = v2 ]'
-rm -f "$work/wt-hidden-edit/tracked.txt"
 git -C "$rho" config core.sparseCheckout true
+git -C "$rho" config sparse.expectFilesOutsideOfPatterns true
 run "$scripts/retire.sh" hidden-edit
-check "but a sparse checkout's skip-worktree files are not work" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-hidden-edit" ]'
+check "or inside a sparse checkout that leaves that file on disk" \
+  eval '[ "$status" -eq 3 ] && [ "$(cat "$work/wt-hidden-edit/tracked.txt" 2>/dev/null)" = v2 ]'
+rm -f "$work/wt-hidden-edit/tracked.txt"
+run "$scripts/retire.sh" hidden-edit
+check "but a skip-worktree file absent from disk, as a sparse checkout leaves it, is not work" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-hidden-edit" ]'
 git -C "$rho" config --unset core.sparseCheckout
+git -C "$rho" config --unset sparse.expectFilesOutsideOfPatterns
 rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/hidden-edit.json"
 [ ! -d "$work/wt-hidden-edit" ] || git -C "$rho" worktree remove --force "$work/wt-hidden-edit"
 rho_worker bad-base
@@ -2661,7 +2666,7 @@ awk '$3 == "@23" { $4 = "renamed-by-user" } { print }' "$FAKE_LOG.windows-open" 
 mv "$FAKE_LOG.windows-open.tmp" "$FAKE_LOG.windows-open"
 cx_retire cx-old
 check "or renames it, which no longer marks it the worker's" \
-  eval '[ "$status" -eq 1 ] && contains "recorded without its pane" && [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-cx-old" ]'
+  eval '[ "$status" -eq 1 ] && contains "recorded without its pane" && contains "unrelated tab" && [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-cx-old" ]'
 awk '$3 != "@23"' "$FAKE_LOG.windows-open" >"$FAKE_LOG.windows-open.tmp"
 mv "$FAKE_LOG.windows-open.tmp" "$FAKE_LOG.windows-open"
 cx_retire cx-old
