@@ -22,8 +22,10 @@ fi
 provider=$(jq -r '.provider // "claude"' "$record")
 mixed=""
 if [ "$(invoking_provider)" = codex ] || [ "$(jq -r '.spawnerProvider // "claude"' "$record")" = codex ]; then mixed=1; fi
-if [ -n "$mixed" ]; then take_repository_lock "$(invoking_root)"; fi
-if [ "$provider" = codex ] || [ -n "$mixed" ]; then lock_worker "$record"; fi
+if [ "$provider" = codex ] || [ -n "$mixed" ]; then
+  take_repository_lock "$(invoking_root)"
+  lock_worker "$record"
+fi
 dir=$(jq -r .dir "$record")
 root=$(jq -r .root "$record")
 worktree=$(jq -r .worktree "$record")
