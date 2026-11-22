@@ -320,9 +320,10 @@ elif [ "$launcher" = tmux ]; then
     case $arg in *';') arg="${arg%;}\\;" ;; esac
     set -- "$@" "$arg"
   done
-  out=$(tmux new-window -d -P -F '#{window_id}' -n "$label" -c "$(printf '%s' "$dir" | sed 's/#/##/g')" "$@" 2>&1) ||
+  out=$(tmux new-window -d -P -F '#{window_id} #{pane_id}' -n "$label" -c "$(printf '%s' "$dir" | sed 's/#/##/g')" "$@" 2>&1) ||
     failed "Could not open a tmux window: $out"
-  tab=$(printf '%s\n' "$out" | grep -E '^@[0-9]+$' | tail -n 1 || true)
+  tab=$(printf '%s\n' "$out" | awk '$1 ~ /^@[0-9]+$/ && $2 ~ /^%[0-9]+$/ { t = $1; p = $2 } END { if (t != "") print t, p }' || true)
+  pane=${tab#* } tab=${tab%% *}
   [ -n "$tab" ] || failed "tmux opened no window: $out"
   write_record
   # The window closes when claude exits, so a worker that never registers and has no window failed to start.

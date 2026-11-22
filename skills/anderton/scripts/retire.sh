@@ -40,41 +40,35 @@ if [ "$(jq -r '.adopted // false' "$record")" = true ]; then
   exit 0
 fi
 
-# shows_thread <thread id>: true when the worker's tab or window holds one pane, the worker's, titled as Codex titles
-# that thread: its id cut to 29 characters and "...", after "Action Required | " while it waits on the user. A tab
-# that also holds another pane, or a pane moved out of it, would have that other pane closed with the tab.
-shows_thread() {
-  local titles prefix
-  [ ${#1} -ge 29 ] || return 1
-  prefix="${1:0:29}..."
+# The Codex worker's pane, by the id spawn.sh recorded, wherever it now lives: "present <title>", gone, or unknown. A
+# tmux pane id counts only in the server process it was opened in, since a restarted server reuses ids.
+codex_pane() {
+  local out
   case $launcher in
     herdr)
-      titles=$(HERDR_SOCKET_PATH="$socket" herdr pane list 2>/dev/null | jq -r --arg tab "$tab" --arg pane "$pane" \
-        '[.result.panes[]? | select(.tab_id == $tab)] | if length == 1 and .[0].pane_id == $pane then .[0].terminal_title // "" else error("not one pane") end' \
-        2>/dev/null) || return 1
+      out=$(HERDR_SOCKET_PATH="$socket" herdr pane get "$pane" 2>&1) || true
+      printf '%s' "$out" | jq -r 'if .error.code == "pane_not_found" or .error.code == "server_not_running" then "gone"
+        elif (.result.pane.terminal_title | type) == "string" then "present " + .result.pane.terminal_title else "unknown" end' \
+        2>/dev/null || echo unknown
       ;;
-    tmux) titles=$(tmux -S "$socket" list-panes -t "$tab" -F '#{pane_title}' 2>/dev/null) || return 1 ;;
-    *) return 1 ;;
-  esac
-  case $titles in
-    *"
-"*) return 1 ;;
-    "$prefix" | *" | $prefix") return 0 ;;
-  esac
-  return 1
-}
-
-# renamed: true when the worker's tab or window id still stands in its server under another label. place_state reads
-# that as absent, since a restarted server reuses ids, but a Codex worker's tab renamed by the user still runs it.
-renamed() {
-  case $launcher in
-    herdr) HERDR_SOCKET_PATH="$socket" herdr tab get "$tab" 2>/dev/null | jq -e --arg n "$label" '.result.tab.label | type == "string" and . != $n' >/dev/null 2>&1 ;;
     tmux)
-      tmux -S "$socket" list-windows -a -F '#{pid} #{window_id} #{window_name}' 2>/dev/null |
-        awk -v p="$server" -v w="$tab" '$1 == p && $2 == w { f = 1 } END { exit !f }'
+      if out=$(tmux -S "$socket" list-panes -a -F '#{pid} #{pane_id} #{pane_title}' 2>&1); then
+        printf '%s\n' "$out" | awk -v p="$server" -v id="$pane" '
+          $1 == p && $2 == id { sub(/^[^ ]* [^ ]* ?/, ""); print "present " $0; f = 1; exit }
+          END { if (!f) print "gone" }'
+      else
+        case $out in *"no server running"* | *"No such file or directory"*) echo gone ;; *) echo unknown ;; esac
+      fi
       ;;
-    *) return 1 ;;
+    *) echo unknown ;;
   esac
+}
+# True when codex_pane's answer $1 is the pane titled as Codex titles the recorded thread: its id cut to 29 characters
+# and "...", after "Action Required | " while it waits on the user.
+shows_thread() {
+  [ ${#id} -ge 29 ] || return 1
+  case $1 in "present ${id:0:29}..." | "present "*" | ${id:0:29}...") return 0 ;; esac
+  return 1
 }
 
 # A worker that may still be running keeps its worktree: stop it, or confirm Claude Code no longer lists it.
@@ -100,41 +94,45 @@ elif ! command -v claude >/dev/null 2>&1; then
   echo "retire.sh needs the claude CLI to stop '$name' first." >&2
   exit 1
 fi
-if [ "$launcher" != bg ]; then
-  # A session in a herdr tab or tmux window has no id for claude stop; closing its tab or window ends it. Only
-  # a tab or window place_state recognises as the worker's is closed, in the server it was opened in.
-  state=$(place_state "$launcher" "$socket" "$tab" "$label" "$server")
-  if [ "$provider" = codex ] && [ "$state" = absent ] && renamed; then
-    echo "Codex worker '$name': its $launcher tab $tab is still open under another name, so it may still run a conversation in $dir. Close it yourself once nothing in it needs keeping, then rerun." >&2
+if [ "$launcher" != bg ] && [ "$provider" = codex ]; then
+  # The user can split a Codex worker's tab, move its pane, or open another conversation in it (/resume), and no daemon
+  # request says which thread a client shows: only the recorded pane is closed, and only while titled with its thread.
+  refuse_pane() {
+    echo "Codex worker '$name': $1, so it was not closed. Close it yourself once nothing in it needs keeping, then rerun." >&2
+    exit 1
+  }
+  if [ -z "$pane" ]; then
+    [ "$(place_state "$launcher" "$socket" "$tab" "$label" "$server")" = absent ] ||
+      refuse_pane "its $launcher tab $tab was recorded without its pane"
+  elif now=$(codex_pane) && [ "$now" != gone ]; then
+    shows_thread "$now" ||
+      refuse_pane "its $launcher pane $pane does not show thread ${id:-(none registered)} (another conversation was opened there, Codex left it, or $launcher cannot say)"
+    # The check above took time: a direction or a turn that started since stops the close.
+    "$scripts/codex-worker.py" inactive "$record" || refuse_pane "thread $id became active while retiring"
+    # The last read before the close, after the slow daemon call: only a change made after it goes unseen.
+    now=$(codex_pane)
+    if [ "$now" != gone ]; then
+      shows_thread "$now" || refuse_pane "its $launcher pane $pane changed while retiring"
+      case $launcher in
+        herdr) HERDR_SOCKET_PATH="$socket" herdr pane close "$pane" >/dev/null 2>&1 || true ;;
+        tmux) tmux -S "$socket" kill-pane -t "$pane" >/dev/null 2>&1 || true ;;
+      esac
+    fi
+  fi
+  if { [ -n "$pane" ] && [ "$(codex_pane)" != gone ]; } || ! "$scripts/codex-worker.py" inactive "$record"; then
+    echo "Could not confirm '$name' stopped ($launcher pane ${pane:-(none recorded)} in ${socket:-(no server recorded)}); kept its worktree and record." >&2
     exit 1
   fi
-  if [ "$state" = present ]; then
-    # The user can open another conversation in a Codex tab (/resume, /new), which leaves the recorded thread idle
-    # and the tab running, and no daemon request says which thread a tab shows. spawn.sh has Codex title the tab with
-    # its thread id, which Codex cuts to 29 characters, so only a tab still showing the recorded thread is closed.
-    if [ "$provider" = codex ] && ! shows_thread "$id"; then
-      echo "Codex worker '$name': its $launcher tab $tab does not hold just the worker's pane showing thread ${id:-(none registered)} (another conversation was opened there, a pane was split off or moved, or Codex left it), so it was not closed. Close it yourself once nothing in it needs keeping, then rerun." >&2
-      exit 1
-    fi
-    # The check above took time: a direction or a turn that started since stops the close.
-    if [ "$provider" = codex ] && ! "$scripts/codex-worker.py" inactive "$record"; then
-      echo "Codex worker '$name' became active while retiring; its tab was left open." >&2
-      exit 1
-    fi
+elif [ "$launcher" != bg ]; then
+  # A session in a herdr tab or tmux window has no id for claude stop; closing its tab or window ends it. Only
+  # a tab or window place_state recognises as the worker's is closed, in the server it was opened in.
+  if [ "$(place_state "$launcher" "$socket" "$tab" "$label" "$server")" = present ]; then
     case $launcher in
       herdr) HERDR_SOCKET_PATH="$socket" herdr tab close "$tab" >/dev/null 2>&1 || true ;;
       tmux) tmux -S "$socket" kill-window -t "$tab" >/dev/null 2>&1 || true ;;
     esac
   fi
-  if [ "$provider" = codex ]; then
-    stopped() {
-      [ "$(place_state "$launcher" "$socket" "$tab" "$label" "$server")" = absent ] &&
-        "$scripts/codex-worker.py" inactive "$record"
-    }
-  else
-    stopped() { worker_gone "$launcher" "$socket" "$tab" "$name" "$server" "$label"; }
-  fi
-  if ! stopped; then
+  if ! worker_gone "$launcher" "$socket" "$tab" "$name" "$server" "$label"; then
     echo "Could not confirm '$name' stopped ($launcher ${tab:-(no id recorded)} in ${socket:-(no server recorded)}); kept its worktree and record." >&2
     exit 1
   fi

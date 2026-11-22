@@ -230,6 +230,17 @@ class WorkerTest(unittest.TestCase):
             sleep.side_effect = turn_recorded
             self.assertEqual("finished", worker_api.direction_state(self.client, self.worker))
 
+    def test_another_running_turn_does_not_hold_up_a_finished_direction(self):
+        self.worker["codexDirection"] = {"id": "done-id", "previousTurn": "previous", "sentAt": 1000}
+        self.client.turns = [{"id": "user-turn", "status": "inProgress"},
+                             {"id": "directed", "status": "completed"},
+                             {"id": "previous", "status": "completed"}]
+        self.client.items = {"user-turn": [user_message("The user's own request")],
+                             "directed": [user_message("Direction")], "previous": [user_message("Earlier work")]}
+        self.client.items["directed"][0]["item"]["clientId"] = "done-id"
+        self.client.info["status"] = {"type": "active", "activeFlags": []}
+        self.assertEqual("finished", worker_api.direction_state(self.client, self.worker))
+
     def test_reminds_when_pending_block_identity_stays_the_same(self):
         self.client.turns = [{"id": "first", "status": "inProgress"}]
         self.client.info["status"] = {"type": "active", "activeFlags": ["waitingOnApproval"]}

@@ -241,24 +241,25 @@ def direction_state(client, worker):
 
 
 def direction_seen(client, worker, pending):
-    """finished or pending as Codex shows the direction, pending while any turn runs, else unseen."""
+    """finished or pending as Codex shows the direction; when it shows nowhere, pending while the thread is busy, else
+    unseen. A busy thread only rules out a lost direction: another turn running never holds up a finished one."""
     thread = worker["id"]
-    # The queue, then the status, then the turns: an entry leaves the queue only once its turn has started, and that
-    # turn records the direction before it can end, so a direction cannot pass all three reads unseen.
+    # The queue first: an entry leaves it only once its turn has started, and that turn records the direction before it
+    # can end, so a direction gone from the queue shows in the turns, or the thread is busy with it, or a recheck sees it.
     for entry in client.pages("thread/queue/list", threadId=thread, limit=20):
         if entry.get("clientUserMessageId") == pending["id"]:
             return "pending"
-    if read_thread(client, worker)["status"]["type"] == "active":
-        return "pending"
+    busy = False
     for turn in client.pages("thread/turns/list", threadId=thread, limit=20, itemsView="notLoaded"):
-        if turn["status"] == "inProgress":
-            return "pending"
+        busy = busy or turn["status"] == "inProgress"
         for entry in client.pages("thread/items/list", threadId=thread, turnId=turn["id"], limit=10):
             item = entry["item"]
             if item["type"] == "userMessage" and item.get("clientId") == pending["id"]:
                 return "finished" if turn["status"] in {"completed", "interrupted", "failed"} else "pending"
         if turn["id"] == pending["previousTurn"]:
             break
+    if busy or read_thread(client, worker)["status"]["type"] == "active":
+        return "pending"
     return "unseen"
 
 
