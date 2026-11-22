@@ -382,21 +382,17 @@ other repositories pass untouched, and the repository is the one the session sta
 appends that footer: it prints no decision, so it can't approve a call, and it allows whenever it can't
 tell, a crash included.
 
-**`prompt.sh <name> [yes|no <fingerprint>]`** lets you answer a permission prompt from the Anderton
-session. It reads the prompt from the session's herdr tab or tmux pane and prints it with a
-fingerprint. On your answer it re-reads the screen, refuses unless the prompt is unchanged, presses
-Enter (`yes`, this one call) or Esc (`no`), and confirms from the screen that the prompt closed. It
-refuses a cursor not on a plain "1. Yes", so it can't pick "always allow". A dialog taller than its
-screen has lost its top, and neither herdr nor tmux can bring it back, so for a Bash command it reads
+**`prompt.sh <name>`** reads a Claude Code permission prompt from the session's herdr tab or tmux pane.
+Approve or deny the request directly in that pane. A dialog taller than its screen has lost its top,
+and neither herdr nor tmux can bring it back, so for a Bash command the script reads
 the full text from the transcripts of the session and its sub-agents and workflow agents. It does so
 only if exactly one waiting Bash call ends with the lines still on screen, and no call of another
 kind is waiting, since a clipped dialog hides its title. It shows the reason a permission rule or hook
 gave, from the screen. A hook that rewrites a command above those lines
-wouldn't show. Any other dialog taller than its screen is refused. Only a session holding an Anderton role in the target's repository can run it. That your
-word triggers it is an instruction to the Anderton, not something the script can prove, and a
-session running without permission checks can press keys by other means: this prevents mistakes
-and isn't a security boundary. It sees what the terminal draws, so what a terminal doesn't draw, such
-as a control character, it can't show you either. Background sessions have no tab, and `AskUserQuestion` isn't covered.
+wouldn't show. Any other dialog taller than its screen is refused. Only a session holding an Anderton
+role in the target's repository can inspect it. Codex Anderton can inspect its own Claude workers.
+The script only sees what the terminal draws. Use `claude attach` to handle an existing background
+session. Answer `AskUserQuestion` directly in its session.
 
 All six honour `CLAUDE_CONFIG_DIR` and need `jq`, `git` and a POSIX `ps`.
 
