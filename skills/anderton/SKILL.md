@@ -160,7 +160,8 @@ thread ID, inspect its tab. Once it has received the launch brief, run
 the brief was submitted, resolve the startup issue, retire the worker, and retry.
 
 Steer a Codex worker with `scripts/codex-workers.sh message <name> "<instruction>"`.
-The script queues the message to its registered thread. Read its status with
+The script queues the message to its registered thread. Send the next direction
+after Codex finishes the preceding one. Read its status with
 `scripts/codex-workers.sh status <name>` and its recent assistant output with
 `scripts/codex-workers.sh output <name>`. Inspect the worker's diff directly
 when reviewing. Its final

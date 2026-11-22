@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -65,6 +66,7 @@ class WorkerTest(unittest.TestCase):
         self.stage = directory / "stage"
         self.state.mkdir()
         self.stage.mkdir()
+        self.record = directory / "worker.json"
         self.worker = {"id": "00000000-0000-7000-8000-000000000123", "name": "fixture",
                        "dir": str(directory / "worktree"), "codexHome": str(directory / "codex")}
         self.client = FakeCodex(self.worker)
@@ -151,6 +153,30 @@ class WorkerTest(unittest.TestCase):
 
         with patch.object(self.client, "call", side_effect=starts_between_queue_and_status):
             self.assertFalse(worker_api.is_inactive(self.client, self.worker))
+
+    def test_waits_for_the_matching_direction_to_complete(self):
+        self.worker["codexDirection"] = {"id": "direction-id", "previousTurn": "previous"}
+        self.client.turns = [{"id": "new", "status": "inProgress"}]
+        self.client.items["new"] = [user_message("Direction")]
+        self.client.items["new"][0]["item"]["clientId"] = "direction-id"
+        self.assertFalse(worker_api.is_inactive(self.client, self.worker))
+        self.client.turns[0]["status"] = "completed"
+        self.assertTrue(worker_api.is_inactive(self.client, self.worker))
+
+    def test_clears_only_a_definitive_rejection(self):
+        original = self.client.call
+        rejected = worker_api.RequestRejected("thread/queue/add", {"code": -32600, "message": "invalid request"})
+
+        for error in (rejected, TimeoutError("connection lost")):
+            def reject_add(method, params):
+                if method == "thread/queue/add":
+                    self.assertIn("codexDirection", json.loads(self.record.read_text()))
+                    raise error
+                return original(method, params)
+
+            with patch.object(self.client, "call", side_effect=reject_add), self.assertRaises(type(error)):
+                worker_api.queue_direction(self.client, self.record, self.worker, "Direction")
+            self.assertEqual(isinstance(error, TimeoutError), "codexDirection" in json.loads(self.record.read_text()))
 
     def test_reminds_when_pending_block_identity_stays_the_same(self):
         self.client.turns = [{"id": "first", "status": "inProgress"}]

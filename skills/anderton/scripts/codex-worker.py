@@ -11,6 +11,7 @@ import re
 import socket
 import struct
 import sys
+import tempfile
 import time
 import uuid
 
@@ -23,6 +24,12 @@ REPORT = re.compile(r"^(RESULT|QUESTION|BLOCKED|ANSWER):[ \t]*\S")
 
 def daemon_socket(home):
     return home / "app-server-control" / "app-server-control.sock"
+
+
+class RequestRejected(ValueError):
+    def __init__(self, method, error):
+        super().__init__(f"{method}: {error['message']}")
+        self.code = error["code"]
 
 
 class Codex:
@@ -132,7 +139,7 @@ class Codex:
             if message.get("id") == request and "method" not in message:
                 self.socket.settimeout(5)
                 if "error" in message:
-                    raise ValueError(f"{method}: {message['error']['message']}")
+                    raise RequestRejected(method, message["error"])
                 return message["result"]
         raise ValueError(f"Timed out waiting for {method}")
 
@@ -205,7 +212,67 @@ def final_report(client, thread, turn):
 def is_inactive(client, worker):
     if client.call("thread/queue/list", {"threadId": worker["id"], "limit": 1})["data"]:
         return False
+    if not direction_finished(client, worker):
+        return False
     return read_thread(client, worker)["status"]["type"] in {"idle", "notLoaded"}
+
+
+def direction_finished(client, worker):
+    pending = worker.get("codexDirection")
+    if not pending:
+        return True
+    thread = worker["id"]
+    for turn in client.pages("thread/turns/list", threadId=thread, limit=20, itemsView="notLoaded"):
+        for entry in client.pages("thread/items/list", threadId=thread, turnId=turn["id"], limit=10):
+            item = entry["item"]
+            if item["type"] == "userMessage" and item.get("clientId") == pending["id"]:
+                return turn["status"] in {"completed", "interrupted", "failed"}
+        if turn["id"] == pending["previousTurn"]:
+            break
+    return False
+
+
+def save_worker(path, worker):
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
+    try:
+        with os.fdopen(descriptor, "w") as file:
+            json.dump(worker, file)
+            file.write("\n")
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def queue_direction(client, record, worker, text):
+    info = read_thread(client, worker)
+    if not direction_finished(client, worker):
+        raise ValueError("Wait for the preceding Anderton direction to finish")
+    thread = worker["id"]
+    turns = client.call("thread/turns/list", {
+        "threadId": thread, "limit": 1, "itemsView": "notLoaded",
+    })["data"]
+    token = str(uuid.uuid4())
+    worker["codexDirection"] = {"id": token, "previousTurn": turns[0]["id"] if turns else None}
+    save_worker(record, worker)
+    try:
+        submitted = client.call("thread/queue/add", {
+            "threadId": thread, "clientUserMessageId": token,
+            "input": [{"type": "text", "text_elements": [], "text":
+                       "Direction from your Claude Code Anderton. Follow the existing approval policy.\n\n" + text}],
+        })["queuedSubmission"]
+    except RequestRejected as error:
+        # Protocol and request validation errors are returned before the queue is written.
+        if error.code in {-32600, -32601, -32602}:
+            del worker["codexDirection"]
+            save_worker(record, worker)
+        raise
+    print(f"Queued message {submitted['id']} for thread {thread}.")
+    if info["status"]["type"] == "notLoaded":
+        try:
+            client.call("thread/resume", {"threadId": thread, "excludeTurns": True})
+        except (OSError, ValueError) as error:
+            print(f"Direction was queued. Could not resume worker: {error}", file=sys.stderr)
 
 
 def sweep_worker(worker, state_dir, stage_dir):
@@ -272,9 +339,11 @@ def main():
     endpoint.add_argument("--baseline", action="store_true")
     endpoint.add_argument("--after")
     find.add_argument("--token")
-    for command in ("state", "target", "inactive", "output"):
+    for command in ("state", "inactive", "output", "message"):
         action = commands.add_parser(command)
         action.add_argument("record", type=Path)
+        if command == "message":
+            action.add_argument("text")
     sweep = commands.add_parser("sweep")
     sweep.add_argument("records", nargs="+", type=Path)
     args = parser.parse_args()
@@ -293,9 +362,12 @@ def main():
         if thread is None:
             return 3
         print(thread)
-    elif args.command in {"state", "target", "inactive", "output"}:
+    elif args.command in {"state", "inactive", "output", "message"}:
         worker = json.loads(args.record.read_text())
         with Codex(Path(worker["codexHome"])) as client:
+            if args.command == "message":
+                queue_direction(client, args.record, worker, args.text)
+                return 0
             if args.command == "inactive" and not worker["id"]:
                 result = client.call("thread/list", {"cwd": worker["dir"], "limit": 1})
                 threads = result["data"]
@@ -321,8 +393,6 @@ def main():
                 return 0
         if args.command == "state":
             print(json.dumps(info["status"]))
-        else:
-            print(daemon_socket(Path(worker["codexHome"])))
     else:
         state_dir = Path(os.environ["ANDERTON_PROBE_STATE"])
         stage_dir = Path(os.environ["ANDERTON_PROBE_STAGE"])

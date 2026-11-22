@@ -75,8 +75,4 @@ fi
 if [ "$action" = output ]; then
   exec "$scripts/codex-worker.py" output "$record"
 fi
-socket=$("$scripts/codex-worker.py" target "$record")
-thread=$(jq -r .id "$record")
-codex_home=$(jq -r .codexHome "$record")
-message=$(printf 'Direction from your Claude Code Anderton. Follow the existing approval policy.\n\n%s' "$3")
-CODEX_HOME="$codex_home" codex queue --remote "unix://$socket" --thread "$thread" --message "$message" --resume
+"$scripts/codex-worker.py" message "$record" -- "$3"
