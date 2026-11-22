@@ -207,10 +207,21 @@ wait_for_binding() {
   return 1
 }
 register_clearable "$clearable_pid" before-clear
+mkdir "$clearable.lock"
+clearable_stop "$clearable_pid" before-clear > "$tmp/stale-worker-lock" 2>&1
+[ "$(grep -c 'A worker operation already holds' "$tmp/stale-worker-lock")" -eq 3 ]
+jq -e '.claudeSession == null' "$clearable" >/dev/null
+rmdir "$clearable.lock"
 clearable_stop "$clearable_pid" before-clear > "$tmp/before-clear-hook" 2>&1 &
 before_clear_watch=$!
 wait_for_binding before-clear
 jq -e --argjson pid "$clearable_pid" '.claudeSession | .id == "before-clear" and .pid == $pid and .procStart != ""' "$clearable" >/dev/null
+(
+  # shellcheck source=SCRIPTDIR/../skills/anderton/scripts/session-lib.sh
+  . "$script/session-lib.sh"
+  claude_stop_matches "$clearable" before-clear "$clearable_pid" "$(proc_start "$clearable_pid")"
+  if claude_stop_matches "$clearable" before-clear "$clearable_pid" different-process; then exit 1; fi
+)
 jq '.claudeDirection = {id:"old-direction", target:"before-clear"}' "$clearable" > "$tmp/updated-worker"
 mv "$tmp/updated-worker" "$clearable"
 register_clearable "$replacement_pid" replacement-session

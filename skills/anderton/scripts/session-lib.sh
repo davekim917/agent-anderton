@@ -29,6 +29,10 @@ proc_start() {
   printf '%s\n' "${t%"${t##*[![:space:]]}"}"
 }
 
+process_start_matches() {
+  [ -n "$2" ] && [ "$(proc_start "$1")" = "$2" ]
+}
+
 # True when pid $1 is running and is the process the session registry names: its start equals the
 # entry's procStart ($3) when it has one, else started when the entry's startedAt ($2, epoch ms) says.
 # A registry file outlives a crashed session, and its pid can then belong to an unrelated process.
@@ -39,7 +43,7 @@ registered_alive() {
   age=$(proc_age "$1")
   [ -n "$age" ] || return 1
   if [ -n "${3:-}" ]; then
-    [ "$(proc_start "$1")" = "$3" ]
+    process_start_matches "$1" "$3"
     return
   fi
   [ -n "$2" ] || return 0
@@ -289,33 +293,37 @@ live_claude_worker() {
 }
 
 claude_stop_matches() {
-  [ "$(live_claude_worker "$1" --allow-rebind)" = "$2" ] &&
-    [ "$(jq -r '.sessionId // empty' "$2")" = "$3" ]
+  local registry="$sessions/$3.json"
+  process_start_matches "$3" "$4" &&
+    [ "$(live_claude_worker "$1" --allow-rebind)" = "$registry" ] &&
+    jq -e --arg sid "$2" --arg pid "$3" '
+      .sessionId == $sid and (.pid | tostring) == $pid' "$registry" >/dev/null
 }
 
 bind_claude_worker() {
-  local worker=$1 root=$2 session_id=$3 registry=$4 transcript=$5 process start updated status
-  while claude_stop_matches "$worker" "$registry" "$session_id"; do
+  local worker=$1 root=$2 session_id=$3 process=$4 start=$5 transcript=$6 updated status worker_attempts=0
+  while claude_stop_matches "$worker" "$session_id" "$process" "$start"; do
     if (
-      take_repository_lock "$root"
-      lock_worker "$worker" || exit 1
-      claude_stop_matches "$worker" "$registry" "$session_id" || exit 3
-      process=$(jq -r .pid "$registry") || exit 3
-      start=$(proc_start "$process")
-      [ -n "$start" ] || exit 3
-      updated=$(mktemp "$worker.XXXXXX") || exit 3
+      take_repository_lock "$root" 75 || exit 1
+      lock_worker "$worker" || exit 2
+      claude_stop_matches "$worker" "$session_id" "$process" "$start" || exit 1
+      updated=$(mktemp "$worker.XXXXXX") || exit 1
       if jq --arg sid "$session_id" --arg file "$transcript" --argjson pid "$process" --arg start "$start" '
         .claudeSession = {id: $sid, transcript: $file, pid: $pid, procStart: $start} | .reportTransport = "transcript"
         | if .claudeDirection != null and .claudeDirection.target != $sid then del(.claudeDirection) else . end
         ' "$worker" > "$updated" && mv -f "$updated" "$worker"; then exit 0; fi
       rm -f "$updated"
-      exit 3
+      exit 1
     ); then
       return 0
     else
       status=$?
     fi
-    [ "$status" = 1 ] || return 1
+    case $status in
+      75) ;;
+      2) worker_attempts=$((worker_attempts + 1)); [ "$worker_attempts" -lt 3 ] || return 1 ;;
+      *) return 1 ;;
+    esac
     sleep 1
   done
   return 1
@@ -572,14 +580,15 @@ lock_worker() {
 take_repository_lock() {
   mkdir -p "$holders" || exit 1
   repository_lock="$(holder_path "$1").lock"
-  local tries=0 owner
+  local tries=0 owner status timeout_status=${2:-1}
   if command -v flock >/dev/null 2>&1; then
-    exec 9>>"$repository_lock.flock"
-    if ! flock -w 10 9; then
+    exec 9>>"$repository_lock.flock" || exit 1
+    if flock -w 10 9; then return; else status=$?; fi
+    if [ "$status" = 1 ]; then
       echo "Could not take $repository_lock.flock within 10 seconds: another claim in this repository is running." >&2
-      exit 1
+      exit "$timeout_status"
     fi
-    return
+    exit 1
   fi
   until mkdir "$repository_lock" 2>/dev/null; do
     # Not there, so mkdir failed for another reason: retry once and let it say why.
@@ -595,6 +604,7 @@ take_repository_lock() {
     tries=$((tries + 1))
     if [ "$tries" -ge 50 ]; then
       echo "Could not take $repository_lock within 10 seconds. If no other claim is running, remove it and rerun." >&2
+      if [ -n "$owner" ]; then exit "$timeout_status"; fi
       exit 1
     fi
     sleep 0.2

@@ -61,7 +61,7 @@ case $(jq -r '.status // empty' "$reg") in
   busy | waiting) ;;
   *)
     if ! read -r watch_pid watch_start 2>/dev/null < "${record%.json}.$target.watch" ||
-      [ -z "$watch_start" ] || [ "$(proc_start "$watch_pid")" != "$watch_start" ]; then
+      ! process_start_matches "$watch_pid" "$watch_start"; then
       echo "The worker's Anderton Stop watcher has ended. Have it end a turn with the plugin loaded and retry." >&2
       exit 1
     fi
