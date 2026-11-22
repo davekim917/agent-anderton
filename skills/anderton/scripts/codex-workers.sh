@@ -5,13 +5,20 @@ scripts=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=SCRIPTDIR/session-lib.sh
 . "$scripts/session-lib.sh"
 usage() {
-  echo "usage: codex-workers.sh status|output|register <worker> | message <worker> <text>" >&2
+  echo "usage: codex-workers.sh status|output|register <worker> | message <worker> [--replace] <text>" >&2
+  echo "--replace drops queued Anderton directions. A running turn is untouched." >&2
   exit 2
 }
 action=${1:-}
 case $action in
   status | output | register) [ "$#" -eq 2 ] || usage ;;
-  message) if [ "$#" -ne 3 ] || [ -z "$3" ]; then usage; fi ;;
+  message)
+    case $# in
+      3) [ -n "$3" ] || usage ;;
+      4) if [ "$3" != --replace ] || [ -z "$4" ]; then usage; fi ;;
+      *) usage ;;
+    esac
+    ;;
   sweep) [ "$#" -eq 1 ] || usage ;;
   *) usage ;;
 esac
@@ -78,4 +85,8 @@ fi
 if [ "$action" = output ]; then
   exec "$scripts/codex-worker.py" output "$record"
 fi
-"$scripts/codex-worker.py" message "$record" -- "$3"
+if [ "$#" -eq 4 ]; then
+  "$scripts/codex-worker.py" message --replace "$record" -- "$4"
+else
+  "$scripts/codex-worker.py" message "$record" -- "$3"
+fi

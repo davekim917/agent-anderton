@@ -43,9 +43,16 @@ if [ -n "$mixed" ] && ! worker_belongs "$record" "$(invoking_root)" "$(caller_cl
   exit 1
 fi
 if [ "$(jq -r '.adopted // false' "$record")" = true ]; then
-  if [ "$provider" = codex ] && ! worker_belongs "$record" "$(invoking_root)" "$(caller_claim "$(invoking_root)")"; then
-    echo "This Anderton does not own worker '$name'." >&2
-    exit 1
+  if [ "$provider" = codex ]; then
+    if ! worker_belongs "$record" "$(invoking_root)" "$(caller_claim "$(invoking_root)")"; then
+      echo "This Anderton does not own worker '$name'." >&2
+      exit 1
+    fi
+    if jq -e '.codexDirection != null or ((.codexDirections // []) | length > 0)' "$record" >/dev/null &&
+      ! "$anderton_scripts/codex-worker.py" inactive "$record" --directions-only --prune; then
+      echo "Codex worker '$name' may have an undelivered direction. Inspect its thread before retiring." >&2
+      exit 1
+    fi
   fi
   spawner=$(jq -r '.spawner // "its Anderton"' "$record")
   rm -f "$record"
@@ -140,7 +147,7 @@ EOF
     echo "This Anderton does not own Codex worker '$name'." >&2
     exit 1
   fi
-  if ! "$scripts/codex-worker.py" inactive "$record"; then
+  if ! "$scripts/codex-worker.py" inactive "$record" --prune; then
     echo "Codex worker '$name' may still be running or have an undelivered direction. Inspect its thread before retiring." >&2
     exit 1
   fi

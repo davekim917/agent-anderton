@@ -4,7 +4,8 @@ set -euo pipefail
 . "$(dirname "$0")/session-lib.sh"
 
 usage() {
-  echo "usage: worker.sh status|output <name> | message <name> <direction>" >&2
+  echo "usage: worker.sh status|output <name> | message <name> [--replace] <direction>" >&2
+  echo "For Codex workers, --replace drops queued Anderton directions. A running turn is untouched." >&2
   exit 2
 }
 action=${1:-}
@@ -21,7 +22,11 @@ RECORDS
   exit "$result"
 fi
 case $name in '' | -* | *[!a-z0-9-]*) usage ;; esac
-case "$action:$#" in status:2 | output:2 | message:3) ;; *) usage ;; esac
+case "$action:$#" in
+  status:2 | output:2 | message:3) ;;
+  message:4) [ "$3" = --replace ] || usage ;;
+  *) usage ;;
+esac
 root=$(invoking_root)
 role=$(caller_claim "$root")
 record="$holders/workers/$name.json"
@@ -32,6 +37,7 @@ fi
 if [ "$(record_provider "$record")" = codex ]; then
   exec "$anderton_scripts/codex-workers.sh" "$@"
 fi
+if [ "$action" = message ] && [ "$#" -eq 4 ]; then usage; fi
 if [ "$action" = output ]; then
   exec "$anderton_scripts/claude-worker.py" output "$record"
 fi

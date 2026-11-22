@@ -2583,7 +2583,7 @@ rm -f "$cx_record"
 # the title check and the worktree checks are retire.sh's own.
 codexdir="$work/codex-scripts"
 mkdir -p "$codexdir"
-cp "$scripts/retire.sh" "$scripts/session-lib.sh" "$codexdir/"
+cp "$scripts/retire.sh" "$scripts/session-lib.sh" "$scripts/worker.sh" "$scripts/codex-workers.sh" "$codexdir/"
 cat >"$codexdir/waiting.sh" <<FAKE
 #!/usr/bin/env bash
 # The owned record first and another after a pause, as the real lister writes them one by one.
@@ -2595,6 +2595,10 @@ FAKE
 # $FAKE_RETITLE_AT, that call also retitles every pane, as a user switching conversations during it would.
 cat >"$codexdir/codex-worker.py" <<'FAKE'
 #!/usr/bin/env bash
+if [ "$1" = message ]; then
+  printf '%s\n' "$@" >>"$FAKE_LOG.direction"
+  exit 0
+fi
 n=$(cat "$FAKE_LOG.inactive" 2>/dev/null || echo 0)
 echo $((n + 1)) >"$FAKE_LOG.inactive"
 if [ "$((n + 1))" = "${FAKE_RETITLE_AT:-}" ]; then
@@ -2636,6 +2640,18 @@ tmux_pane %21 "${cx_title}x"
 cx_retire cx-tab
 check "or one titled with a longer id that merely starts the same" eval '[ "$status" -eq 1 ] && contains "does not show thread" && [ ! -s "$FAKE_LOG.killed" ]'
 tmux_pane %21 "$cx_title"
+for entrypoint in worker.sh codex-workers.sh; do
+  (cd "$rho" && env CLAUDE_PID="$p_rl" CLAUDE_CODE_SESSION_ID=rl-1 "$codexdir/$entrypoint" \
+    message cx-tab --replace '--literal direction') >"$work/direction.out" 2>&1 && status=0 || status=$?
+  check "$entrypoint forwards replacement and preserves a direction starting with dashes" \
+    eval '[ "$status" -eq 0 ] && grep -qx -- --replace "$FAKE_LOG.direction" &&
+          grep -qx -- "--literal direction" "$FAKE_LOG.direction"'
+  rm -f "$FAKE_LOG.direction"
+done
+cx_retire cx-tab FAKE_INACTIVE_PASSES=0
+check "retire.sh keeps a Codex worker while a direction is still pending" \
+  eval '[ "$status" -eq 1 ] && contains "undelivered direction" && [ ! -s "$FAKE_LOG.killed" ] &&
+        [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/cx-tab.json" ] && [ -d "$work/wt-cx-tab" ]'
 cx_retire cx-tab FAKE_INACTIVE_PASSES=1
 check "or one whose thread starts a turn while retire.sh checks it" eval '[ "$status" -eq 1 ] && contains "became active" && [ ! -s "$FAKE_LOG.killed" ]'
 cx_retire cx-tab FAKE_RETITLE_AT=2

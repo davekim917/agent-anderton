@@ -184,14 +184,17 @@ the brief was submitted, resolve the startup issue, have the user close its tab,
 retire the worker, and retry.
 
 Steer a Codex worker with `scripts/worker.sh message <name> "<instruction>"`.
-The script queues the message to its registered thread. Send the next direction
-after Codex finishes the preceding one. Read its status with
+Directions append to the registered thread's queue and run in order. Use
+`scripts/worker.sh message <name> --replace "<instruction>"` to drop queued
+Anderton directions and append the new one. A running turn is untouched.
+Read its status with
 `scripts/codex-workers.sh status <name>` and its recent assistant output with
 `scripts/codex-workers.sh output <name>`. Inspect the worker's diff directly
 when reviewing. Its final
 `RESULT:`, `QUESTION:`, `BLOCKED:`, and `ANSWER:` replies wake you through
 the watch. Send Codex permission and input requests to the user in the
-worker's tab. Retire it with `scripts/retire.sh <name>` after its active turn ends.
+worker's tab. Retire it with `scripts/retire.sh <name>` once its queue and active
+turn have cleared.
 It closes only the worker's own pane, and only while that pane still shows its
 thread; when it refuses because that pane shows another conversation, ask the
 user to close it once nothing in it needs keeping, then rerun it.
@@ -211,7 +214,8 @@ final replies. Use `scripts/worker.sh message <name> "<instruction>"` for the
 direction and `status` or `output` to inspect it. A Claude worker must load the
 Anderton plugin and end a turn before a Codex Anderton can steer it through its
 Stop hook.
-`scripts/retire.sh <name>` releases it and leaves it running.
+`scripts/retire.sh <name>` releases it and leaves it running. For an adopted
+Codex session, wait until its Anderton directions have finished.
 
 **Choose the effort yourself for every worker.** `spawn.sh` refuses to start without
 it, and you are the one holding the user's actual words. A level the user named
