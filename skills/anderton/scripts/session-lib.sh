@@ -269,41 +269,31 @@ is_worker() {
   [ -n "$(worker_record "$@")" ]
 }
 
-# True when ls-files -v listing $2 of worktree $1 tags a file whose edits status hides and removal deletes: an
-# assume-unchanged one (a lower-case tag), or a skip-worktree one (S) on disk. A sparse checkout's skipped files are
-# normally absent; one git quotes for its name counts as present.
-hidden_edit() {
-  local path
-  case "
-$2" in *"
-"[[:lower:]]" "*) return 0 ;; esac
-  while IFS= read -r path; do
-    case $path in '') continue ;; '"'*) return 0 ;; esac
-    if [ -e "$1/$path" ] || [ -L "$1/$path" ]; then return 0; fi
-  done <<EOF
-$(printf '%s\n' "$2" | sed -n 's/^S //p')
-EOF
-  return 1
-}
-
 # What in worktree $1, started at commit $2, retire.sh must keep: prints uncommitted, unpushed (commits no remote
 # branch has) or unreadable, or nothing. Untracked files count whatever status.showUntrackedFiles says, since git
 # worktree remove deletes the ones status leaves out, and a git command that fails is never read as "nothing to keep".
 worktree_work() {
-  local out
-  if ! out=$(git -C "$1" status --porcelain --untracked-files=normal 2>/dev/null); then
-    echo unreadable
-  elif [ -n "$out" ]; then
-    echo uncommitted
-  elif ! out=$(git -C "$1" ls-files -v 2>/dev/null); then
-    echo unreadable
-  elif hidden_edit "$1" "$out"; then
-    echo uncommitted
-  elif ! out=$(git -C "$1" rev-list -1 HEAD --not --remotes "$2" 2>/dev/null); then
-    echo unreadable
-  elif [ -n "$out" ]; then
-    echo unpushed
+  local out list e kept=""
+  out=$(git -C "$1" status --porcelain --untracked-files=normal 2>/dev/null) || { echo unreadable; return; }
+  if [ -n "$out" ]; then echo uncommitted; return; fi
+  # Status also hides edits to an assume-unchanged file (a lower-case ls-files -v tag) and to a skip-worktree one (S)
+  # on disk, and removal deletes them. A sparse checkout's skipped files are normally absent, so those are not work.
+  list=$(mktemp "${TMPDIR:-/tmp}/anderton-ls.XXXXXX") || { echo unreadable; return; }
+  if git -C "$1" ls-files -v -z >"$list" 2>/dev/null; then
+    while IFS= read -r -d '' e; do
+      case $e in
+        [[:lower:]]" "*) kept=uncommitted ;;
+        "S "*) if [ -e "$1/${e#S }" ] || [ -L "$1/${e#S }" ]; then kept=uncommitted; fi ;;
+      esac
+      [ -z "$kept" ] || break
+    done <"$list"
+  else
+    kept=unreadable
   fi
+  rm -f "$list"
+  if [ -n "$kept" ]; then echo "$kept"; return; fi
+  out=$(git -C "$1" rev-list -1 HEAD --not --remotes "$2" 2>/dev/null) || { echo unreadable; return; }
+  if [ -n "$out" ]; then echo unpushed; fi
 }
 
 lock_codex_worker() {

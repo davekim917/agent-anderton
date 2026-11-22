@@ -2544,6 +2544,23 @@ run "$scripts/retire.sh" hidden-edit
 check "but a skip-worktree file absent from disk, as a sparse checkout leaves it, is not work" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-hidden-edit" ]'
 git -C "$rho" config --unset core.sparseCheckout
 git -C "$rho" config --unset sparse.expectFilesOutsideOfPatterns
+rho_worker skipped-name
+mkdir -p "$work/wt-skipped-name/docs"
+echo v1 >"$work/wt-skipped-name/docs/café.md"
+git -C "$work/wt-skipped-name" add docs
+rho_commit skipped-name
+git -C "$work/wt-skipped-name" push -q origin HEAD:refs/heads/skipped-name 2>/dev/null
+git -C "$work/wt-skipped-name" update-index --skip-worktree "docs/café.md"
+rm -f "$work/wt-skipped-name/docs/café.md"
+real_git=$(command -v git)
+mkdir -p "$work/git-fails"
+printf '#!/usr/bin/env bash\nfor a; do [ "$a" != ls-files ] || exit 128; done\nexec "%s" "$@"\n' "$real_git" >"$work/git-fails/git"
+chmod +x "$work/git-fails/git"
+run env PATH="$work/git-fails:$PATH" "$scripts/retire.sh" skipped-name
+check "a worktree whose file list git cannot read is kept" eval '[ "$status" -eq 3 ] && [ -d "$work/wt-skipped-name" ] && contains "git could not"'
+run "$scripts/retire.sh" skipped-name
+check "and a skipped file absent from disk is not work, whatever characters its name holds" \
+  eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-skipped-name" ]'
 rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/hidden-edit.json"
 [ ! -d "$work/wt-hidden-edit" ] || git -C "$rho" worktree remove --force "$work/wt-hidden-edit"
 rho_worker bad-base
@@ -2666,7 +2683,7 @@ awk '$3 == "@23" { $4 = "renamed-by-user" } { print }' "$FAKE_LOG.windows-open" 
 mv "$FAKE_LOG.windows-open.tmp" "$FAKE_LOG.windows-open"
 cx_retire cx-old
 check "or renames it, which no longer marks it the worker's" \
-  eval '[ "$status" -eq 1 ] && contains "recorded without its pane" && contains "unrelated tab" && [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-cx-old" ]'
+  eval '[ "$status" -eq 1 ] && contains "recorded without its pane" && contains "unrelated tab" && ! contains "worktree remove" && [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-cx-old" ]'
 awk '$3 != "@23"' "$FAKE_LOG.windows-open" >"$FAKE_LOG.windows-open.tmp"
 mv "$FAKE_LOG.windows-open.tmp" "$FAKE_LOG.windows-open"
 cx_retire cx-old

@@ -110,7 +110,7 @@ if [ "$launcher" != bg ] && [ "$provider" = codex ]; then
         awk -v p="$server" -v w="$tab" '$1 == p && $2 == w { f = 1 } END { exit !f }' ;;
       *) false ;;
     esac; then
-      echo "Codex worker '$name' was recorded without its pane, and $launcher tab $tab still exists, maybe renamed, so nothing was closed or deleted. If it is the worker's, close it once nothing in it needs keeping, then rerun. If it is an unrelated tab that took the id after a $launcher restart, retire the worker by hand: remove $dir with git worktree remove, then delete $record." >&2
+      echo "Codex worker '$name' was recorded without its pane, and $launcher tab $tab still exists, maybe renamed. It may also be an unrelated tab that took the id after a $launcher restart, and closing that would end someone else's work. Its record and worktree are left in place: tell the user." >&2
       exit 1
     fi
   elif now=$(codex_pane) && [ "$now" != gone ]; then
