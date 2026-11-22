@@ -2572,8 +2572,11 @@ out=$(cd "$rho" && env CLAUDE_PID="$p_rs" "$scripts/waiting.sh" --codex-workers)
 check "a project's Anderton renamed after it started a Codex worker still owns it" [ "$out" = "$cx_record" ]
 out=$(cd "$rho" && env CLAUDE_PID="$p_rl" "$scripts/waiting.sh" --codex-workers)
 check "and the repository's Anderton does not take it over" [ -z "$out" ]
-jq -c '.name = "rho-scope"' "$rs_entry" >"$work/rs.tmp"
+jq -c '.name = "rho-scope" | .sessionId = "rs-after-clear"' "$rs_entry" >"$work/rs.tmp"
 mv "$work/rs.tmp" "$rs_entry"
+(cd "$rho" && env CLAUDE_PID="$p_rs" CLAUDE_CODE_SESSION_ID=rs-after-clear "$scripts/claim.sh" --scope side >/dev/null)
+out=$(cd "$rho" && env CLAUDE_PID="$p_rs" "$scripts/waiting.sh" --codex-workers)
+check "a legacy Codex worker follows its named project Anderton after /clear changes the spawner session ID" [ "$out" = "$cx_record" ]
 rm -f "$cx_record"
 
 # Retiring a Codex worker. Ownership and the daemon's answer are faked; finding the worker's pane by its recorded id,
