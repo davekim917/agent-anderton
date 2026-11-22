@@ -140,6 +140,30 @@ class WorkerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "More than one"):
             worker_api.find_thread(self.client, directory, "", token)
 
+    def test_launch_match_is_inconclusive_until_first_user_message_is_visible(self):
+        thread = self.worker["id"]
+        token = "00000000-0000-4000-8000-000000000789"
+        directory = Path(self.worker["dir"])
+        directory.mkdir()
+        self.record.write_text(json.dumps({**self.worker, "codexLaunchToken": token}))
+        with patch.object(worker_api.sys, "argv", ["codex-worker.py", "launch-matches", str(self.record), thread]):
+            original = self.client.call
+            with patch.object(self.client, "call", side_effect=lambda method, params:
+                              {"data": []} if method == "thread/turns/list" else original(method, params)):
+                with self.assertRaisesRegex(ValueError, "first user message is unavailable"):
+                    worker_api.main()
+                self.assertIsNone(worker_api.find_thread(self.client, directory, "", token))
+            self.client.items[thread] = [message("Waiting for the brief")]
+            with self.assertRaisesRegex(ValueError, "first user message is unavailable"):
+                worker_api.main()
+            self.assertIsNone(worker_api.find_thread(self.client, directory, "", token))
+            self.client.items[thread] = [user_message("Unrelated work")]
+            self.assertEqual(3, worker_api.main())
+            self.assertIsNone(worker_api.find_thread(self.client, directory, "", token))
+            self.client.items[thread] = [user_message(f"Anderton launch {token}\n\nBrief")]
+            self.assertEqual(0, worker_api.main())
+            self.assertEqual(thread, str(worker_api.find_thread(self.client, directory, "", token)))
+
     def test_inactivity_requires_empty_queue_and_current_idle_status(self):
         self.assertTrue(worker_api.is_inactive(self.client, self.worker))
         self.client.queue = [{"id": "next"}]
@@ -250,6 +274,52 @@ class WorkerTest(unittest.TestCase):
             self.delivered()
         with patch.object(worker_api.time, "time", return_value=1000 + worker_api.BLOCK_REMINDER_SECONDS):
             self.assertIn("still waiting on approval", self.scan()[0])
+
+    def test_verifies_a_full_codex_thread_at_its_original_directory(self):
+        Path(self.worker["dir"]).mkdir()
+        self.assertEqual(self.worker["dir"], worker_api.thread_identity(self.client, self.worker["id"])["dir"])
+        self.client.info["parentThreadId"] = "another-thread"
+        with self.assertRaisesRegex(ValueError, "full session"):
+            worker_api.thread_identity(self.client, self.worker["id"])
+
+    def test_reconciles_a_notice_after_a_lost_queue_acknowledgment(self):
+        claim = {"sessionId": self.worker["id"], "dir": self.worker["dir"], "name": "fixture"}
+        notice = self.stage / "notice"
+        notice.mkdir()
+        (notice / "message").write_text("RESULT: fixture completed")
+        original = self.client.call
+        sent = []
+        started = []
+
+        def lost_ack(method, params):
+            if method == "thread/queue/add":
+                sent.append(params["clientUserMessageId"])
+                self.client.queue = [{"id": "operator-submission", "clientUserMessageId": "unrelated"},
+                                     {"id": "anderton-notice", "clientUserMessageId": sent[0]}]
+                raise TimeoutError("acknowledgment lost")
+            if method == "thread/queue/start":
+                started.append(params["queuedSubmissionId"])
+                return {"turn": {"id": "completed-notice"}}
+            return original(method, params)
+
+        with patch.object(self.client, "call", side_effect=lost_ack):
+            with self.assertRaises(TimeoutError):
+                worker_api.deliver_notice(self.client, claim, notice)
+            self.assertEqual(sent[0], json.loads((notice / "receipt.json").read_text())["id"])
+            self.client.info["status"] = {"type": "active"}
+            self.assertFalse(worker_api.deliver_notice(self.client, claim, notice))
+            self.assertEqual([], started)
+            self.client.info["status"] = {"type": "idle"}
+            self.assertFalse(worker_api.deliver_notice(self.client, claim, notice))
+            self.assertEqual(["anderton-notice"], started)
+            self.client.queue = []
+            self.client.turns = [{"id": "completed-notice", "status": "interrupted"}]
+            self.client.items["completed-notice"] = []
+            self.assertFalse(worker_api.deliver_notice(self.client, claim, notice))
+            self.client.items["completed-notice"] = [user_message("RESULT: fixture completed")]
+            self.client.items["completed-notice"][0]["item"]["clientId"] = sent[0]
+            self.assertTrue(worker_api.deliver_notice(self.client, claim, notice))
+        self.assertEqual(1, len(sent))
 
 
 if __name__ == "__main__":

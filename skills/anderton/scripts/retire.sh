@@ -20,7 +20,12 @@ if [ ! -f "$record" ]; then
   exit 1
 fi
 provider=$(jq -r '.provider // "claude"' "$record")
-if [ "$provider" = codex ]; then lock_codex_worker "$record"; fi
+mixed=""
+if [ "$(invoking_provider)" = codex ] || [ "$(jq -r '.spawnerProvider // "claude"' "$record")" = codex ]; then mixed=1; fi
+if [ "$provider" = codex ] || [ -n "$mixed" ]; then
+  take_repository_lock "$(invoking_root)"
+  lock_worker "$record"
+fi
 dir=$(jq -r .dir "$record")
 root=$(jq -r .root "$record")
 worktree=$(jq -r .worktree "$record")
@@ -33,10 +38,18 @@ server=$(jq -r '.server // empty' "$record")
 label=$(jq -r '.label // empty' "$record")
 label=${label:-$name}
 
+if [ -n "$mixed" ] && ! worker_belongs "$record" "$(invoking_root)" "$(caller_claim "$(invoking_root)")"; then
+  echo "This Anderton does not own worker '$name'." >&2
+  exit 1
+fi
 if [ "$(jq -r '.adopted // false' "$record")" = true ]; then
+  if [ "$provider" = codex ] && ! worker_belongs "$record" "$(invoking_root)" "$(caller_claim "$(invoking_root)")"; then
+    echo "This Anderton does not own worker '$name'." >&2
+    exit 1
+  fi
   spawner=$(jq -r '.spawner // "its Anderton"' "$record")
   rm -f "$record"
-  echo "Released '$name': it keeps running and no longer reports to $spawner. Tell it so by SendMessage."
+  echo "Released '$name': it keeps running and no longer reports to $spawner."
   exit 0
 fi
 
@@ -69,6 +82,47 @@ shows_thread() {
   [ ${#id} -ge 29 ] || return 1
   case $1 in "present ${id:0:29}..." | "present "*" | ${id:0:29}...") return 0 ;; esac
   return 1
+}
+
+mixed_claude_pane() {
+  local registry sid pid listed pane_pid
+  registry=$(live_claude_worker "$record")
+  case $registry in '' | *$'\n'*) return 1 ;; esac
+  sid=$(jq -r .sessionId "$registry")
+  pid=$(jq -r .pid "$registry")
+  case $launcher in
+    herdr)
+      listed=$(HERDR_SOCKET_PATH="$socket" herdr agent list 2>/dev/null) || return 1
+      printf '%s' "$listed" | jq -e --arg sid "$sid" --arg pane "$pane" '
+        [.result.agents[]? | select(.agent_session.value == $sid) | .pane_id] == [$pane]' >/dev/null
+      ;;
+    tmux)
+      listed=$(tmux -S "$socket" list-panes -a -F '#{pid} #{pane_id} #{pane_pid}' 2>/dev/null) || return 1
+      pane_pid=$(printf '%s\n' "$listed" | awk -v p="$server" -v id="$pane" '$1 == p && $2 == id {print $3}')
+      [ -n "$pane_pid" ] && has_ancestor "$pid" "$pane_pid"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+mixed_claude_gone() {
+  local listed sid entry pid cwd
+  sid=$(jq -r '.claudeSession.id // empty' "$record")
+  for entry in "$sessions"/*.json; do
+    [ -f "$entry" ] || continue
+    cwd=$(jq -r '.cwd // empty' "$entry" 2>/dev/null) || continue
+    case $cwd in "$dir" | "$dir"/*) ;; *) continue ;; esac
+    pid=$(jq -r '.pid // empty' "$entry" 2>/dev/null) || continue
+    if [ -n "$pid" ] && registered_alive "$pid" "$(jq -r '.startedAt // empty | floor' "$entry")" \
+      "$(jq -r '.procStart // empty' "$entry")"; then
+      return 1
+    fi
+  done
+  listed=$(claude agents --json 2>/dev/null) || return 1
+  printf '%s' "$listed" | jq -e --arg sid "$sid" --arg dir "$dir" '
+    type == "array" and all(.[];
+      ($sid == "" or .sessionId != $sid) and
+      ((.cwd // "") as $cwd | $cwd != $dir and ($cwd | startswith($dir + "/") | not)))' >/dev/null
 }
 
 # A worker that may still be running keeps its worktree: stop it, or confirm Claude Code no longer lists it.
@@ -132,10 +186,32 @@ if [ "$launcher" != bg ] && [ "$provider" = codex ]; then
     echo "Could not confirm '$name' stopped ($launcher pane ${pane:-(none recorded)} in ${socket:-(no server recorded)}); kept its worktree and record." >&2
     exit 1
   fi
+elif [ "$launcher" != bg ] && [ -n "$mixed" ] && [ -n "$pane" ]; then
+  current=$(codex_pane)
+  if [ "$current" != gone ]; then
+    if ! mixed_claude_pane; then
+      echo "Could not verify '$name' still runs in its original pane. Close it directly, then retry." >&2
+      exit 1
+    fi
+    case $launcher in
+      herdr) HERDR_SOCKET_PATH="$socket" herdr pane close "$pane" >/dev/null 2>&1 || true ;;
+      tmux) tmux -S "$socket" kill-pane -t "$pane" >/dev/null 2>&1 || true ;;
+    esac
+  fi
+  if [ "$(codex_pane)" != gone ] || ! session_gone "$name" || ! mixed_claude_gone; then
+    echo "Could not confirm '$name' stopped; kept its worktree and record." >&2
+    exit 1
+  fi
 elif [ "$launcher" != bg ]; then
+  if [ -n "$mixed" ]; then
+    if ! worker_gone "$launcher" "$socket" "$tab" "$name" "$server" "$label" || ! mixed_claude_gone; then
+      echo "The worker's exact pane was never recorded. Close it directly, then retry once the tab is gone." >&2
+      exit 1
+    fi
+  fi
   # A session in a herdr tab or tmux window has no id for claude stop; closing its tab or window ends it. Only
   # a tab or window place_state recognises as the worker's is closed, in the server it was opened in.
-  if [ "$(place_state "$launcher" "$socket" "$tab" "$label" "$server")" = present ]; then
+  if [ -z "$mixed" ] && [ "$(place_state "$launcher" "$socket" "$tab" "$label" "$server")" = present ]; then
     case $launcher in
       herdr) HERDR_SOCKET_PATH="$socket" herdr tab close "$tab" >/dev/null 2>&1 || true ;;
       tmux) tmux -S "$socket" kill-window -t "$tab" >/dev/null 2>&1 || true ;;

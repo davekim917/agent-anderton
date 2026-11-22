@@ -177,7 +177,7 @@ route_to_scope() {
 to_scope() {
   local r spid sname
   while IFS= read -r r; do
-    [ -n "$r" ] && [ "$r" != "$2" ] || continue
+    if [ -z "$r" ] || [ "$r" = "$2" ]; then continue; fi
     spid=$(jq -r '.pid // empty' "$r" 2>/dev/null)
     if [ -z "$spid" ] || ! is_holder "$sessions/$spid.json" "$r"; then continue; fi
     sname=$(jq -r '.name // empty' "$sessions/$spid.json" 2>/dev/null)

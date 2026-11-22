@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The plugin's shape: Claude Code only, invoke-only, and two hooks, neither of which can approve anything.
+# Both plugin manifests share one invoke-only skill. Claude hooks cannot approve anything.
 # Runs under macOS's bash 3.2 as well as Linux: bash test/structure.test.sh
 set -euo pipefail
 
@@ -26,10 +26,18 @@ jq -e '.name == "agent-anderton" and ([.plugins[].name] == ["agent-anderton"])' 
 # Without a version, each install and update takes the repository's latest commit.
 [ "$(jq -r 'has("version")' "$manifest")" = false ] || fail "plugin.json must not pin a version"
 
-# The scripts read Claude Code's own session registry, so a Codex manifest would install a skill that cannot work.
-for path in .codex-plugin always-on.md; do
-  [ ! -e "$root/$path" ] || fail "$path must not exist"
-done
+codex_manifest="$root/.codex-plugin/plugin.json"
+codex_marketplace="$root/.agents/plugins/marketplace.json"
+jq -e '.name == "agent-anderton" and .skills == "./skills/" and .hooks == "./.codex-plugin/hooks.json"' "$codex_manifest" >/dev/null ||
+  fail "Codex must load the shared skill without Claude hooks"
+jq -e '.hooks == {}' "$root/.codex-plugin/hooks.json" >/dev/null ||
+  fail "Codex uses a detached watch and must not load plugin hooks"
+jq -e '.name == "agent-anderton" and .plugins == [.plugins[0]]
+  and .plugins[0].name == "agent-anderton" and .plugins[0].source.path == "./"' "$codex_marketplace" >/dev/null ||
+  fail "Codex marketplace must install the root plugin"
+[ ! -e "$root/always-on.md" ] || fail "the role must stay invoke-only"
+grep -qx '  allow_implicit_invocation: false' "$root/skills/anderton/agents/openai.yaml" ||
+  fail "Codex must require explicit Anderton invocation"
 
 # A background hook cannot return a decision, and the reporting gate only blocks, so the plugin can never answer a
 # permission prompt.
@@ -56,7 +64,7 @@ awk 'NR == 1 { if ($0 != "---") exit; next }
   END { exit (closed && found) ? 0 : 1 }' "$root/skills/anderton/SKILL.md" ||
   fail "SKILL.md frontmatter must set disable-model-invocation: true"
 
-for script in claim.sh waiting.sh spawn.sh retire.sh adopt.sh watch.sh prompt.sh report-gate.sh; do
+for script in claim.sh waiting.sh spawn.sh retire.sh adopt.sh watch.sh prompt.sh report-gate.sh codex-anderton.sh worker.sh role-message.sh; do
   [ -x "$root/skills/anderton/scripts/$script" ] || fail "scripts/$script must exist and be executable"
 done
 [ -f "$root/skills/anderton/scripts/session-lib.sh" ] || fail "scripts/session-lib.sh must exist"

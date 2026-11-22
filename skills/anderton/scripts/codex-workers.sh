@@ -39,35 +39,32 @@ if [ -z "$record" ]; then
 fi
 if [ "$action" = register ] || [ "$action" = message ]; then
   expected_thread=$(jq -r .id "$record")
-  lock_codex_worker "$record"
-  if ! jq -e --arg id "$expected_thread" '.provider == "codex" and .id == $id' "$record" >/dev/null; then
+  root=$(invoking_root)
+  take_repository_lock "$root"
+  lock_worker "$record"
+  if ! worker_belongs "$record" "$root" "$(caller_claim "$root")" ||
+    ! jq -e --arg id "$expected_thread" '.provider == "codex" and .id == $id' "$record" >/dev/null; then
     echo "Codex worker '$2' changed while acquiring its lock." >&2
     exit 1
   fi
 fi
-update_record() {
-  local updated
-  updated=$(mktemp "$record.XXXXXX")
-  if jq --arg key "$1" --arg value "$2" '.[$key] = $value' "$record" >"$updated" &&
-    mv -f "$updated" "$record"; then return; fi
-  rm -f "$updated"
-  return 1
-}
-if [ "$action" = register ] && jq -e '.id == ""' "$record" >/dev/null; then
-  thread=$("$scripts/codex-worker.py" find "$(jq -r .codexHome "$record")" "$(jq -r .dir "$record")" \
-    --after "$(jq -r '.codexBaseline // ""' "$record")" --token "$(jq -r '.codexLaunchToken // ""' "$record")") || {
-    echo "No verified Codex thread yet. Inspect the worker tab and check that it received the launch brief." >&2
-    exit 1
-  }
-  update_record id "$thread"
+if [ "$action" = register ]; then
+  thread=$expected_thread
+  launch_token=$(jq -r '.codexLaunchToken // ""' "$record")
+  if [ -z "$thread" ]; then
+    thread=$("$scripts/codex-worker.py" find "$(jq -r .codexHome "$record")" "$(jq -r .dir "$record")" \
+      --after "$(jq -r '.codexBaseline // ""' "$record")" --token "$launch_token") || {
+      echo "No verified Codex thread yet. Inspect the worker tab and check that it received the launch brief." >&2
+      exit 1
+    }
+  fi
+  bind_codex_worker "$record" "$thread" "$launch_token"
+  printf '%s\n' "$thread"
+  exit 0
 fi
 if ! jq -e '.id != ""' "$record" >/dev/null; then
   echo "Codex worker '$2' needs to register its thread first." >&2
   exit 1
-fi
-if [ "$action" = register ]; then
-  jq -r .id "$record"
-  exit 0
 fi
 if [ "$action" = status ]; then
   exec "$scripts/codex-worker.py" state "$record"

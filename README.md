@@ -1,6 +1,6 @@
 <h1 align="center">Anderton</h1>
 
-<p align="center"><b>One Claude Code session that runs all the others.</b></p>
+<p align="center"><b>One Claude Code or Codex session that runs all the others.</b></p>
 
 <p align="center">
 It starts real worker sessions, keeps track of every one, reviews what they build,<br>
@@ -25,20 +25,20 @@ Claude Code handles one task per session well. Run several on one repo and the c
 to you: which session is sitting on a permission prompt, which one already opened its PR, which one
 is about to deploy something nobody reviewed.
 
-Anderton hands that job to one of your own sessions. It's a plugin for the Claude Code you already
-run, so the session in charge works in your repo with your memory, hooks and plugins, and you don't
-set up a separate supervisor. Type `/anderton` and that session takes over.
+Anderton hands that job to a Claude Code or Codex session in your repository. Invoke
+`/anderton` in Claude Code or `$agent-anderton:anderton` in Codex.
 
 ## What it does
 
 - **Starts full worker sessions.** Each task gets a full Claude Code or Codex session in its own git
   worktree, started from `origin/HEAD`. It loads your user settings and the repo's committed config
   (CLAUDE.md, skills, hooks, plugins) and shares the repo's auto memory. Inside
-  [herdr](https://herdr.dev) or tmux it opens in a tab you can watch and type into; without either it
-  can only run in the background.
+  [herdr](https://herdr.dev) or tmux it opens in a tab you can watch and type into. New worker
+  launches require one of those multiplexers.
 - **Receives milestones and blockers.** Workers report a result, a question, a blocker or an answer.
-  Claude workers use SendMessage. Codex workers report in their final replies, which the Anderton's
-  watch reads from the Codex daemon. You can open either worker's tab to see its work.
+  Claude workers reporting to Claude use SendMessage. Codex workers and Claude workers
+  reporting to Codex use their final replies, which the watch reads from the native runtime.
+  You can open either worker's tab to see its work.
 - **Shows you what's waiting on you.** Before every status report it lists the sessions in the repo
   that have stopped for a person: a finished reply, a permission prompt, a multiple-choice question,
   a tool call stuck for over a minute, a blocked background session. Its own workers report to it
@@ -77,10 +77,8 @@ Installed before the rename, as `anderton@anderton`? Run the two lines above, th
 sessions load their hooks from the old install. The role and worker records in `~/.claude/anderton/`
 carry over.
 
-Run Claude Code inside [herdr](https://herdr.dev) or tmux. Anderton needs one to work properly:
-workers open in tabs you can watch and type into, and you can answer their permission prompts from
-the Anderton. Without one, workers can only run in the background, where you can't watch them or
-answer their prompts from here.
+Run Claude Code inside [herdr](https://herdr.dev) or tmux to launch workers. Each worker opens
+in a tab or window you can watch and type into.
 
 In the session you want in charge, give it a name (workers report to it by name), then start it:
 
@@ -98,9 +96,46 @@ It writes a brief for each task and starts a worker for each. From then on the w
 Anderton, not you. It answers what it can, brings you the decisions that are yours, reviews each
 PR, and deploys what passes.
 
-**Requirements:** Claude Code with background sessions (`claude --bg`, `claude agents`), built and
+**Requirements:** Claude Code with `claude agents`, built and
 tested on 2.1.312; `git`, `jq` and `gh`; and herdr or tmux. It runs on Linux and on macOS,
 including macOS's stock bash 3.2.
+
+### Open a Codex Anderton
+
+Install from a local checkout of this plugin into the Codex home you use for the role:
+
+```sh
+codex plugin marketplace add /path/to/agent-anderton
+codex plugin add agent-anderton@agent-anderton
+```
+
+With the local Codex daemon running, open `skills/anderton/scripts/codex-anderton.sh`
+from a herdr or tmux pane in the repository and invoke `$agent-anderton:anderton`.
+The launcher gives that interactive thread the current pane's context for opening
+workers. For a separate Claude profile, set the same `CLAUDE_CONFIG_DIR` Claude
+uses before launching Codex. Both coordinators read their claims and worker
+records there, under `anderton/`. A custom directory isolates standalone plugin
+state. NanoClaw deployment authority comes from `$HOME/.claude/anderton`.
+
+The Codex workflow uses the local thread APIs in Codex CLI 0.171.0 and needs
+Python 3. Anderton commands access the control socket, shared registry and worker
+worktrees. If the sandbox blocks that access, approve the specific host command
+through Codex's approval prompt. The launcher leaves your approval and sandbox
+settings alone. Codex workers open with workspace writes and user-reviewed
+approvals. A Codex Anderton directs the operator to the worker pane for approvals
+and input requests.
+
+The watcher commits a Codex notification after its exact input is visible in a
+terminal turn on the claimed thread. A turn the operator interrupted still
+retains the notification in its history, so the watcher leaves it there for
+the operator to review.
+
+The repository Anderton sets the default worker provider for all of its projects.
+An inherited Codex default uses the daemon home of the repository Anderton.
+Use `--provider claude` or `--provider codex` to choose explicitly.
+`worker.sh` steers and inspects Codex workers, and steers Claude workers from
+Codex through the Claude worker's Anderton Stop hook. A Claude session you adopt
+must already have this plugin loaded and end a turn to receive those directions.
 
 ## Questions
 
@@ -134,6 +169,10 @@ The workers keep running. Start a new session, give it the same name, and run `/
 the role once the old session has exited. Then ask the workers where they stand, since a report
 sent while no session had that name may not have arrived.
 
+For Codex, resume its exact thread. Closing a pane or restarting the daemon
+leaves the claim in place. Archive the thread to release its claim, or have
+the replacement session use `--take-over` after you authorize it.
+
 **How do I stop everything?**
 
 Ask the Anderton to retire its workers. A plain shell can also retire Claude workers with `retire.sh <name>`; it
@@ -150,7 +189,7 @@ local Codex daemon with the thread and turn APIs in Codex CLI 0.171.0.
 The worker opens in its own worktree and tab. Anderton sends follow-ups to
 the worker's Codex thread ID and receives milestone replies and blocker
 alerts through its existing watch. Open the worker's tab to handle a Codex
-permission prompt or input request. The Anderton itself runs in Claude Code.
+permission prompt or input request.
 A Codex worker's pane is titled with its thread ID. `retire.sh` closes only that pane, found by the id it was
 opened with wherever it now is, and only while it still shows that thread: after `/resume` or `/new` there, close
 it yourself.
@@ -160,9 +199,8 @@ it yourself.
 [firstmate](https://github.com/kunchenguid/firstmate) inspired it. firstmate is a full agent
 distro: it runs from its own directory, supports many harnesses and backends, adds second mates,
 and has a watcher process that notices a stalled crewmate by itself. Anderton is a lighter take for
-people who live in Claude Code: one skill and seven shell scripts inside the setup you already have.
-It has no separate process to run: workers report in at each milestone, and a hook wakes the
-Anderton when a session it answers for blocks on a person.
+Claude Code and Codex. Workers report at each milestone and a local watch wakes
+the Anderton when an owned session blocks on a person.
 
 **Can I have more than one?**
 
@@ -175,9 +213,8 @@ session holds one role.
 <details>
 <summary><b>How it works</b></summary>
 
-The skill is [`skills/anderton/SKILL.md`](skills/anderton/SKILL.md); the bar it reviews against is
-[`references/good-code.md`](skills/anderton/references/good-code.md). Seven scripts do the
-mechanical parts.
+The skill is [`skills/anderton/SKILL.md`](skills/anderton/SKILL.md). It reviews
+against [`references/good-code.md`](skills/anderton/references/good-code.md).
 
 **What a repository is.** The session's repository, named by its main checkout (or, for a bare
 repository, its git dir), so every worktree of it belongs to one repository. Outside a repository,
@@ -195,6 +232,11 @@ role survives `/clear` (same process, new session id), `--resume` (same session,
 `/restart` (same process, new start time). The watch takes a role back only for the session that
 held it, and never from a live holder; any other session still claims it explicitly, with
 `--take-over` while its holder is live.
+Codex records its daemon home, thread UUID and original directory. An unloaded
+thread still holds its role. If the daemon cannot answer, the claim is treated as
+unknown and blocks an ordinary takeover.
+An Anderton must release an adopted worker before that session can claim a role.
+A worker launched by Anderton must be retired before it can be replaced by a coordinator session.
 
 **`waiting.sh`** lists the live sessions in the caller's repository (`--all`: every repository) that
 wait on a person, leaving out every Anderton in the caller's repository, the repository's and each
@@ -224,53 +266,47 @@ finished, with the reason: its worktree is gone; its HEAD, past the commit it st
 origin's default branch as the cached remote ref has it (no fetch), with how long ago it landed; or,
 with `gh` installed, a PR whose head is its HEAD is merged or closed and none for its branch is open.
 A worker is left out while any session that may be it is busy: one under its name or recorded id, or
-one working in its worktree, so renaming it does not hide it. When `claude agents` fails, no worker
-is judged ready. After those reasons, a worker found none of them for, and idle for a day, is listed as
+one working in its worktree, so renaming it does not hide it. When `claude agents` fails, no Claude
+worker is judged ready. After those reasons, a worker found none of them for, and idle for a day, is listed as
 `idle Nd, no finished work found — check its PR`, since one whose work sits in another repository's
 worktree leaves its own at its base. Idle time runs from the newest transcript entry of any session
 that may be it, else from when it was started. A line notes uncommitted work, or commits no remote branch has, which `retire.sh`
 would keep. `--blocked` leaves this section out.
 
-**`spawn.sh --effort LEVEL [--bg (not inside herdr)] [--model M] [--mode MODE] [--base REF] <name> [brief-file]`**
-starts a worker: a full Claude Code session named `<name>`, in a new git worktree at
+**`spawn.sh --effort LEVEL [--provider claude|codex] [--model M] [--mode MODE] [--base REF] <name> [brief-file]`**
+starts a full Claude Code or Codex worker labelled `<name>` in a new git worktree at
 `$ANDERTON_WORKTREES/wt-<name>` (default: the folder that holds the repository). The base is
 `origin/HEAD`, else `origin/main`, `origin/master` or `HEAD`.
 
 - Inside herdr (`HERDR_ENV=1`), the worker opens in a new tab of the caller's workspace, labelled
   `<name>`, or `<caller>/<name>` when the caller is a named project's Anderton, its name folded to
-  lowercase letters, digits and hyphens (`herdr tab create`, `herdr agent start --kind claude`, then `herdr agent prompt` with
-  the brief). If Claude Code stops at a startup prompt there, the spawn shows the screen, closes the
-  tab and fails, unless the session cannot be confirmed stopped, when it keeps the worktree and
-  record for `retire.sh`. A failed tab that is confirmed closed, including one herdr could not open,
-  says to rerun with `--bg`.
-- Inside herdr `--bg` is refused: you watch and type into every worker through its tab, so a caller
-  cannot hide one by choice. The one exception is that rerun: the failed start leaves a marker for its
-  name that admits one `--bg` spawn of that name from the same project within the hour; any later
-  spawn of the name uses it up or clears it. A name
-  herdr would refuse (not starting with a letter, or over 32 characters) is refused up front there.
-- Inside tmux (`$TMUX`, and not herdr), it opens in a new detached window with that same label. The spawn
+  lowercase letters, digits and hyphens. If Claude Code stops at a startup prompt, the spawn shows
+  the screen, closes the tab and fails. If it cannot confirm the session stopped, it keeps the
+  worktree and record for `retire.sh`. On a Codex startup issue, the spawn keeps the tab for
+  inspection. Worker names in herdr start with a letter and use at most 32 characters.
+- With tmux context and no usable herdr context, it opens a new detached tmux window with that same label. The spawn
   waits up to `$ANDERTON_START_WAIT` seconds (default 30) for the session to register: a window
   that closes first fails the spawn, and one still open is kept with a note that it may wait at a
   startup prompt.
-- Elsewhere, or with `--bg` outside herdr, it is a background session (`claude --bg`). Inside herdr
-  without its workspace, socket or CLI, and with no tmux, it starts in the background with a note.
-- It runs in the caller's permission mode, read from the caller's transcript.
+- A Claude Code Anderton starts Claude workers in its own permission mode unless `--mode` is
+  supplied. A Codex Anderton uses Claude Code's default mode for Claude workers unless `--mode`
+  is supplied. Codex workers use workspace writes and user-reviewed approvals.
 - `--effort` is required (`low`, `medium`, `high`, `xhigh` or `max`), so a worker never runs at the
   default just because nobody chose. The Anderton picks it from your request and says so; a level you
   name wins.
-- Workers run on Opus unless `--model` names another, whatever your Claude Code default is. The
-  Anderton passes `--model` only when you name a model.
-- The brief, from the file or stdin, gets closing rules: message the caller by name with SendMessage
-  only for a `RESULT:`, `QUESTION:`, `BLOCKED:` or `ANSWER:`, one message per milestone; give every
-  sub-agent an explicit effort and prefer one-shot sub-agents; and don't deploy, restart or message
-  anyone off the machine unless the task says to.
+- Claude workers default to Opus, and Codex workers use the configured Codex model. The Anderton
+  passes `--model` when you name a model.
+- The brief, from the file or stdin, asks the worker to report a `RESULT:`, `QUESTION:`,
+  `BLOCKED:` or `ANSWER:` at each milestone. Claude workers reporting to Claude Code use
+  SendMessage. Other pairings report in final replies. The brief also sets the rules for sub-agents
+  and external actions.
 - The worker is recorded in `~/.claude/anderton/workers/<name>.json`, with the herdr or tmux server
   it was opened in.
 
 **`retire.sh <name>`** stops that worker, then removes its worktree and record. A herdr tab or tmux
 window is closed only when it still carries the label it was opened with, in the server recorded at spawn, and
 the worker counts as stopped only when that tab or window is gone and its name has left
-`claude agents`; a background worker is stopped with `claude stop`. It exits 3 and keeps the
+`claude agents`; an existing background worker is stopped with `claude stop`. It exits 3 and keeps the
 worktree when the worktree has uncommitted changes, or commits since it started that no remote
 branch has. Untracked files count whatever `status.showUntrackedFiles` says, and a worktree git
 cannot read or compare with its base is kept too. Gitignored files don't count as changes.

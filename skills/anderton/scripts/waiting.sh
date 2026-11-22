@@ -16,60 +16,30 @@ require_tools waiting.sh
 
 all=""
 blocked=""
-codex_workers=""
+worker_list=""
 for arg in "$@"; do
   case $arg in
     --all) all=1 ;;
     --blocked) blocked=1 ;;
-    --codex-workers) codex_workers=1 ;;
+    --codex-workers) worker_list=codex ;;
+    --transcript-workers) worker_list=transcript ;;
+    --workers) worker_list=all ;;
     *) echo "usage: waiting.sh [--all] [--blocked | --codex-workers]" >&2; exit 2 ;;
   esac
 done
 
 judged=""
 root=$(invoking_root)
-project=$(holder_record "$root")
 records=$(project_holders "$root")
 
 # The role the caller holds, if any. Each Anderton answers only for the workers it started, and the repository's also
 # for a project's workers once that project's Anderton is gone. A session nobody started is a tab the user opened and
 # reads, so no Anderton answers for it.
-caller="${CLAUDE_PID:-}"
-if [ -z "$caller" ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then caller=$(session_pid "$CLAUDE_CODE_SESSION_ID"); fi
-mine=""
-if [ -n "$caller" ]; then
-  while IFS= read -r r; do
-    if [ -n "$r" ] && is_holder "$sessions/$caller.json" "$r"; then mine=$r; fi
-  done <<EOF
-$records
-EOF
-fi
-answering_role() { # answering_role <name> <cwd> [session id] [pid] [start]: the record of the role that answers for it
-  # The spawner is the role held by the session that started it (a rename keeps the session), else by a session of
-  # its name (/clear keeps the name). Records written before spawnerSession have only the name.
-  local spawner spawner_session r hp w by
-  w=$(worker_record "$@")
-  [ -n "$w" ] || return 0
-  spawner=$(jq -r '.spawner // empty' "$w" 2>/dev/null || true)
-  spawner_session=$(jq -r '.spawnerSession // empty' "$w" 2>/dev/null || true)
-  for by in ${spawner_session:+session} ${spawner:+name}; do
-    while IFS= read -r r; do
-      if [ -z "$r" ] || [ "$r" = "$project" ]; then continue; fi
-      hp=$(jq -r '.pid // empty' "$r" 2>/dev/null || true)
-      [ -n "$hp" ] || continue
-      case $by in
-        session) [ "$(jq -r '.sessionId // empty' "$r" 2>/dev/null || true)" = "$spawner_session" ] ;;
-        name) [ "$(jq -r '.name // empty' "$sessions/$hp.json" 2>/dev/null || true)" = "$spawner" ] ;;
-      esac || continue
-      if is_holder "$sessions/$hp.json" "$r"; then
-        printf '%s\n' "$r"
-        return
-      fi
-    done <<EOF
-$records
-EOF
-  done
-  printf '%s\n' "$project"
+mine=$(caller_claim "$root")
+answering_role() {
+  local worker
+  worker=$(worker_record "$@")
+  if [ -n "$worker" ]; then answering_claim "$worker" "$root"; fi
 }
 held_by() { # held_by <session id>: true when an Anderton's record names that session
   local r
@@ -84,14 +54,15 @@ answers_for() { # answers_for <name> <cwd> [session id] [pid] [start]: true when
   [ -z "$mine" ] || [ "$(answering_role "$@")" = "$mine" ]
 }
 
-if [ -n "$codex_workers" ]; then
+if [ -n "$worker_list" ]; then
   [ -n "$mine" ] || exit 0
   for r in "$holders"/workers/*.json; do
     [ -f "$r" ] || continue
-    if jq -e --arg root "$root" '.provider == "codex" and .root == $root' "$r" >/dev/null 2>&1 &&
-      answers_for "$(jq -r .name "$r")" "$(jq -r .dir "$r")"; then
-      printf '%s\n' "$r"
-    fi
+    case $worker_list in
+      codex) [ "$(record_provider "$r")" = codex ] || continue ;;
+      transcript) uses_claude_transcript "$r" "$(invoking_provider)" || continue ;;
+    esac
+    if worker_belongs "$r" "$root" "$mine"; then printf '%s\n' "$r"; fi
   done
   exit 0
 fi
@@ -304,11 +275,11 @@ last_activity() { # last_activity <record>: epoch seconds of the newest transcri
   if [ -n "$best" ]; then echo "$best"; fi
 }
 ready_to_retire() {
-  local r f name dir why at pid start pstart bname bcwd provider lines=""
+  local r f name dir why at pid start pstart bname bcwd provider lines="" claude_ready=1
   # Without the list of background sessions, which have no registry entry, a busy one would read as idle.
   if ! agents_json=$(claude agents --json 2>/dev/null) || ! printf '%s' "$agents_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    echo "waiting.sh: claude agents failed, so no worker is judged ready to retire" >&2
-    return 0
+    claude_ready=""
+    echo "waiting.sh: claude agents failed, so no Claude worker is judged ready to retire" >&2
   fi
   # Every registry entry on one line each, for last_activity: Claude Code writes each file as one line.
   registry_entries=$(for f in "$sessions"/*.json; do if [ -e "$f" ]; then cat "$f"; echo; fi; done)
@@ -331,11 +302,11 @@ EOF
     dir=$(jq -r '.dir // empty' "$r")
     if [ -z "$name" ] || [ -z "$dir" ]; then continue; fi
     if [ -z "$all" ] && [ "$(jq -r '.root // empty' "$r")" != "$root" ]; then continue; fi
-    answers_for "$name" "$dir" || continue
+    [ -z "$mine" ] || worker_belongs "$r" "$root" "$mine" || continue
     provider=$(jq -r '.provider // "claude"' "$r")
     if [ "$provider" = codex ]; then
       "$(dirname "$0")/codex-worker.py" inactive "$r" || continue
-    elif worker_busy "$r"; then
+    elif [ -z "$claude_ready" ] || worker_busy "$r"; then
       continue
     fi
     why=$(finished "$r" || true)
@@ -363,6 +334,29 @@ EOF
   if [ -n "$lines" ]; then printf '=== Ready to retire (run retire.sh <name>)\n%s' "$lines"; fi
 }
 [ -n "$blocked" ] || ready_to_retire
+
+if [ -n "$mine" ] && [ -z "$blocked" ]; then
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    name=$(jq -r .name "$r")
+    id=$(jq -r '.id // empty' "$r")
+    if [ -z "$id" ]; then
+      printf '=== %s (Codex, waiting for thread registration)\n' "$name"
+      continue
+    fi
+    if ! state=$("$anderton_scripts/codex-worker.py" state "$r" 2>/dev/null); then
+      printf '=== %s (Codex %s, status unavailable)\n' "$name" "$id"
+      continue
+    fi
+    flags=$(printf '%s' "$state" | jq -r '[.activeFlags[]? |
+      if . == "waitingOnApproval" then "approval" elif . == "waitingOnUserInput" then "user input" else empty end] | join(" and ")')
+    if [ -n "$flags" ]; then
+      printf '=== %s (Codex %s, waiting on %s)\nOpen its worker pane to respond.\n' "$name" "$id" "$flags"
+    fi
+  done <<EOF
+$("$anderton_scripts/waiting.sh" --codex-workers)
+EOF
+fi
 
 # The You Should Know plugin's notes it has seen and not marked known. Its store is a private format, so a store
 # of any other shape makes jq fail, and prints nothing.

@@ -9,27 +9,59 @@ set -euo pipefail
 . "$(dirname "$0")/session-lib.sh"
 
 require_tools adopt.sh
+provider=claude
+if [ "${1:-}" = --provider ]; then
+  [ "$#" -ge 3 ] || exit 2
+  provider=$2
+  shift 2
+fi
 name="${1:-}"
+usage="usage: adopt.sh [--provider claude] <name> | adopt.sh --provider codex <name> <thread-uuid>"
 case $name in
-  '' | -* | *[!a-z0-9-]*) echo "usage: adopt.sh <session name: a-z 0-9 ->" >&2; exit 2 ;;
+  '' | -* | *[!a-z0-9-]*) echo "$usage" >&2; exit 2 ;;
 esac
+case "$provider:$#" in claude:1 | codex:2) ;; *) echo "$usage" >&2; exit 2 ;; esac
 refuse() { echo "Not adopted: $1" >&2; exit 1; }
 
-sid="${CLAUDE_CODE_SESSION_ID:?not running inside a Claude Code session}"
-pid="${CLAUDE_PID:-$(session_pid "$sid")}"
-[ -n "$pid" ] || refuse "cannot find this session's pid under $sessions."
-me=$(jq -r '.name // empty' "$sessions/$pid.json" 2>/dev/null || true)
+sid=$(invoking_session)
+caller_provider=$(invoking_provider)
 root=$(invoking_root)
+take_repository_lock "$root"
 records=$(project_holders "$root")
-role=""
-while IFS= read -r r; do
-  if [ -n "$r" ] && is_holder "$sessions/$pid.json" "$r"; then role=$r; fi
-done <<EOF
-$records
-EOF
+role=$(caller_claim "$root")
 [ -n "$role" ] || refuse "only a session holding an Anderton role adopts a session."
+me=$(claim_name "$role")
 [ -n "$me" ] || refuse "this session has no name for the adopted one to report to. Name it with /rename, then rerun."
 [ "$name" != "$me" ] || refuse "an Anderton does not adopt itself."
+record="$holders/workers/$name.json"
+role_scope=$(jq -r '.scope // empty' "$role")
+mkdir -p "$holders/workers"
+
+if [ "$provider" = codex ]; then
+  target=$2
+  codex_home=$(invoking_codex_home) || refuse "cannot resolve the Codex home."
+  data=$("$anderton_scripts/codex-worker.py" identity "$codex_home" "$target" --adopt) || refuse "cannot verify this Codex thread."
+  cwd=$(printf '%s' "$data" | jq -r .dir)
+  [ "$(project_root "$cwd")" = "$root" ] || refuse "$target is in another repository."
+  while IFS= read -r r; do
+    if [ -n "$r" ] && jq -e --arg id "$target" --arg home "$codex_home" '
+      .provider == "codex" and .sessionId == $id and .codexHome == $home' "$r" >/dev/null 2>&1; then
+      refuse "$target holds an Anderton role of its own; it answers to the user."
+    fi
+  done <<EOF
+$records
+EOF
+  [ -z "$(codex_worker_record "$codex_home" "$target" "$cwd")" ] || refuse "$target already has a worker record."
+  if ! (set -C && : > "$record") 2>/dev/null; then refuse "$name already has a worker record."; fi
+  jq -nc --arg name "$name" --arg root "$root" --arg codex_home "$codex_home" --argjson thread "$data" \
+    --arg spawner "$me" --arg sid "$sid" --arg scope "$role_scope" --arg provider "$caller_provider" \
+    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    {name: $name, provider: "codex", launcher: "adopted", id: $thread.id, dir: $thread.dir, root: $root,
+     codexHome: $codex_home, codexBaselineTurn: $thread.baseline, worktree: false, adopted: true, startedAt: $at,
+     spawner: $spawner, spawnerSession: $sid, spawnerProvider: $provider, spawnerScope: (if $scope == "" then null else $scope end)}' >| "$record"
+  echo "Adopted '$name' (Codex thread $target). Tell it to report milestones in its final reply with worker.sh message."
+  exit 0
+fi
 
 found="" cwd=""
 for s in "$sessions"/*.json; do
@@ -41,7 +73,7 @@ for s in "$sessions"/*.json; do
   cwd=$(jq -r '.cwd // empty' "$s")
 done
 [ -n "$found" ] || refuse "no live session is named $name."
-[ -n "$cwd" ] && [ "$(project_root "$cwd")" = "$root" ] || refuse "$name is in another repository."
+if [ -z "$cwd" ] || [ "$(project_root "$cwd")" != "$root" ]; then refuse "$name is in another repository."; fi
 while IFS= read -r r; do
   if [ -n "$r" ] && is_holder "$found" "$r"; then refuse "$name holds an Anderton role of its own; it answers to the user."; fi
 done <<EOF
@@ -52,13 +84,17 @@ owned=$(worker_record "$name" "$cwd" "$(jq -r '.sessionId // empty' "$found")" "
   "$(jq -r '.startedAt // empty | floor' "$found" 2>/dev/null)")
 [ -z "$owned" ] || refuse "$name already reports to $(jq -r '.spawner // "another Anderton"' "$owned" 2>/dev/null)."
 
-mkdir -p "$holders/workers"
-record="$holders/workers/$name.json"
 if ! (set -C && : > "$record") 2>/dev/null; then
   refuse "$name already reports to $(jq -r '.spawner // "another Anderton"' "$record" 2>/dev/null); that Anderton releases it with retire.sh $name first."
 fi
 jq -nc --arg name "$name" --arg dir "$cwd" --arg root "$root" --arg spawner "$me" --arg spawner_session "$sid" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --slurpfile reg "$found" \
+  --arg scope "$role_scope" --arg provider "$caller_provider" --slurpfile reg "$found" \
   '{name: $name, launcher: "adopted", dir: $dir, root: $root, worktree: false, adopted: true, spawner: $spawner, spawnerSession: $spawner_session,
-    sessionId: $reg[0].sessionId, pid: $reg[0].pid, sessionStartedAt: $reg[0].startedAt, startedAt: $at}' >| "$record"
-echo "Adopted '$name': it now reports to $me, and $me hears when it blocks. Tell it so by SendMessage."
+    spawnerProvider: $provider, spawnerScope: (if $scope == "" then null else $scope end),
+    sessionId: $reg[0].sessionId, pid: $reg[0].pid, sessionStartedAt: $reg[0].startedAt, startedAt: $at}
+    + if $provider == "codex" then {reportTransport: "transcript"} else {} end' >| "$record"
+if [ "$caller_provider" = codex ]; then
+  echo "Adopted '$name': tell it to report milestones in its final reply with worker.sh message."
+else
+  echo "Adopted '$name': it now reports to $me, and $me hears when it blocks. Tell it so by SendMessage."
+fi

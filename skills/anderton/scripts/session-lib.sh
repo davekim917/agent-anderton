@@ -29,6 +29,10 @@ proc_start() {
   printf '%s\n' "${t%"${t##*[![:space:]]}"}"
 }
 
+process_start_matches() {
+  [ -n "$2" ] && [ "$(proc_start "$1")" = "$2" ]
+}
+
 # True when pid $1 is running and is the process the session registry names: its start equals the
 # entry's procStart ($3) when it has one, else started when the entry's startedAt ($2, epoch ms) says.
 # A registry file outlives a crashed session, and its pid can then belong to an unrelated process.
@@ -39,7 +43,7 @@ registered_alive() {
   age=$(proc_age "$1")
   [ -n "$age" ] || return 1
   if [ -n "${3:-}" ]; then
-    [ "$(proc_start "$1")" = "$3" ]
+    process_start_matches "$1" "$3"
     return
   fi
   [ -n "$2" ] || return 0
@@ -69,6 +73,273 @@ home="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 sessions="$home/sessions"
 holders="$home/anderton"
 legacy_holder="$home/anderton.json"
+anderton_scripts="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+invoking_provider() {
+  if [ -n "${CLAUDE_CODE_SESSION_ID:-}${CLAUDE_PID:-}" ]; then printf 'claude\n'
+  elif [ -n "${CODEX_THREAD_ID:-}" ]; then printf 'codex\n'
+  else printf 'claude\n'; fi
+}
+
+invoking_session() {
+  case $(invoking_provider) in
+    codex) printf '%s\n' "${CODEX_THREAD_ID:-}" ;;
+    *) printf '%s\n' "${CLAUDE_CODE_SESSION_ID:-}" ;;
+  esac
+}
+
+invoking_pid() {
+  if [ "$(invoking_provider)" = claude ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}${CLAUDE_PID:-}" ]; then
+    printf '%s\n' "${CLAUDE_PID:-$(session_pid "${CLAUDE_CODE_SESSION_ID:-}")}"
+  fi
+}
+
+invoking_codex_home() {
+  (cd "${CODEX_HOME:-$HOME/.codex}" && pwd -P) 2>/dev/null
+}
+
+record_provider() {
+  jq -er '.provider // "claude"' "$1" 2>/dev/null
+}
+
+caller_matches_claim() {
+  local p codex
+  [ -f "$1" ] && [ "$(record_provider "$1")" = "$(invoking_provider)" ] || return 1
+  if [ "$(invoking_provider)" = codex ]; then
+    codex=$(invoking_codex_home) || return 1
+    jq -e --arg sid "${CODEX_THREAD_ID:-}" --arg codex "$codex" '
+      $sid != "" and .sessionId == $sid and .codexHome == $codex' "$1" >/dev/null 2>&1
+  else
+    p=$(invoking_pid)
+    [ -n "$p" ] && is_holder "$sessions/$p.json" "$1"
+  fi
+}
+
+caller_claim() {
+  local record
+  while IFS= read -r record; do
+    if [ -n "$record" ] && caller_matches_claim "$record"; then
+      printf '%s\n' "$record"
+      return
+    fi
+  done <<EOF
+$(project_holders "$1")
+EOF
+}
+
+# A Codex thread remains resumable while the server is down or the thread is unloaded.
+claim_state() {
+  local p state
+  case $(record_provider "$1") in
+    claude)
+      p=$(jq -r '.pid // empty' "$1" 2>/dev/null)
+      if [ -n "$p" ] && is_holder "$sessions/$p.json" "$1"; then echo live; else echo gone; fi ;;
+    codex)
+      if state=$("$anderton_scripts/codex-worker.py" claim-state "$1" 2>/dev/null); then echo "$state"
+      else echo unknown; fi ;;
+    *) echo unknown ;;
+  esac
+}
+
+claim_name() {
+  local p
+  if [ "$(record_provider "$1")" = codex ]; then
+    jq -r '.name // .sessionId // empty' "$1" 2>/dev/null
+  else
+    p=$(jq -r '.pid // empty' "$1" 2>/dev/null)
+    jq -r '.name // empty' "$sessions/$p.json" 2>/dev/null || true
+  fi
+}
+
+answering_claim() {
+  local worker=$1 root=$2 main r scope spawner spawner_session spawner_provider by
+  main=$(holder_record "$root")
+  if jq -e 'has("spawnerScope")' "$worker" >/dev/null 2>&1; then
+    scope=$(jq -r '.spawnerScope // empty' "$worker")
+    if [ -n "$scope" ]; then
+      r=$(holder_record "$root" "$scope")
+      if [ -n "$r" ] && [ "$(claim_state "$r")" != gone ]; then printf '%s\n' "$r"; return; fi
+    fi
+  else
+    spawner=$(jq -r '.spawner // empty' "$worker" 2>/dev/null || true)
+    spawner_session=$(jq -r '.spawnerSession // empty' "$worker" 2>/dev/null || true)
+    spawner_provider=$(jq -r '.spawnerProvider // "claude"' "$worker" 2>/dev/null || true)
+    for by in ${spawner_session:+session} ${spawner:+name}; do
+      while IFS= read -r r; do
+        if [ -z "$r" ] || [ "$r" = "$main" ] || [ "$(record_provider "$r")" != "$spawner_provider" ]; then continue; fi
+        case $by in
+          session) [ "$(jq -r '.sessionId // empty' "$r" 2>/dev/null || true)" = "$spawner_session" ] ;;
+          name) [ "$(claim_name "$r")" = "$spawner" ] ;;
+        esac || continue
+        if [ "$(claim_state "$r")" != gone ]; then printf '%s\n' "$r"; return; fi
+      done <<EOF
+$(project_holders "$root")
+EOF
+    done
+  fi
+  printf '%s\n' "$main"
+}
+
+worker_belongs() {
+  jq -e --arg root "$2" '.root == $root' "$1" >/dev/null 2>&1 &&
+    [ -n "$3" ] && [ "$(answering_claim "$1" "$2")" = "$3" ]
+}
+
+uses_claude_transcript() {
+  jq -e --arg owner "$2" '(.provider // "claude") == "claude" and
+    ($owner == "codex" or .reportTransport == "transcript" or .spawnerProvider == "codex")' "$1" >/dev/null 2>&1
+}
+
+# Call under the repository lock. Only a conclusive mismatch clears a candidate pending launch.
+codex_worker_record() {
+  local codex=$1 thread=$2 dir=$3 exclude=${4:-} r kind status
+  for r in "$holders"/workers/*.json; do
+    if [ ! -f "$r" ] || [ "$r" = "$exclude" ]; then continue; fi
+    kind=$(jq -r --arg home "$codex" --arg id "$thread" --arg dir "$dir" '
+      select(.provider == "codex" and .codexHome == $home)
+      | if .id == $id then "registered"
+        elif .id == "" and .dir == $dir and (.codexLaunchToken // "") != "" then "pending"
+        else empty end' "$r" 2>/dev/null) || continue
+    case $kind in
+      registered) printf '%s\n' "$r"; return ;;
+      pending)
+        status=0
+        "$anderton_scripts/codex-worker.py" launch-matches "$r" "$thread" >/dev/null 2>&1 || status=$?
+        if [ "$status" -ne 3 ]; then printf '%s\n' "$r"; return; fi
+        ;;
+    esac
+  done
+  return 0
+}
+
+# The caller holds the repository lock and this worker's lock.
+bind_codex_worker() {
+  local record=$1 thread=$2 launch=$3 details codex dir conflict updated
+  if ! details=$(jq -ce --arg id "$thread" --arg launch "$launch" '
+    select(.provider == "codex" and (.codexLaunchToken // "") == $launch
+      and $id != "" and (.id == "" or .id == $id))
+    | {id, codexHome, dir}' "$record"); then
+    echo "Codex worker record changed before registering thread $thread." >&2
+    return 1
+  fi
+  codex=$(printf '%s' "$details" | jq -r .codexHome)
+  dir=$(printf '%s' "$details" | jq -r .dir)
+  conflict=$(codex_worker_record "$codex" "$thread" "$dir" "$record")
+  if [ -n "$conflict" ]; then
+    echo "Codex thread $thread already has a worker record at $conflict." >&2
+    return 1
+  fi
+  if [ "$(printf '%s' "$details" | jq -r .id)" = "$thread" ]; then return 0; fi
+  updated=$(mktemp "$record.XXXXXX") || return 1
+  if jq --arg id "$thread" '.id = $id' "$record" > "$updated" && mv -f "$updated" "$record"; then return 0; fi
+  rm -f "$updated"
+  return 1
+}
+
+managed_invoker() {
+  local root=$1 provider=$2 sid=$3 identity=$4 dir=$5 r p reg name cwd started
+  if [ "$provider" = codex ]; then codex_worker_record "$identity" "$sid" "$dir"; return; fi
+  p=$identity
+  reg="$sessions/$p.json"
+  name=$(jq -r '.name // empty' "$reg" 2>/dev/null || true)
+  cwd=$(jq -r '.cwd // empty' "$reg" 2>/dev/null || true)
+  started=$(jq -r '.startedAt // empty | floor' "$reg" 2>/dev/null || true)
+  for r in "$holders"/workers/*.json; do
+    [ -f "$r" ] || continue
+    jq -e --arg root "$root" '
+      .root == $root and (.provider // "claude") == "claude"' "$r" >/dev/null 2>&1 || continue
+    if jq -e --arg id "$sid" --arg pid "$p" --arg start "$started" '
+      .claudeSession.id == $id or (.adopted == true and
+        (.sessionId == $id or ($start != "" and (.pid | tostring) == $pid and
+          ((.sessionStartedAt // "") | tostring | split(".")[0]) == $start)))' "$r" >/dev/null; then
+      printf '%s\n' "$r"
+      return
+    elif [ "$r" = "$holders/workers/$name.json" ] && [ "$(worker_record "$name" "$cwd" "$sid" "$p" "$started")" = "$r" ]; then
+      printf '%s\n' "$r"
+      return
+    fi
+  done
+}
+
+claude_binding_process_matches() {
+  local file=$1 pid=$2 start
+  start=$(proc_start "$pid")
+  [ -n "$start" ] || return 1
+  jq -e --arg pid "$pid" --arg start "$start" '
+    .claudeSession | (.pid | tostring) == $pid and .procStart == $start' "$file" >/dev/null
+}
+
+live_claude_worker() {
+  local file=$1 binding=${2:-} reg name dir sid pid started bound
+  [ "$(record_provider "$file")" = claude ] || return 1
+  name=$(jq -r .name "$file")
+  bound=$(jq -r '.claudeSession.id // empty' "$file")
+  for reg in "$sessions"/*.json; do
+    [ -f "$reg" ] || continue
+    [ "$(jq -r '.name // empty' "$reg" 2>/dev/null || true)" = "$name" ] || continue
+    dir=$(jq -r '.cwd // empty' "$reg")
+    sid=$(jq -r '.sessionId // empty' "$reg")
+    pid=$(jq -r '.pid // empty' "$reg")
+    started=$(jq -r '.startedAt // empty | floor' "$reg")
+    if [ -z "$sid" ] || [ -z "$pid" ] || ! is_worker "$name" "$dir" "$sid" "$pid" "$started"; then continue; fi
+    if [ -n "$bound" ] && [ "$sid" != "$bound" ]; then
+      [ "$binding" = --allow-rebind ] || continue
+      claude_binding_process_matches "$file" "$pid" || continue
+    fi
+    if registered_alive "$pid" "$started" "$(jq -r '.procStart // empty' "$reg")"; then
+      printf '%s\n' "$reg"
+    fi
+  done
+}
+
+claude_stop_matches() {
+  local registry="$sessions/$3.json"
+  process_start_matches "$3" "$4" &&
+    [ "$(live_claude_worker "$1" --allow-rebind)" = "$registry" ] &&
+    jq -e --arg sid "$2" --arg pid "$3" '
+      .sessionId == $sid and (.pid | tostring) == $pid' "$registry" >/dev/null
+}
+
+with_claude_worker_lock() {
+  local root=$1 worker=$2 session_id=$3 process=$4 start=$5 attempt status
+  shift 5
+  for attempt in 1 2 3; do
+    claude_stop_matches "$worker" "$session_id" "$process" "$start" || return 3
+    if (
+      take_repository_lock "$root" 75 || exit 1
+      lock_worker "$worker" || exit 75
+      claude_stop_matches "$worker" "$session_id" "$process" "$start" || exit 3
+      "$@"
+    ); then
+      return 0
+    else
+      status=$?
+    fi
+    [ "$status" = 75 ] || return "$status"
+    if [ "$attempt" -lt 3 ]; then sleep 1; fi
+  done
+  return 1
+}
+
+bind_claude_worker() {
+  local worker=$1 session_id=$2 process=$3 start=$4 transcript=$5 updated
+  updated=$(mktemp "$worker.XXXXXX") || return 1
+  if jq --arg sid "$session_id" --arg file "$transcript" --argjson pid "$process" --arg start "$start" '
+    .claudeSession = {id: $sid, transcript: $file, pid: $pid, procStart: $start} | .reportTransport = "transcript"
+    | if .claudeDirection != null and .claudeDirection.target != $sid then del(.claudeDirection) else . end
+    ' "$worker" > "$updated" && mv -f "$updated" "$worker"; then return 0; fi
+  rm -f "$updated"
+  return 1
+}
+
+has_ancestor() {
+  local p=$1
+  while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; do
+    [ "$p" != "$2" ] || return 0
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+  done
+  return 1
+}
 
 # The pid of the session whose id is $1, from its registration file, or nothing. A resumed session
 # runs as a new process under the same id, and a crashed one's file can outlive it, so a live entry wins.
@@ -109,8 +380,7 @@ project_root() {
 # The project of the calling Claude Code session: the cwd its registry entry records, else this shell's.
 invoking_root() {
   local pid cwd=""
-  pid="${CLAUDE_PID:-}"
-  if [ -z "$pid" ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then pid=$(session_pid "$CLAUDE_CODE_SESSION_ID"); fi
+  pid=$(invoking_pid)
   if [ -n "$pid" ]; then cwd=$(jq -r '.cwd // empty' "$sessions/$pid.json" 2>/dev/null || true); fi
   project_root "${cwd:-$PWD}"
 }
@@ -135,7 +405,7 @@ is_holder() {
   if [ ! -f "$1" ] || [ ! -f "$2" ]; then return 1; fi
   jq -en --slurpfile reg "$1" --slurpfile rec "$2" '
     $reg[0] as $s | $rec[0] as $r
-    | $s.pid == $r.pid
+    | ($r.provider // "claude") == "claude" and $s.pid == $r.pid
       and (if $s.startedAt == null then true
            elif $r.startedAt != null then ($s.startedAt | floor) == ($r.startedAt | floor)
            else (($r.claimedAt // "") | fromdateiso8601? // null) as $at | $at == null or $at * 1000 >= $s.startedAt
@@ -249,6 +519,7 @@ worker_record() {
   local f dir
   f="$holders/workers/$1.json"
   if [ -n "$1" ] && [ -f "$f" ]; then
+    if [ "$(record_provider "$f")" = codex ]; then return 0; fi
     dir=$(jq -r '.dir // empty' "$f" 2>/dev/null || true)
     case $2 in
       "$dir" | "$dir"/*)
@@ -285,13 +556,64 @@ worktree_work() {
   if [ -n "$out" ]; then echo unpushed; fi
 }
 
-lock_codex_worker() {
+cleanup_anderton_locks() {
+  if [ -n "${worker_lock:-}" ]; then rmdir -- "$worker_lock"; fi
+  if [ -n "${repository_directory_lock:-}" ]; then
+    rm -f -- "$repository_directory_lock/pid"
+    rmdir -- "$repository_directory_lock"
+  fi
+}
+
+lock_worker() {
   codex_worker_lock="$1.lock"
   if ! mkdir -- "$codex_worker_lock" 2>/dev/null; then
-    echo "A Codex worker operation already holds $codex_worker_lock." >&2
+    echo "A worker operation already holds $codex_worker_lock." >&2
     return 1
   fi
-  trap 'rmdir -- "$codex_worker_lock"' EXIT
+  worker_lock=$codex_worker_lock
+  trap 'cleanup_anderton_locks' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+}
+
+# The claim lock is flock where the system has it: the kernel releases it when the claim exits, so it
+# cannot go stale, and it holds on filesystems where two concurrent mkdirs can both succeed (seen on
+# a CI runner). macOS has no flock, so there it is a directory. Only the claim that made that removes
+# it: deleting one whose owner looks dead races a concurrent claim that has just made a fresh one.
+take_repository_lock() {
+  mkdir -p "$holders" || exit 1
+  repository_lock="$(holder_path "$1").lock"
+  local tries=0 owner status timeout_status=${2:-1}
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>>"$repository_lock.flock" || exit 1
+    if flock -w 10 9; then return; else status=$?; fi
+    if [ "$status" = 1 ]; then
+      echo "Could not take $repository_lock.flock within 10 seconds: another claim in this repository is running." >&2
+      exit "$timeout_status"
+    fi
+    exit 1
+  fi
+  until mkdir "$repository_lock" 2>/dev/null; do
+    # Not there, so mkdir failed for another reason: retry once and let it say why.
+    if [ ! -e "$repository_lock" ]; then
+      mkdir "$repository_lock" && break
+      exit 1
+    fi
+    owner=$(cat "$repository_lock/pid" 2>/dev/null || true)
+    if [ -n "$owner" ] && [ -z "$(proc_age "$owner")" ]; then
+      echo "$repository_lock was left by claim process $owner, which is gone. Remove it and rerun." >&2
+      exit 1
+    fi
+    tries=$((tries + 1))
+    if [ "$tries" -ge 50 ]; then
+      echo "Could not take $repository_lock within 10 seconds. If no other claim is running, remove it and rerun." >&2
+      if [ -n "$owner" ]; then exit "$timeout_status"; fi
+      exit 1
+    fi
+    sleep 0.2
+  done
+  repository_directory_lock=$repository_lock
+  trap 'cleanup_anderton_locks' EXIT
+  trap 'exit 1' INT TERM HUP
+  echo $$ > "$repository_lock/pid"
 }

@@ -1,0 +1,5 @@
+interface:
+  display_name: "Anderton"
+  short_description: "Coordinate full Codex and Claude Code sessions"
+policy:
+  allow_implicit_invocation: false

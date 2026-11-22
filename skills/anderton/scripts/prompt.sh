@@ -160,16 +160,7 @@ sha256() {
 
 # True when this session holds an Anderton role in project $1.
 caller_holds_role() {
-  local pid rec
-  pid="${CLAUDE_PID:-}"
-  if [ -z "$pid" ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then pid=$(session_pid "$CLAUDE_CODE_SESSION_ID"); fi
-  [ -n "$pid" ] || return 1
-  while IFS= read -r rec; do
-    if is_holder "$sessions/$pid.json" "$rec"; then return 0; fi
-  done <<EOF
-$(project_holders "$1")
-EOF
-  return 1
+  [ -n "$(caller_claim "$1")" ]
 }
 
 # Sets $mux and $pane to where the session with id $sid and pid $spid runs: the herdr agent carrying that session
@@ -219,6 +210,15 @@ load_session
 root=$(invoking_root)
 caller_holds_role "$root" || refuse "Only the session holding an Anderton role in this project may answer a prompt."
 [ "$(project_root "${cwd:-/}")" = "$root" ] || refuse "$name is in another project."
+if [ "$(invoking_provider)" = codex ]; then
+  worker="$holders/workers/$name.json"
+  case $name in '' | -* | *[!a-z0-9-]*) refuse "Expected an owned worker name." ;; esac
+  if [ ! -f "$worker" ] || [ "$(live_claude_worker "$worker")" != "$reg" ] ||
+    ! worker_belongs "$worker" "$root" "$(caller_claim "$root")"; then
+    refuse "This Anderton does not own $name."
+  fi
+  [ -z "$answer" ] || refuse "Answer the request directly in $name's Claude Code pane."
+fi
 if [ "$(jq -r '.kind // empty' "$reg")" = bg ]; then
   refuse "$name runs in the background with no tab: answer it with claude attach $name."
 fi
