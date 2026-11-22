@@ -353,6 +353,7 @@ EOF
       case $(worktree_work "$dir" "$(jq -r '.base // empty' "$r")") in
         uncommitted) why="$why, but has uncommitted work" ;;
         unpushed) why="$why, but has commits no remote branch has" ;;
+        flagged) why="$why, but git marks files in it assume-unchanged or skip-worktree, so retire.sh will keep it" ;;
         unreadable) why="$why, but git could not read its worktree, so retire.sh will keep it" ;;
       esac
     fi

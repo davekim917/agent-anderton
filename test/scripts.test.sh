@@ -2528,7 +2528,7 @@ git -C "$work/wt-hidden-edit" update-index --assume-unchanged tracked.txt
 echo v2 >"$work/wt-hidden-edit/tracked.txt"
 run "$scripts/retire.sh" hidden-edit
 check "and an edit to a file marked assume-unchanged, which status hides" \
-  eval '[ "$status" -eq 3 ] && [ "$(cat "$work/wt-hidden-edit/tracked.txt" 2>/dev/null)" = v2 ]'
+  eval '[ "$status" -eq 3 ] && [ "$(cat "$work/wt-hidden-edit/tracked.txt" 2>/dev/null)" = v2 ] && contains "assume-unchanged or skip-worktree"'
 git -C "$work/wt-hidden-edit" update-index --no-assume-unchanged tracked.txt
 git -C "$work/wt-hidden-edit" update-index --skip-worktree tracked.txt
 run "$scripts/retire.sh" hidden-edit
@@ -2541,28 +2541,21 @@ check "or inside a sparse checkout that leaves that file on disk" \
   eval '[ "$status" -eq 3 ] && [ "$(cat "$work/wt-hidden-edit/tracked.txt" 2>/dev/null)" = v2 ]'
 rm -f "$work/wt-hidden-edit/tracked.txt"
 run "$scripts/retire.sh" hidden-edit
-check "but a skip-worktree file absent from disk, as a sparse checkout leaves it, is not work" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-hidden-edit" ]'
+check "and one whose skip-worktree file is absent from disk, as a sparse checkout leaves it: the flag alone keeps it" \
+  eval '[ "$status" -eq 3 ] && [ -d "$work/wt-hidden-edit" ]'
 git -C "$rho" config --unset core.sparseCheckout
 git -C "$rho" config --unset sparse.expectFilesOutsideOfPatterns
-rho_worker skipped-name
-mkdir -p "$work/wt-skipped-name/docs"
-echo v1 >"$work/wt-skipped-name/docs/café.md"
-git -C "$work/wt-skipped-name" add docs
-rho_commit skipped-name
-git -C "$work/wt-skipped-name" push -q origin HEAD:refs/heads/skipped-name 2>/dev/null
-git -C "$work/wt-skipped-name" update-index --skip-worktree "docs/café.md"
-rm -f "$work/wt-skipped-name/docs/café.md"
+rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/hidden-edit.json"
+[ ! -d "$work/wt-hidden-edit" ] || git -C "$rho" worktree remove --force "$work/wt-hidden-edit"
+rho_worker index-unread
 real_git=$(command -v git)
 mkdir -p "$work/git-fails"
 printf '#!/usr/bin/env bash\nfor a; do [ "$a" != ls-files ] || exit 128; done\nexec "%s" "$@"\n' "$real_git" >"$work/git-fails/git"
 chmod +x "$work/git-fails/git"
-run env PATH="$work/git-fails:$PATH" "$scripts/retire.sh" skipped-name
-check "a worktree whose file list git cannot read is kept" eval '[ "$status" -eq 3 ] && [ -d "$work/wt-skipped-name" ] && contains "git could not"'
-run "$scripts/retire.sh" skipped-name
-check "and a skipped file absent from disk is not work, whatever characters its name holds" \
-  eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-skipped-name" ]'
-rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/hidden-edit.json"
-[ ! -d "$work/wt-hidden-edit" ] || git -C "$rho" worktree remove --force "$work/wt-hidden-edit"
+run env PATH="$work/git-fails:$PATH" "$scripts/retire.sh" index-unread
+check "a worktree whose index flags git cannot list is kept" eval '[ "$status" -eq 3 ] && [ -d "$work/wt-index-unread" ] && contains "git could not"'
+run "$scripts/retire.sh" index-unread
+check "and a clean worktree with no flagged files still retires" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-index-unread" ]'
 rho_worker bad-base
 good_base=$(jq -r .base "$CLAUDE_CONFIG_DIR/anderton/workers/bad-base.json")
 jq -c '.base = "0000000000000000000000000000000000000001"' "$CLAUDE_CONFIG_DIR/anderton/workers/bad-base.json" >"$work/bb.tmp"

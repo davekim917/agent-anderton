@@ -175,8 +175,9 @@ user to close it once nothing in it needs keeping, then rerun it.
 Before retiring any worker, have the user leave its checkout in every other pane:
 a clean, pushed checkout is removed even while another pane works in it.
 When it refuses a worker recorded without its pane because its tab still exists,
-that tab may be an unrelated one: tell the user, and close it only once the user
-confirms it is the worker's.
+that tab may be an unrelated one: tell the user. Once they confirm it is the
+worker's, ask them to close it after checking every pane in it; never close it
+yourself.
 
 **Adopt a session** the user opened when they ask you to take it on:
 `scripts/adopt.sh <name>`. You then answer for it as for a worker you started. Tell it

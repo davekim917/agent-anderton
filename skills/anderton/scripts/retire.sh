@@ -163,6 +163,7 @@ if [ "$worktree" = true ] && [ -d "$dir" ]; then
   case $(worktree_work "$dir" "$(jq -r '.base // empty' "$record")") in
     uncommitted) echo "Stopped '$name'. Kept $dir: it has uncommitted changes."; exit 3 ;;
     unpushed) echo "Stopped '$name'. Kept $dir: it has commits no remote branch has."; exit 3 ;;
+    flagged) echo "Stopped '$name'. Kept $dir: git marks files in it assume-unchanged or skip-worktree (as a sparse checkout does), so status cannot show their edits. Remove it yourself once nothing in it needs keeping."; exit 3 ;;
     unreadable) echo "Stopped '$name'. Kept $dir: git could not read its status or compare it with its base and remotes."; exit 3 ;;
   esac
   git -C "$root" worktree remove "$dir"
