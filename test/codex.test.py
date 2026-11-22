@@ -31,6 +31,10 @@ class FakeCodex:
         pass
 
     def call(self, method, params, timeout=None):
+        if method == "thread/list":
+            self.listings.append({**params, "timeout": timeout})
+            threads = [thread for thread in self.threads if thread["cwd"] == params["cwd"]]
+            return {"data": threads[:params["limit"]]}
         if method == "thread/turns/list":
             return {"data": [{"id": params["threadId"]}]}
         if method == "thread/items/list":
@@ -173,9 +177,10 @@ class WorkerTest(unittest.TestCase):
         directory = Path(self.worker["dir"])
         launched = 1000
         elsewhere = {"id": "00000000-0000-7000-8000-000000000a01", "cwd": str(self.state), "createdAt": 1003}
-        launch = {**self.client.info, "createdAt": 1001}
-        earlier = {"id": "00000000-0000-7000-8000-000000000a02", "cwd": self.worker["dir"], "createdAt": 999}
-        older = {"id": "00000000-0000-7000-8000-000000000a03", "cwd": self.worker["dir"], "createdAt": 900}
+        # The host clock stepped back after the launch time was recorded.
+        launch = {**self.client.info, "createdAt": 1000 - 240}
+        earlier = {"id": "00000000-0000-7000-8000-000000000a02", "cwd": self.worker["dir"], "createdAt": 1000 - 301}
+        older = {"id": "00000000-0000-7000-8000-000000000a03", "cwd": self.worker["dir"], "createdAt": 600}
         self.client.threads = [elsewhere, launch, earlier, older]
         self.client.items[launch["id"]] = [user_message(f"{marker}\n\nBrief")]
         # An earlier worker in the same worktree path carrying the marker would be a second match if it were read.
@@ -186,16 +191,29 @@ class WorkerTest(unittest.TestCase):
         self.assertIs(True, self.client.listings[-1]["useStateDbOnly"])
         self.assertEqual([elsewhere["id"], launch["id"], earlier["id"]], self.client.listed)
 
-    def test_an_unregistered_worker_is_busy_only_once_a_thread_starts_after_its_launch(self):
+    def test_an_unregistered_worker_is_busy_once_a_thread_starts_near_its_launch(self):
         self.worker.update(id="", codexLaunchedAt=1000)
         self.record.write_text(json.dumps(self.worker))
         self.client.threads = [{"id": "00000000-0000-7000-8000-000000000a02", "cwd": self.worker["dir"],
-                                "createdAt": 999}]
+                                "createdAt": 1000 - 301}]
         with patch.object(worker_api.sys, "argv", ["codex-worker.py", "inactive", str(self.record)]):
             self.assertEqual(0, worker_api.main())
-            self.client.threads.insert(0, {**self.client.info, "createdAt": 1000})
+            # A clock stepped back after launch, or an earlier worker's thread just before it, keeps the worktree.
+            self.client.threads.insert(0, {**self.client.info, "createdAt": 1000 - 240})
             self.assertEqual(1, worker_api.main())
-        self.assertTrue(all("cwd" not in params for params in self.client.listings))
+        # Retirement removes the worktree on this answer: the full listing, which sees a thread the index lacks.
+        for params in self.client.listings:
+            self.assertEqual(self.worker["dir"], params["cwd"])
+            self.assertNotIn("useStateDbOnly", params)
+            self.assertEqual(worker_api.DIRECTORY_LIST_SECONDS, params["timeout"])
+
+    def test_an_unregistered_worker_is_not_inactive_when_its_listing_fails(self):
+        self.worker.update(id="", codexLaunchedAt=1000)
+        self.record.write_text(json.dumps(self.worker))
+        with patch.object(worker_api.sys, "argv", ["codex-worker.py", "inactive", str(self.record)]), \
+                patch.object(self.client, "call", side_effect=TimeoutError("timed out")), \
+                self.assertRaises(TimeoutError):
+            worker_api.main()
 
     def test_inactivity_requires_empty_queue_and_current_idle_status(self):
         self.assertTrue(worker_api.is_inactive(self.client, self.worker))

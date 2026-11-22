@@ -20,6 +20,8 @@ MAX_MESSAGE = 16 * 1024 * 1024
 REQUEST_SECONDS = 5
 # Codex answers a thread/list filtered by cwd by scanning its whole thread history: seconds per few hundred threads.
 DIRECTORY_LIST_SECONDS = 60
+# A launch's thread counts from this long before the recorded launch time, so a clock stepped back cannot hide it.
+LAUNCH_MARGIN_SECONDS = 300
 BLOCK_REMINDER_SECONDS = 300
 # Longer than any request a lost connection can leave in flight: Codex.call waits REQUEST_SECONDS for a send's answer.
 DIRECTION_LOST_AFTER_SECONDS = 60
@@ -213,12 +215,12 @@ def started_with(client, thread, marker):
 
 
 def threads_since(client, directory, since):
-    """The directory's threads created at or after since, a Unix time in seconds, newest first."""
+    """The directory's threads created at most LAUNCH_MARGIN_SECONDS before since, a Unix time, newest first."""
     # Without useStateDbOnly Codex rereads each listed thread's rollout file, a fraction of a second apiece, and a cwd
     # filter that matches nothing has it read them all. This list is answered from its index and stops at since.
     for thread in client.pages("thread/list", sortKey="created_at", sortDirection="desc", useStateDbOnly=True,
                                limit=20):
-        if thread["createdAt"] < since:
+        if thread["createdAt"] < since - LAUNCH_MARGIN_SECONDS:
             return
         if Path(thread["cwd"]).resolve() == directory:
             yield thread
@@ -530,13 +532,15 @@ def main():
             if args.command == "message":
                 queue_direction(client, args.record, worker, args.text)
                 return 0
-            if args.command == "inactive" and not worker["id"] and "codexLaunchedAt" in worker:
-                directory = Path(worker["dir"]).resolve()
-                return int(next(threads_since(client, directory, worker["codexLaunchedAt"]), None) is not None)
             if args.command == "inactive" and not worker["id"]:
-                result = client.call("thread/list", {"cwd": worker["dir"], "limit": 1},
-                                     timeout=DIRECTORY_LIST_SECONDS)
-                threads = result["data"]
+                # retire.sh removes the worktree on this answer, so not the index: Codex can write a thread's rollout
+                # and run its turn without the index row. A listing that fails or times out keeps the worktree.
+                threads = client.call("thread/list", {"cwd": worker["dir"], "sortKey": "created_at",
+                                                      "sortDirection": "desc", "limit": 1},
+                                      timeout=DIRECTORY_LIST_SECONDS)["data"]
+                if "codexLaunchedAt" in worker:
+                    cutoff = worker["codexLaunchedAt"] - LAUNCH_MARGIN_SECONDS
+                    return int(bool(threads and threads[0]["createdAt"] >= cutoff))
                 return int(bool(threads and threads[0]["id"] != worker.get("codexBaseline")))
             if args.command == "inactive":
                 return int(not is_inactive(client, worker))
