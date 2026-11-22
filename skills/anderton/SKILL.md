@@ -169,8 +169,8 @@ when reviewing. Its final
 `RESULT:`, `QUESTION:`, `BLOCKED:`, and `ANSWER:` replies wake you through
 the watch. Send Codex permission and input requests to the user in the
 worker's tab. Retire it with `scripts/retire.sh <name>` after its active turn ends.
-It closes the tab only while the tab still shows the worker's thread; when it
-refuses, ask the user to close the tab, then rerun it.
+It closes the tab only while the tab holds just the worker's pane, still showing
+its thread; when it refuses, ask the user to close the tab, then rerun it.
 
 **Adopt a session** the user opened when they ask you to take it on:
 `scripts/adopt.sh <name>`. You then answer for it as for a worker you started. Tell it

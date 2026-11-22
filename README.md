@@ -151,8 +151,9 @@ The worker opens in its own worktree and tab. Anderton sends follow-ups to
 the worker's Codex thread ID and receives milestone replies and blocker
 alerts through its existing watch. Open the worker's tab to handle a Codex
 permission prompt or input request. The Anderton itself runs in Claude Code.
-A Codex worker's tab is titled with its thread ID, and `retire.sh` closes the tab only while it still shows
-that thread: if you open another conversation there with `/resume` or `/new`, close the tab yourself.
+A Codex worker's tab is titled with its thread ID, and `retire.sh` closes the tab only while it holds just the
+worker's pane, still showing that thread. After `/resume` or `/new` there, a split, a moved pane or a renamed tab,
+close the tab yourself.
 
 **How is it different from firstmate?**
 

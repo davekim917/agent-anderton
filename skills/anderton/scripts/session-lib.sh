@@ -278,6 +278,13 @@ worktree_work() {
     echo unreadable
   elif [ -n "$out" ]; then
     echo uncommitted
+  elif ! out=$(git -C "$1" ls-files -v 2>/dev/null); then
+    echo unreadable
+  elif case "
+$out" in *"
+"[[:lower:]]" "*) true ;; *) false ;; esac; then
+    # ls-files -v tags an assume-unchanged file in lower case: status hides its edits, and removal deletes them.
+    echo uncommitted
   elif ! out=$(git -C "$1" rev-list -1 HEAD --not --remotes "$2" 2>/dev/null); then
     echo unreadable
   elif [ -n "$out" ]; then

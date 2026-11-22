@@ -193,7 +193,7 @@ class WorkerTest(unittest.TestCase):
                 return {"queuedSubmission": {"id": "submission"}}
             return original(method, params)
 
-        with patch.object(self.client, "call", side_effect=accept_add):
+        with patch.object(self.client, "call", side_effect=accept_add), patch.object(worker_api.time, "sleep"):
             with patch.object(worker_api.time, "time", return_value=1005):
                 self.assertFalse(worker_api.is_inactive(self.client, self.worker))
             later = 1000 + worker_api.DIRECTION_LOST_AFTER_SECONDS
@@ -207,6 +207,28 @@ class WorkerTest(unittest.TestCase):
         saved = json.loads(self.record.read_text())["codexDirection"]
         self.assertEqual([saved["id"]], added)
         self.assertNotEqual("lost-id", saved["id"])
+
+    def test_a_direction_whose_turn_is_starting_is_not_lost(self):
+        self.worker["codexDirection"] = {"id": "starting-id", "previousTurn": "previous", "sentAt": 1000}
+        self.client.turns = [{"id": "previous", "status": "completed"}]
+        self.client.items["previous"] = [user_message("Earlier work")]
+        later = 1000 + worker_api.DIRECTION_LOST_AFTER_SECONDS
+
+        def turn_recorded(_seconds):
+            self.client.turns.insert(0, {"id": "started", "status": "completed"})
+            self.client.items["started"] = [user_message("Direction")]
+            self.client.items["started"][0]["item"]["clientId"] = "starting-id"
+
+        with patch.object(worker_api.time, "time", return_value=later), patch.object(worker_api.time, "sleep") as sleep:
+            self.client.info["status"] = {"type": "active", "activeFlags": []}
+            self.assertEqual("pending", worker_api.direction_state(self.client, self.worker))
+            self.client.info["status"] = {"type": "idle"}
+            self.client.turns.insert(0, {"id": "other", "status": "inProgress"})
+            self.client.items["other"] = [user_message("Someone else's turn")]
+            self.assertEqual("pending", worker_api.direction_state(self.client, self.worker))
+            self.client.turns.pop(0)
+            sleep.side_effect = turn_recorded
+            self.assertEqual("finished", worker_api.direction_state(self.client, self.worker))
 
     def test_reminds_when_pending_block_identity_stays_the_same(self):
         self.client.turns = [{"id": "first", "status": "inProgress"}]

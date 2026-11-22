@@ -86,7 +86,13 @@ case "$1 $2" in
       mv "$FAKE_KEY_NEXT_STATUS.tmp" "$FAKE_KEY_NEXT_STATUS"
     fi
     ;;
-  "pane get") jq -nc --arg t "${FAKE_HERDR_TITLE:-}" '{result: {pane: {terminal_title: $t}}}' ;;
+  "pane list")
+    # One pane, $FAKE_HERDR_PANE (default w9:p40) titled $FAKE_HERDR_TITLE in tab $FAKE_HERDR_PANE_TAB (default w9:t40),
+    # and with $FAKE_HERDR_SPLIT a second pane in that tab.
+    jq -nc --arg t "${FAKE_HERDR_TITLE:-}" --arg p "${FAKE_HERDR_PANE:-w9:p40}" --arg tab "${FAKE_HERDR_PANE_TAB:-w9:t40}" \
+      --arg split "${FAKE_HERDR_SPLIT:-}" '{result: {panes: ([{pane_id: $p, tab_id: $tab, terminal_title: $t}]
+        + if $split != "" then [{pane_id: "w9:p99", tab_id: $tab, terminal_title: "shell"}] else [] end)}}'
+    ;;
   "tab get")
     if [ -n "${FAKE_HERDR_GET_GARBAGE:-}" ]; then echo "permission denied" >&2; exit 1; fi
     if [ -n "${FAKE_HERDR_NO_SERVER:-}" ]; then echo '{"error":{"code":"server_not_running"}}'; exit 1; fi
@@ -135,8 +141,13 @@ case $1 in
     if [ -n "${FAKE_TMUX_GARBAGE:-}" ]; then echo "error connecting to $sock (Permission denied)" >&2; exit 1; fi
     awk -v s="$sock" '$1 == s { print $2, $3, $4 }' "$FAKE_LOG.windows-open" 2>/dev/null || true
     ;;
-  list-panes) cat "$FAKE_LOG.tmux-panes" 2>/dev/null ;;
-  display-message) printf '%s\n' "${FAKE_TMUX_TITLE:-}" ;;
+  list-panes)
+    # Pane titles, for a window's one pane titled $FAKE_TMUX_TITLE and with $FAKE_TMUX_SPLIT a second pane; else panes.
+    case "$*" in
+      *pane_title*) printf '%s\n' "${FAKE_TMUX_TITLE:-}"; [ -z "${FAKE_TMUX_SPLIT:-}" ] || echo shell ;;
+      *) cat "$FAKE_LOG.tmux-panes" 2>/dev/null ;;
+    esac
+    ;;
   capture-pane) cat "$FAKE_SCREEN" ;;
   send-keys)
     echo "$3 $4" >> "$FAKE_LOG.keys"
@@ -2498,6 +2509,18 @@ git -C "$rho" config --unset status.showUntrackedFiles
 rm -f "$work/wt-untracked-wt/notes.md"
 run "$scripts/retire.sh" untracked-wt
 check "it retires that worker once the file is gone" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-untracked-wt" ]'
+rho_worker hidden-edit
+echo v1 >"$work/wt-hidden-edit/tracked.txt"
+git -C "$work/wt-hidden-edit" add tracked.txt
+rho_commit hidden-edit
+git -C "$work/wt-hidden-edit" push -q origin HEAD:refs/heads/hidden-edit 2>/dev/null
+git -C "$work/wt-hidden-edit" update-index --assume-unchanged tracked.txt
+echo v2 >"$work/wt-hidden-edit/tracked.txt"
+run "$scripts/retire.sh" hidden-edit
+check "and an edit to a file marked assume-unchanged, which status hides" \
+  eval '[ "$status" -eq 3 ] && [ "$(cat "$work/wt-hidden-edit/tracked.txt" 2>/dev/null)" = v2 ]'
+rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/hidden-edit.json"
+[ ! -d "$work/wt-hidden-edit" ] || git -C "$rho" worktree remove --force "$work/wt-hidden-edit"
 rho_worker bad-base
 good_base=$(jq -r .base "$CLAUDE_CONFIG_DIR/anderton/workers/bad-base.json")
 jq -c '.base = "0000000000000000000000000000000000000001"' "$CLAUDE_CONFIG_DIR/anderton/workers/bad-base.json" >"$work/bb.tmp"
@@ -2539,7 +2562,13 @@ echo "$CLAUDE_CONFIG_DIR/anderton/workers/cx-tab.json"
 sleep 0.3
 echo "$CLAUDE_CONFIG_DIR/anderton/workers/cx-herdr.json"
 FAKE
-printf '#!/usr/bin/env bash\nexit 0\n' >"$codexdir/codex-worker.py"
+# The daemon's inactive answer: yes, or with $FAKE_INACTIVE_PASSES yes only that many times in a row.
+cat >"$codexdir/codex-worker.py" <<'FAKE'
+#!/usr/bin/env bash
+n=$(cat "$FAKE_LOG.inactive" 2>/dev/null || echo 0)
+echo $((n + 1)) >"$FAKE_LOG.inactive"
+[ -z "${FAKE_INACTIVE_PASSES:-}" ] || [ "$n" -lt "$FAKE_INACTIVE_PASSES" ]
+FAKE
 chmod +x "$codexdir/waiting.sh" "$codexdir/codex-worker.py"
 cx_thread=019a0000-1111-7222-8333-444455556666
 rho_worker cx-tab
@@ -2550,9 +2579,24 @@ echo "/tmp/fake-codex-tmux 4 @21 cx-tab" >>"$FAKE_LOG.windows-open"
 : >"$FAKE_LOG.killed"
 run env FAKE_TMUX_TITLE="019a0000-9999-7222-8333-44445..." "$codexdir/retire.sh" cx-tab
 check "retire.sh leaves open a Codex window now showing another conversation" \
-  eval '[ "$status" -eq 1 ] && contains "does not show thread $cx_thread" && [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-cx-tab" ]'
+  eval '[ "$status" -eq 1 ] && contains "showing thread $cx_thread" && [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-cx-tab" ]'
 run env FAKE_TMUX_TITLE="" "$codexdir/retire.sh" cx-tab
-check "or one Codex has left, whose title it cleared" eval '[ "$status" -eq 1 ] && contains "does not show thread" && [ ! -s "$FAKE_LOG.killed" ]'
+check "or one Codex has left, whose title it cleared" eval '[ "$status" -eq 1 ] && contains "showing thread" && [ ! -s "$FAKE_LOG.killed" ]'
+run env FAKE_TMUX_TITLE="${cx_thread:0:29}..." FAKE_TMUX_SPLIT=1 "$codexdir/retire.sh" cx-tab
+check "or one whose window also holds a pane split off beside the worker's" eval '[ "$status" -eq 1 ] && contains "does not hold just" && [ ! -s "$FAKE_LOG.killed" ]'
+run env FAKE_TMUX_TITLE="${cx_thread:0:29}...x" "$codexdir/retire.sh" cx-tab
+check "or one titled with a longer id that merely starts the same" eval '[ "$status" -eq 1 ] && contains "does not hold just" && [ ! -s "$FAKE_LOG.killed" ]'
+rm -f "$FAKE_LOG.inactive"
+run env FAKE_TMUX_TITLE="${cx_thread:0:29}..." FAKE_INACTIVE_PASSES=1 "$codexdir/retire.sh" cx-tab
+check "or one whose thread starts a turn while retire.sh checks it" eval '[ "$status" -eq 1 ] && contains "became active" && [ ! -s "$FAKE_LOG.killed" ]'
+awk '$3 == "@21" { $4 = "renamed-by-user" } { print }' "$FAKE_LOG.windows-open" >"$FAKE_LOG.windows-open.tmp"
+mv "$FAKE_LOG.windows-open.tmp" "$FAKE_LOG.windows-open"
+run env FAKE_TMUX_TITLE="019a0000-9999-7222-8333-44445..." "$codexdir/retire.sh" cx-tab
+check "or one the user renamed, though its name no longer marks it the worker's" \
+  eval '[ "$status" -eq 1 ] && contains "still open under another name" && [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-cx-tab" ]'
+awk '$3 == "@21" { $4 = "cx-tab" } { print }' "$FAKE_LOG.windows-open" >"$FAKE_LOG.windows-open.tmp"
+mv "$FAKE_LOG.windows-open.tmp" "$FAKE_LOG.windows-open"
+rm -f "$FAKE_LOG.inactive"
 run env FAKE_TMUX_TITLE="[ ! ] Action Required | ${cx_thread:0:29}..." "$codexdir/retire.sh" cx-tab
 check "and closes the window still showing its thread, as Codex titles it, cut to 29 characters" \
   eval '[ "$status" -eq 0 ] && grep -qx "/tmp/fake-codex-tmux @21" "$FAKE_LOG.killed" && [ ! -e "$work/wt-cx-tab" ]'
@@ -2566,7 +2610,17 @@ echo "$work/herdr.sock w9:t40 cx-herdr" >>"$FAKE_LOG.tabs-open"
 : >"$FAKE_LOG.closed"
 run env FAKE_HERDR_TITLE="019a0000-9999-7222-8333-44445..." "$codexdir/retire.sh" cx-herdr
 check "in herdr too, a Codex tab whose pane shows another conversation stays open" \
-  eval '[ "$status" -eq 1 ] && contains "does not show thread" && [ ! -s "$FAKE_LOG.closed" ]'
+  eval '[ "$status" -eq 1 ] && contains "showing thread" && [ ! -s "$FAKE_LOG.closed" ]'
+run env FAKE_HERDR_TITLE="${cx_thread:0:29}..." FAKE_HERDR_SPLIT=1 "$codexdir/retire.sh" cx-herdr
+check "or one split into a second pane" eval '[ "$status" -eq 1 ] && contains "does not hold just" && [ ! -s "$FAKE_LOG.closed" ]'
+run env FAKE_HERDR_TITLE="${cx_thread:0:29}..." FAKE_HERDR_PANE_TAB=w9:t41 "$codexdir/retire.sh" cx-herdr
+check "or one whose worker pane was moved to another tab" eval '[ "$status" -eq 1 ] && contains "does not hold just" && [ ! -s "$FAKE_LOG.closed" ]'
+awk '$2 == "w9:t40" { $3 = "renamed-by-user" } { print }' "$FAKE_LOG.tabs-open" >"$FAKE_LOG.tabs-open.tmp"
+mv "$FAKE_LOG.tabs-open.tmp" "$FAKE_LOG.tabs-open"
+run env FAKE_HERDR_TITLE="019a0000-9999-7222-8333-44445..." "$codexdir/retire.sh" cx-herdr
+check "or one the user renamed" eval '[ "$status" -eq 1 ] && contains "still open under another name" && [ ! -s "$FAKE_LOG.closed" ]'
+awk '$2 == "w9:t40" { $3 = "cx-herdr" } { print }' "$FAKE_LOG.tabs-open" >"$FAKE_LOG.tabs-open.tmp"
+mv "$FAKE_LOG.tabs-open.tmp" "$FAKE_LOG.tabs-open"
 run env FAKE_HERDR_TITLE="${cx_thread:0:29}..." "$codexdir/retire.sh" cx-herdr
 check "and one whose pane shows its thread is closed" eval '[ "$status" -eq 0 ] && grep -qx "w9:t40" "$FAKE_LOG.closed"'
 
