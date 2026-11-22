@@ -45,6 +45,8 @@ class FakeCodex:
             return iter(self.threads)
         if method == "thread/turns/list":
             return iter(self.turns)
+        if method == "thread/queue/list":
+            return iter(self.queue)
         assert method == "thread/items/list"
         return iter(self.items[params["turnId"]])
 
@@ -177,6 +179,34 @@ class WorkerTest(unittest.TestCase):
             with patch.object(self.client, "call", side_effect=reject_add), self.assertRaises(type(error)):
                 worker_api.queue_direction(self.client, self.record, self.worker, "Direction")
             self.assertEqual(isinstance(error, TimeoutError), "codexDirection" in json.loads(self.record.read_text()))
+
+    def test_replaces_a_direction_that_never_reached_codex_once_its_send_is_over(self):
+        self.worker["codexDirection"] = {"id": "lost-id", "previousTurn": "previous", "sentAt": 1000}
+        self.client.turns = [{"id": "previous", "status": "completed"}]
+        self.client.items["previous"] = [user_message("Earlier work")]
+        original = self.client.call
+        added = []
+
+        def accept_add(method, params):
+            if method == "thread/queue/add":
+                added.append(params["clientUserMessageId"])
+                return {"queuedSubmission": {"id": "submission"}}
+            return original(method, params)
+
+        with patch.object(self.client, "call", side_effect=accept_add):
+            with patch.object(worker_api.time, "time", return_value=1005):
+                self.assertFalse(worker_api.is_inactive(self.client, self.worker))
+            later = 1000 + worker_api.DIRECTION_LOST_AFTER_SECONDS
+            with patch.object(worker_api.time, "time", return_value=later):
+                self.client.queue = [{"id": "submission", "clientUserMessageId": "lost-id"}]
+                with self.assertRaisesRegex(ValueError, "Wait for the preceding"):
+                    worker_api.queue_direction(self.client, self.record, self.worker, "Next")
+                self.client.queue = []
+                self.assertTrue(worker_api.is_inactive(self.client, self.worker))
+                worker_api.queue_direction(self.client, self.record, self.worker, "Next")
+        saved = json.loads(self.record.read_text())["codexDirection"]
+        self.assertEqual([saved["id"]], added)
+        self.assertNotEqual("lost-id", saved["id"])
 
     def test_reminds_when_pending_block_identity_stays_the_same(self):
         self.client.turns = [{"id": "first", "status": "inProgress"}]

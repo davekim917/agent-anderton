@@ -217,9 +217,11 @@ $report_footer
 write_record() {
   jq -nc --arg name "$name" --arg launcher "$launcher" --arg id "$id" --arg tab "$tab" --arg dir "$dir" --arg root "$root" \
     --arg socket "$socket" --arg server "$server" --arg base "$base" --arg spawner "$me" --arg label "$label" --argjson worktree "$worktree" \
+    --arg pane "$pane" --arg spawner_session "$sid" \
     --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg provider "$provider" --arg codex "$codex_home" --arg baseline "$baseline" --arg token "$launch_token" \
     '{name: $name, launcher: $launcher, id: $id, tab: $tab, socket: $socket, server: $server, dir: $dir, root: $root,
-      base: $base, worktree: $worktree, spawner: $spawner, label: $label, startedAt: $at}
+      base: $base, worktree: $worktree, spawner: $spawner, spawnerSession: $spawner_session, label: $label, startedAt: $at}
+      + if $pane != "" then {pane: $pane} else {} end
       + if $provider == "codex" then {provider: $provider, codexHome: $codex, codexBaseline: $baseline, codexLaunchToken: $token} else {} end' >| "$record"
   reserved=""
 }
@@ -258,14 +260,16 @@ if [ "$provider" = codex ]; then
 $brief"
   config_env="CODEX_HOME=$codex_home"
   mode="workspace-write, user approvals"
+  # The thread id as the tab's title is how retire.sh tells that the tab still shows this worker's conversation.
   set -- --remote "unix://$codex_home/app-server-control/app-server-control.sock" \
-    --sandbox workspace-write -a on-request -c 'approvals_reviewer="user"' -c "model_reasoning_effort=\"$effort\""
+    --sandbox workspace-write -a on-request -c 'approvals_reviewer="user"' -c "model_reasoning_effort=\"$effort\"" \
+    -c 'tui.terminal_title=["thread-id"]'
   if [ -n "$model" ]; then set -- "$@" -m "$model"; fi
 else
   set -- -n "$name" --permission-mode "$mode" --effort "$effort" --model "${model:-opus}"
 fi
 # A tab or window id is unique only within its server, so the record keeps which server it was opened in.
-id="" tab="" socket="" server=""
+id="" tab="" pane="" socket="" server=""
 if [ "$launcher" = herdr ]; then
   socket="${HERDR_SOCKET_PATH:-}"
   # A tab's or window's process takes its environment from its multiplexer, not from this script: a non-default
@@ -283,13 +287,14 @@ if [ "$launcher" = herdr ]; then
   # Recorded as soon as the tab exists, so a spawn cut short still leaves retire.sh something to stop.
   write_record
   # A startup prompt (folder trust, a new permission mode) leaves the agent blocked: show it, then undo.
+  # The brief goes to the pane, whose id herdr never reuses, not to the name, which the user can rename and reuse.
   if ! out=$(herdr agent start "$name" --kind "$provider" --pane "$pane" --timeout 120000 -- "$@" 2>&1) ||
-    ! out=$(herdr agent prompt "$name" "$brief" 2>&1); then
-    screen=$(herdr agent read "$name" 2>/dev/null | tail -n 20 || true)
+    ! out=$(herdr agent prompt "$pane" "$brief" 2>&1); then
+    screen=$(herdr agent read "$pane" 2>/dev/null | tail -n 20 || true)
     if [ "$provider" = codex ]; then
       echo "Codex worker '$name' could not take the brief: $out
 $screen
-The tab and worktree were kept. Inspect the tab. If it received the launch brief, register it; otherwise retire the worker and retry once the startup issue is resolved." >&2
+The tab and worktree were kept. Inspect the tab. If it received the launch brief, register it; otherwise close the tab, retire the worker and retry once the startup issue is resolved." >&2
       exit 1
     fi
     herdr tab close "$tab" >/dev/null 2>&1 || true
@@ -306,10 +311,16 @@ $screen"
 elif [ "$launcher" = tmux ]; then
   socket="${TMUX%%,*}"
   server=$(printf '%s' "$TMUX" | cut -d, -f2)
-  # Given as separate arguments, the window's command runs without a shell, so the brief needs no quoting.
+  # Given as separate arguments, the window's command runs without a shell, so the brief needs no quoting. tmux still
+  # parses each argument: one ending in ";" ends the command unless written "\;", and -c expands formats, so "#" is "##".
   set -- "$provider" "$@" "$brief"
   [ -z "${config_env#*=}" ] || set -- -e "$config_env" "$@"
-  out=$(tmux new-window -d -P -F '#{window_id}' -n "$label" -c "$dir" "$@" 2>&1) ||
+  for arg; do
+    shift
+    case $arg in *';') arg="${arg%;}\\;" ;; esac
+    set -- "$@" "$arg"
+  done
+  out=$(tmux new-window -d -P -F '#{window_id}' -n "$label" -c "$(printf '%s' "$dir" | sed 's/#/##/g')" "$@" 2>&1) ||
     failed "Could not open a tmux window: $out"
   tab=$(printf '%s\n' "$out" | grep -E '^@[0-9]+$' | tail -n 1 || true)
   [ -n "$tab" ] || failed "tmux opened no window: $out"

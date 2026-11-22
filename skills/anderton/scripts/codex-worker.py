@@ -17,6 +17,8 @@ import uuid
 
 MAX_MESSAGE = 16 * 1024 * 1024
 BLOCK_REMINDER_SECONDS = 300
+# Longer than any request a lost connection can leave in flight: Codex.call waits 5 seconds for its answer.
+DIRECTION_LOST_AFTER_SECONDS = 60
 # RFC 6455 requires the handshake GUID in uppercase ASCII.
 HANDSHAKE_GUID = str(uuid.UUID("258eafa5-e914-47da-95ca-c5ab0dc85b11")).upper().encode("ascii")
 REPORT = re.compile(r"^(RESULT|QUESTION|BLOCKED|ANSWER):[ \t]*\S")
@@ -212,24 +214,33 @@ def final_report(client, thread, turn):
 def is_inactive(client, worker):
     if client.call("thread/queue/list", {"threadId": worker["id"], "limit": 1})["data"]:
         return False
-    if not direction_finished(client, worker):
+    if direction_state(client, worker) == "pending":
         return False
     return read_thread(client, worker)["status"]["type"] in {"idle", "notLoaded"}
 
 
-def direction_finished(client, worker):
+def direction_state(client, worker):
+    """The last direction's outcome: none, finished, pending, or lost when its send never reached Codex."""
     pending = worker.get("codexDirection")
     if not pending:
-        return True
+        return "none"
     thread = worker["id"]
+    # The queue first: a submission leaves the queue for a turn, so it cannot slip past both reads.
+    for entry in client.pages("thread/queue/list", threadId=thread, limit=20):
+        if entry.get("clientUserMessageId") == pending["id"]:
+            return "pending"
     for turn in client.pages("thread/turns/list", threadId=thread, limit=20, itemsView="notLoaded"):
         for entry in client.pages("thread/items/list", threadId=thread, turnId=turn["id"], limit=10):
             item = entry["item"]
             if item["type"] == "userMessage" and item.get("clientId") == pending["id"]:
-                return turn["status"] in {"completed", "interrupted", "failed"}
+                return "finished" if turn["status"] in {"completed", "interrupted", "failed"} else "pending"
         if turn["id"] == pending["previousTurn"]:
             break
-    return False
+    # Neither queued nor in a turn since the one before it. A connection that failed mid-send can leave the request
+    # in flight briefly; after that it never arrived. A marker from before sentAt was recorded is long past that.
+    if time.time() - pending.get("sentAt", 0) < DIRECTION_LOST_AFTER_SECONDS:
+        return "pending"
+    return "lost"
 
 
 def save_worker(path, worker):
@@ -246,14 +257,18 @@ def save_worker(path, worker):
 
 def queue_direction(client, record, worker, text):
     info = read_thread(client, worker)
-    if not direction_finished(client, worker):
+    state = direction_state(client, worker)
+    if state == "pending":
         raise ValueError("Wait for the preceding Anderton direction to finish")
+    if state == "lost":
+        print("The preceding Anderton direction never reached Codex; it is replaced by this one.", file=sys.stderr)
     thread = worker["id"]
     turns = client.call("thread/turns/list", {
         "threadId": thread, "limit": 1, "itemsView": "notLoaded",
     })["data"]
     token = str(uuid.uuid4())
-    worker["codexDirection"] = {"id": token, "previousTurn": turns[0]["id"] if turns else None}
+    worker["codexDirection"] = {"id": token, "previousTurn": turns[0]["id"] if turns else None,
+                                "sentAt": int(time.time())}
     save_worker(record, worker)
     try:
         submitted = client.call("thread/queue/add", {

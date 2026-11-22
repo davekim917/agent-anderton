@@ -63,7 +63,7 @@ case "$1 $2" in
     if [ -n "${FAKE_HERDR_START_LIVE:-}" ]; then printf '[{"kind":"interactive","name":"%s","id":null}]\n' "$3" > "$FAKE_AGENTS"; fi
     if [ -n "${FAKE_HERDR_START_FAIL:-}" ]; then echo '{"error":{"code":"agent_not_ready"}}'; exit 1; fi
     ;;
-  "agent prompt") printf '%s' "$4" > "$FAKE_LOG.prompt" ;;
+  "agent prompt") printf '%s' "$4" > "$FAKE_LOG.prompt"; printf '%s\n' "$3" > "$FAKE_LOG.prompt-target" ;;
   "agent list") cat "$FAKE_LOG.herdr-agents" 2>/dev/null || echo '{"result":{"agents":[]}}' ;;
   "agent read")
     if [ -n "${FAKE_SCREEN:-}" ]; then
@@ -86,6 +86,7 @@ case "$1 $2" in
       mv "$FAKE_KEY_NEXT_STATUS.tmp" "$FAKE_KEY_NEXT_STATUS"
     fi
     ;;
+  "pane get") jq -nc --arg t "${FAKE_HERDR_TITLE:-}" '{result: {pane: {terminal_title: $t}}}' ;;
   "tab get")
     if [ -n "${FAKE_HERDR_GET_GARBAGE:-}" ]; then echo "permission denied" >&2; exit 1; fi
     if [ -n "${FAKE_HERDR_NO_SERVER:-}" ]; then echo '{"error":{"code":"server_not_running"}}'; exit 1; fi
@@ -135,6 +136,7 @@ case $1 in
     awk -v s="$sock" '$1 == s { print $2, $3, $4 }' "$FAKE_LOG.windows-open" 2>/dev/null || true
     ;;
   list-panes) cat "$FAKE_LOG.tmux-panes" 2>/dev/null ;;
+  display-message) printf '%s\n' "${FAKE_TMUX_TITLE:-}" ;;
   capture-pane) cat "$FAKE_SCREEN" ;;
   send-keys)
     echo "$3 $4" >> "$FAKE_LOG.keys"
@@ -715,6 +717,8 @@ check "given the brief" grep -qF "Tidy the README." "$FAKE_LOG.prompt"
 check "and told to report to the caller by name" grep -qF 'Message "lead-session" by SendMessage only when' "$FAKE_LOG.prompt"
 check "not started in the background" [ ! -e "$FAKE_LOG.bg" ]
 check "recording its tab and herdr server, which retire.sh closes it in" [ "$(jq -r '"\(.launcher) \(.tab) \(.socket)"' "$CLAUDE_CONFIG_DIR/anderton/workers/tab-worker.json")" = "herdr w9:t5 $work/herdr.sock" ]
+check "sending the brief to its pane, not to a name another agent can take" [ "$(cat "$FAKE_LOG.prompt-target")" = w9:p5 ]
+check "and recording that pane, whose title retire.sh reads for a Codex worker" [ "$(jq -r .pane "$CLAUDE_CONFIG_DIR/anderton/workers/tab-worker.json")" = w9:p5 ]
 
 # A named project's Anderton puts its own name on its workers' tabs, and retire.sh still finds and closes them.
 (cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project tabs >/dev/null)
@@ -2446,6 +2450,8 @@ echo "Codex milestone"
 FAKE
 chmod +x "$scheduler/waiting.sh" "$scheduler/codex-workers.sh"
 probe_claim --take-over --probe "$work/probe.sh"
+# A Codex worker record exists, so only the order, not the absence of any Codex worker, keeps the Codex probe back.
+printf '{"name":"sched-codex","provider":"codex"}\n' >"$CLAUDE_CONFIG_DIR/anderton/workers/sched-codex.json"
 echo news >"$work/probe.mode"
 echo 1 >"$probe_dir/last"
 echo 2 >"${probe_record%.json}.codex-probe/last"
@@ -2455,6 +2461,151 @@ status=$?
 set -e
 check "a due custom probe runs before a more recently checked Codex probe" eval \
   '[ "$status" -eq 2 ] && contains "item " && ! contains "Codex milestone"'
+
+# A session already blocked is reported at once, never held behind a Codex sweep that can run for minutes.
+cat >"$scheduler/waiting.sh" <<'FAKE'
+#!/usr/bin/env bash
+case $1 in
+  --codex-workers) echo worker.json ;;
+  --blocked) echo "=== held-worker  /elsewhere  (waiting: permission, since 2026-01-01T00:00:00Z)" ;;
+esac
+FAKE
+cat >"$scheduler/codex-workers.sh" <<FAKE
+#!/usr/bin/env bash
+: >"$work/codex-sweep.ran"
+sleep 5
+echo "Codex milestone"
+FAKE
+echo 0 >"${probe_record%.json}.codex-probe/last"
+date +%s >"$probe_dir/last"
+set +e
+out=$(watch_in ph-1 "$probed" | env ANDERTON_WATCH_TICK=1 "$scheduler/watch.sh" 2>&1)
+status=$?
+set -e
+check "the watch reports a blocked session without running a due Codex sweep first" eval \
+  '[ "$status" -eq 2 ] && contains "=== held-worker" && [ ! -e "$work/codex-sweep.ran" ]'
+rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/sched-codex.json"
+
+# retire.sh keeps what git worktree remove would delete, whatever git's display settings say, and a worktree git
+# cannot compare with its base.
+rho_worker untracked-wt
+git -C "$rho" config status.showUntrackedFiles no
+echo draft >"$work/wt-untracked-wt/notes.md"
+run "$scripts/retire.sh" untracked-wt
+check "retire.sh keeps an untracked file that status.showUntrackedFiles=no hides" \
+  eval '[ "$status" -eq 3 ] && [ -f "$work/wt-untracked-wt/notes.md" ] && contains "uncommitted changes"'
+git -C "$rho" config --unset status.showUntrackedFiles
+rm -f "$work/wt-untracked-wt/notes.md"
+run "$scripts/retire.sh" untracked-wt
+check "it retires that worker once the file is gone" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-untracked-wt" ]'
+rho_worker bad-base
+good_base=$(jq -r .base "$CLAUDE_CONFIG_DIR/anderton/workers/bad-base.json")
+jq -c '.base = "0000000000000000000000000000000000000001"' "$CLAUDE_CONFIG_DIR/anderton/workers/bad-base.json" >"$work/bb.tmp"
+mv "$work/bb.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/bad-base.json"
+run "$scripts/retire.sh" bad-base
+check "and a worktree git cannot compare with its recorded base, rather than reading the failure as no commits" \
+  eval '[ "$status" -eq 3 ] && [ -d "$work/wt-bad-base" ] && contains "git could not"'
+if [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/bad-base.json" ]; then
+  jq -c --arg b "$good_base" '.base = $b' "$CLAUDE_CONFIG_DIR/anderton/workers/bad-base.json" >"$work/bb.tmp"
+  mv "$work/bb.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/bad-base.json"
+  run "$scripts/retire.sh" bad-base
+fi
+check "it retires that worker once its base reads again" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-bad-base" ]'
+
+# A Codex worker belongs to the Anderton session that started it, renamed or not.
+cx_record="$CLAUDE_CONFIG_DIR/anderton/workers/cx-side.json"
+jq -nc --arg root "$rho" --arg dir "$work/wt-cx-side" \
+  '{name: "cx-side", provider: "codex", launcher: "tmux", root: $root, dir: $dir, worktree: true, spawner: "rho-scope", spawnerSession: "rs-1"}' >"$cx_record"
+rs_entry="$CLAUDE_CONFIG_DIR/sessions/$p_rs.json"
+jq -c '.name = "rho-renamed"' "$rs_entry" >"$work/rs.tmp"
+mv "$work/rs.tmp" "$rs_entry"
+out=$(cd "$rho" && env CLAUDE_PID="$p_rs" "$scripts/waiting.sh" --codex-workers)
+check "a project's Anderton renamed after it started a Codex worker still owns it" [ "$out" = "$cx_record" ]
+out=$(cd "$rho" && env CLAUDE_PID="$p_rl" "$scripts/waiting.sh" --codex-workers)
+check "and the repository's Anderton does not take it over" [ -z "$out" ]
+jq -c '.name = "rho-scope"' "$rs_entry" >"$work/rs.tmp"
+mv "$work/rs.tmp" "$rs_entry"
+rm -f "$cx_record"
+
+# Retiring a Codex worker in a tmux window. Ownership and the daemon's answer are faked; the title check and the
+# worktree checks are retire.sh's own.
+codexdir="$work/codex-scripts"
+mkdir -p "$codexdir"
+cp "$scripts/retire.sh" "$scripts/session-lib.sh" "$codexdir/"
+cat >"$codexdir/waiting.sh" <<FAKE
+#!/usr/bin/env bash
+# The owned record first and another after a pause, as the real lister writes them one by one.
+echo "$CLAUDE_CONFIG_DIR/anderton/workers/cx-tab.json"
+sleep 0.3
+echo "$CLAUDE_CONFIG_DIR/anderton/workers/cx-herdr.json"
+FAKE
+printf '#!/usr/bin/env bash\nexit 0\n' >"$codexdir/codex-worker.py"
+chmod +x "$codexdir/waiting.sh" "$codexdir/codex-worker.py"
+cx_thread=019a0000-1111-7222-8333-444455556666
+rho_worker cx-tab
+jq -c --arg id "$cx_thread" '. + {provider: "codex", launcher: "tmux", id: $id, tab: "@21", socket: "/tmp/fake-codex-tmux", server: "4", label: "cx-tab"}' \
+  "$CLAUDE_CONFIG_DIR/anderton/workers/cx-tab.json" >"$work/cx.tmp"
+mv "$work/cx.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/cx-tab.json"
+echo "/tmp/fake-codex-tmux 4 @21 cx-tab" >>"$FAKE_LOG.windows-open"
+: >"$FAKE_LOG.killed"
+run env FAKE_TMUX_TITLE="019a0000-9999-7222-8333-44445..." "$codexdir/retire.sh" cx-tab
+check "retire.sh leaves open a Codex window now showing another conversation" \
+  eval '[ "$status" -eq 1 ] && contains "does not show thread $cx_thread" && [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-cx-tab" ]'
+run env FAKE_TMUX_TITLE="" "$codexdir/retire.sh" cx-tab
+check "or one Codex has left, whose title it cleared" eval '[ "$status" -eq 1 ] && contains "does not show thread" && [ ! -s "$FAKE_LOG.killed" ]'
+run env FAKE_TMUX_TITLE="[ ! ] Action Required | ${cx_thread:0:29}..." "$codexdir/retire.sh" cx-tab
+check "and closes the window still showing its thread, as Codex titles it, cut to 29 characters" \
+  eval '[ "$status" -eq 0 ] && grep -qx "/tmp/fake-codex-tmux @21" "$FAKE_LOG.killed" && [ ! -e "$work/wt-cx-tab" ]'
+check "owned though the lister was still writing after its record" eval '! contains "does not own"'
+rho_worker cx-herdr
+jq -c --arg id "$cx_thread" --arg sock "$work/herdr.sock" \
+  '. + {provider: "codex", launcher: "herdr", id: $id, tab: "w9:t40", pane: "w9:p40", socket: $sock, label: "cx-herdr"}' \
+  "$CLAUDE_CONFIG_DIR/anderton/workers/cx-herdr.json" >"$work/cx.tmp"
+mv "$work/cx.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/cx-herdr.json"
+echo "$work/herdr.sock w9:t40 cx-herdr" >>"$FAKE_LOG.tabs-open"
+: >"$FAKE_LOG.closed"
+run env FAKE_HERDR_TITLE="019a0000-9999-7222-8333-44445..." "$codexdir/retire.sh" cx-herdr
+check "in herdr too, a Codex tab whose pane shows another conversation stays open" \
+  eval '[ "$status" -eq 1 ] && contains "does not show thread" && [ ! -s "$FAKE_LOG.closed" ]'
+run env FAKE_HERDR_TITLE="${cx_thread:0:29}..." "$codexdir/retire.sh" cx-herdr
+check "and one whose pane shows its thread is closed" eval '[ "$status" -eq 0 ] && grep -qx "w9:t40" "$FAKE_LOG.closed"'
+
+# spawn.sh starts a Codex worker with the title retire.sh reads; without it no Codex tab could be closed.
+cxs="$work/codex-spawn"
+mkdir -p "$cxs" "$work/codex-home/app-server-control"
+cp "$scripts/spawn.sh" "$scripts/session-lib.sh" "$cxs/"
+cat >"$cxs/codex-worker.py" <<FAKE
+#!/usr/bin/env bash
+case " \$* " in *" --token "*) echo "$cx_thread" ;; esac
+FAKE
+printf '#!/usr/bin/env bash\n' >"$work/bin/codex"
+chmod +x "$cxs/codex-worker.py" "$work/bin/codex"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$work/codex-home/app-server-control/app-server-control.sock"
+rm -f "$FAKE_LOG.window"
+set +e
+out=$(cd "$rho" && printf 'Task.\n' | env CLAUDE_CODE_SESSION_ID=rl-1 CLAUDE_PID="$p_rl" CODEX_HOME="$work/codex-home" TMUX=/tmp/fake-tmux,1,0 \
+  FAKE_TMUX_WINDOW=@41 "$cxs/spawn.sh" --provider codex --effort low cx-titled 2>&1)
+status=$?
+set -e
+check "spawn.sh starts a Codex worker in tmux" [ "$status" -eq 0 ]
+check "titling its tab with the thread id" grep -qxF 'tui.terminal_title=["thread-id"]' "$FAKE_LOG.window"
+check "and records the thread it registered" [ "$(jq -r .id "$CLAUDE_CONFIG_DIR/anderton/workers/cx-titled.json" 2>/dev/null)" = "$cx_thread" ]
+rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/cx-titled.json" "$work/bin/codex"
+[ ! -d "$work/wt-cx-titled" ] || git -C "$rho" worktree remove --force "$work/wt-cx-titled"
+
+# tmux reads an argument ending in ";" as the end of its command, and expands formats in the start directory.
+mkdir -p "$work/hash#{session_name}"
+rm -f "$FAKE_LOG.windows-open"
+run env TMUX=/tmp/fake-tmux,1,0 FAKE_TMUX_LIVE=1 FAKE_TMUX_WINDOW=@31 ANDERTON_WORKTREES="$work/hash#{session_name}" \
+  "$scripts/spawn.sh" --effort low --model 'opus;' semi-worker <<'BRIEF'
+Task.
+BRIEF
+check "spawn.sh starts a tmux worker whose arguments hold tmux syntax" [ "$status" -eq 0 ]
+check "escaping a trailing semicolon" [ "$(grep -A1 -x -- --model "$FAKE_LOG.window" | tail -n 1)" = 'opus\;' ]
+check "and the format character in its start directory" [ "$(grep -A1 -x -- -c "$FAKE_LOG.window" | tail -n 1)" = "$work/hash##{session_name}/wt-semi-worker" ]
+check "while the worktree is made at the literal path" [ -d "$work/hash#{session_name}/wt-semi-worker" ]
+run env FAKE_TMUX_KILL_ENDS=1 "$scripts/retire.sh" semi-worker
+check "which retire.sh retires" [ "$status" -eq 0 ]
 
 [ "$failures" -eq 0 ] || { echo "$failures check(s) failed"; exit 1; }
 echo "all checks passed"

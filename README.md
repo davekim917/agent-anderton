@@ -151,6 +151,8 @@ The worker opens in its own worktree and tab. Anderton sends follow-ups to
 the worker's Codex thread ID and receives milestone replies and blocker
 alerts through its existing watch. Open the worker's tab to handle a Codex
 permission prompt or input request. The Anderton itself runs in Claude Code.
+A Codex worker's tab is titled with its thread ID, and `retire.sh` closes the tab only while it still shows
+that thread: if you open another conversation there with `/resume` or `/new`, close the tab yourself.
 
 **How is it different from firstmate?**
 
@@ -269,7 +271,8 @@ window is closed only when it still carries the label it was opened with, in the
 the worker counts as stopped only when that tab or window is gone and its name has left
 `claude agents`; a background worker is stopped with `claude stop`. It exits 3 and keeps the
 worktree when the worktree has uncommitted changes, or commits since it started that no remote
-branch has. Gitignored files don't count as changes.
+branch has. Untracked files count whatever `status.showUntrackedFiles` says, and a worktree git
+cannot read or compare with its base is kept too. Gitignored files don't count as changes.
 
 **`adopt.sh <name>`** makes the calling Anderton answer for a live session the user opened in its
 repository, as for a worker it started: it writes a worker record naming the caller, so the session's

@@ -27,6 +27,7 @@ worktree=$(jq -r .worktree "$record")
 id=$(jq -r '.id // empty' "$record")
 launcher=$(jq -r '.launcher // "bg"' "$record")
 tab=$(jq -r '.tab // empty' "$record")
+pane=$(jq -r '.pane // empty' "$record")
 socket=$(jq -r '.socket // empty' "$record")
 server=$(jq -r '.server // empty' "$record")
 label=$(jq -r '.label // empty' "$record")
@@ -39,10 +40,29 @@ if [ "$(jq -r '.adopted // false' "$record")" = true ]; then
   exit 0
 fi
 
+shows_thread() { # shows_thread <thread id>: true when the worker's tab or window is titled with it, as Codex titles it
+  local title=""
+  [ ${#1} -ge 29 ] || return 1
+  case $launcher in
+    herdr) title=$(HERDR_SOCKET_PATH="$socket" herdr pane get "$pane" 2>/dev/null | jq -r '.result.pane.terminal_title // empty' 2>/dev/null) ;;
+    tmux) title=$(tmux -S "$socket" display-message -p -t "$tab" '#{pane_title}' 2>/dev/null) ;;
+  esac
+  case $title in *"${1:0:29}"*) return 0 ;; esac
+  return 1
+}
+
 # A worker that may still be running keeps its worktree: stop it, or confirm Claude Code no longer lists it.
 if [ "$provider" = codex ]; then
   scripts=$(cd "$(dirname "$0")" && pwd)
-  if ! "$scripts/waiting.sh" --codex-workers | grep -Fxq "$record"; then
+  # Read whole, not piped into grep -q: grep would exit at the match, and pipefail would read the lister's SIGPIPE
+  # as "not owned".
+  owned=""
+  while IFS= read -r r; do
+    if [ "$r" = "$record" ]; then owned=1; fi
+  done <<EOF
+$("$scripts/waiting.sh" --codex-workers)
+EOF
+  if [ -z "$owned" ]; then
     echo "This Anderton does not own Codex worker '$name'." >&2
     exit 1
   fi
@@ -58,6 +78,13 @@ if [ "$launcher" != bg ]; then
   # A session in a herdr tab or tmux window has no id for claude stop; closing its tab or window ends it. Only
   # a tab or window place_state recognises as the worker's is closed, in the server it was opened in.
   if [ "$(place_state "$launcher" "$socket" "$tab" "$label" "$server")" = present ]; then
+    # The user can open another conversation in a Codex tab (/resume, /new), which leaves the recorded thread idle
+    # and the tab running, and no daemon request says which thread a tab shows. spawn.sh has Codex title the tab with
+    # its thread id, which Codex cuts to 29 characters, so only a tab still showing the recorded thread is closed.
+    if [ "$provider" = codex ] && ! shows_thread "$id"; then
+      echo "Codex worker '$name': its $launcher tab $tab does not show thread ${id:-(none registered)} (another conversation was opened there, or Codex left it), so it was not closed. Close it yourself once nothing in it needs keeping, then rerun." >&2
+      exit 1
+    fi
     case $launcher in
       herdr) HERDR_SOCKET_PATH="$socket" herdr tab close "$tab" >/dev/null 2>&1 || true ;;
       tmux) tmux -S "$socket" kill-window -t "$tab" >/dev/null 2>&1 || true ;;
@@ -90,14 +117,11 @@ else
 fi
 
 if [ "$worktree" = true ] && [ -d "$dir" ]; then
-  if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]; then
-    echo "Stopped '$name'. Kept $dir: it has uncommitted changes."
-    exit 3
-  fi
-  if [ -n "$(git -C "$dir" rev-list -1 HEAD --not --remotes "$(jq -r .base "$record")" 2>/dev/null)" ]; then
-    echo "Stopped '$name'. Kept $dir: it has commits no remote branch has."
-    exit 3
-  fi
+  case $(worktree_work "$dir" "$(jq -r '.base // empty' "$record")") in
+    uncommitted) echo "Stopped '$name'. Kept $dir: it has uncommitted changes."; exit 3 ;;
+    unpushed) echo "Stopped '$name'. Kept $dir: it has commits no remote branch has."; exit 3 ;;
+    unreadable) echo "Stopped '$name'. Kept $dir: git could not read its status or compare it with its base and remotes."; exit 3 ;;
+  esac
   git -C "$root" worktree remove "$dir"
 fi
 if [ "$launcher" = bg ] && ! claude rm "$id" >/dev/null 2>&1; then

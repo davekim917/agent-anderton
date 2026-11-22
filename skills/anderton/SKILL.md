@@ -157,7 +157,8 @@ unless the user names one, with the effort you pass. The local Codex daemon
 and Python 3 must be available. If startup stops before the worker gets a
 thread ID, inspect its tab. Once it has received the launch brief, run
 `scripts/codex-workers.sh register <name>` to bind it. If launch ended before
-the brief was submitted, resolve the startup issue, retire the worker, and retry.
+the brief was submitted, resolve the startup issue, have the user close its tab,
+retire the worker, and retry.
 
 Steer a Codex worker with `scripts/codex-workers.sh message <name> "<instruction>"`.
 The script queues the message to its registered thread. Send the next direction
@@ -168,6 +169,8 @@ when reviewing. Its final
 `RESULT:`, `QUESTION:`, `BLOCKED:`, and `ANSWER:` replies wake you through
 the watch. Send Codex permission and input requests to the user in the
 worker's tab. Retire it with `scripts/retire.sh <name>` after its active turn ends.
+It closes the tab only while the tab still shows the worker's thread; when it
+refuses, ask the user to close the tab, then rerun it.
 
 **Adopt a session** the user opened when they ask you to take it on:
 `scripts/adopt.sh <name>`. You then answer for it as for a worker you started. Tell it
