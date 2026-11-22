@@ -224,8 +224,7 @@ managed_invoker() {
 }
 
 live_claude_worker() {
-  local file reg name dir sid pid started bound
-  file=$1
+  local file=$1 binding=${2:-} reg name dir sid pid started bound process_start
   [ "$(record_provider "$file")" = claude ] || return 1
   name=$(jq -r .name "$file")
   bound=$(jq -r '.claudeSession.id // empty' "$file")
@@ -236,8 +235,14 @@ live_claude_worker() {
     sid=$(jq -r '.sessionId // empty' "$reg")
     pid=$(jq -r '.pid // empty' "$reg")
     started=$(jq -r '.startedAt // empty | floor' "$reg")
-    if [ -n "$bound" ] && [ "$sid" != "$bound" ]; then continue; fi
     if [ -z "$sid" ] || [ -z "$pid" ] || ! is_worker "$name" "$dir" "$sid" "$pid" "$started"; then continue; fi
+    if [ -n "$bound" ] && [ "$sid" != "$bound" ]; then
+      [ "$binding" = --allow-rebind ] || continue
+      process_start=$(proc_start "$pid")
+      [ -n "$process_start" ] || continue
+      jq -e --arg pid "$pid" --arg start "$process_start" '
+        .claudeSession | (.pid | tostring) == $pid and .procStart == $start' "$file" >/dev/null || continue
+    fi
     if registered_alive "$pid" "$started" "$(jq -r '.procStart // empty' "$reg")"; then
       printf '%s\n' "$reg"
     fi

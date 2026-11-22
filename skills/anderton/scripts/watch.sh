@@ -31,7 +31,7 @@ take_claude_worker_watch() {
 }
 
 watch_claude_worker() {
-  local worker owner owner_provider transcript target updated pending tick worker_sid worker_pid worker_reg now
+  local worker owner owner_provider transcript target updated pending tick worker_sid worker_pid worker_reg process_start now
   worker_sid=$sid
   worker_pid=$(session_pid "$worker_sid")
   [ -n "$worker_pid" ] || return 0
@@ -46,15 +46,17 @@ watch_claude_worker() {
   [ -n "$owner" ] || return 0
   owner_provider=$(record_provider "$owner")
   uses_claude_transcript "$worker" "$owner_provider" || return 0
-  [ "$(live_claude_worker "$worker")" = "$worker_reg" ] || return 0
+  [ "$(live_claude_worker "$worker" --allow-rebind)" = "$worker_reg" ] || return 0
   take_claude_worker_watch "${worker%.json}.$worker_sid.watch" || return 0
   # Only the Stop hook in this exact session can register the native transcript.
   (
     lock_worker "$worker" || exit 1
-    [ "$(live_claude_worker "$worker")" = "$worker_reg" ] || exit 1
+    [ "$(live_claude_worker "$worker" --allow-rebind)" = "$worker_reg" ] &&
+      [ "$(jq -r '.sessionId // empty' "$worker_reg")" = "$worker_sid" ] || exit 1
+    process_start=$(proc_start "$worker_pid")
     updated=$(mktemp "$worker.XXXXXX") || exit 1
-    jq --arg sid "$worker_sid" --arg file "$transcript" '
-      .claudeSession = {id: $sid, transcript: $file} | .reportTransport = "transcript"
+    jq --arg sid "$worker_sid" --arg file "$transcript" --argjson pid "$worker_pid" --arg start "$process_start" '
+      .claudeSession = {id: $sid, transcript: $file, pid: $pid, procStart: $start} | .reportTransport = "transcript"
       | if .claudeDirection != null and .claudeDirection.target != $sid then del(.claudeDirection) else . end
       ' "$worker" > "$updated" && mv -f "$updated" "$worker"
   ) || return 0
@@ -70,6 +72,7 @@ watch_claude_worker() {
         take_repository_lock "$(project_root "$cwd")"
         lock_worker "$worker" || exit 1
         [ "$(live_claude_worker "$worker")" = "$worker_reg" ] &&
+          [ "$(jq -r '.sessionId // empty' "$worker_reg")" = "$worker_sid" ] &&
           [ "$(answering_claim "$worker" "$(project_root "$cwd")")" = "$owner" ] || exit 1
         [ "$(jq -r '.status // empty' "$worker_reg")" != waiting ] || exit 1
         jq -e --arg id "$pending" --arg sid "$worker_sid" --arg from "$(jq -r '.sessionId // empty' "$owner")" --argjson now "$now" '

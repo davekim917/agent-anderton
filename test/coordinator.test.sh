@@ -4,8 +4,13 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d /tmp/adtn-coord.XXXXXX)
 tmp=$(cd "$tmp" && pwd -P)
 claimer=""
+clearable_pid=""
+replacement_pid=""
 cleanup() {
-  if [ -n "$claimer" ]; then kill "$claimer" 2>/dev/null || true; fi
+  local pid
+  for pid in "$claimer" "$clearable_pid" "$replacement_pid"; do
+    if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
+  done
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -167,6 +172,41 @@ mkdir "$tmp/quiet-stage"
 claude_role env ANDERTON_PROBE_STATE="$bookmarks" ANDERTON_PROBE_STAGE="$tmp/quiet-stage" "$script/worker.sh" sweep > "$tmp/quiet-output"
 [ ! -s "$tmp/quiet-output" ] && [ ! -e "$tmp/quiet-stage/claude-inherited.json" ]
 
+clearable="$claims/workers/clearable.json"
+clearable_dir=$(jq -r .dir "$inherited")
+jq '.name = "clearable" | .spawnerScope = null | del(.claudeSession)' "$inherited" > "$clearable"
+sleep 60 &
+clearable_pid=$!
+sleep 60 &
+replacement_pid=$!
+register_clearable() {
+  jq -nc --argjson pid "$1" --arg sid "$2" --arg dir "$clearable_dir" '
+    {pid:$pid, sessionId:$sid, name:"clearable", cwd:$dir}' > "$CLAUDE_CONFIG_DIR/sessions/$1.json"
+}
+clearable_stop() {
+  jq -nc --arg sid "$2" --arg dir "$clearable_dir" --arg file "$CLAUDE_CONFIG_DIR/projects/fixture/$2.jsonl" '
+    {session_id:$sid, cwd:$dir, transcript_path:$file, hook_event_name:"Stop"}' |
+    env CLAUDE_PID="$1" CLAUDE_CODE_SESSION_ID="$2" "$script/watch.sh"
+}
+register_clearable "$clearable_pid" before-clear
+clearable_stop "$clearable_pid" before-clear
+jq -e --argjson pid "$clearable_pid" '.claudeSession | .id == "before-clear" and .pid == $pid and .procStart != ""' "$clearable" >/dev/null
+jq '.claudeDirection = {id:"old-direction", target:"before-clear"}' "$clearable" > "$tmp/updated-worker"
+mv "$tmp/updated-worker" "$clearable"
+register_clearable "$replacement_pid" replacement-session
+clearable_stop "$replacement_pid" replacement-session
+jq -e '.claudeSession.id == "before-clear"' "$clearable" >/dev/null
+register_clearable "$clearable_pid" after-clear
+cp "$clearable" "$tmp/current-worker"
+jq '.claudeSession.procStart = "different-process"' "$clearable" > "$tmp/updated-worker"
+mv "$tmp/updated-worker" "$clearable"
+clearable_stop "$clearable_pid" after-clear
+jq -e '.claudeSession.id == "before-clear"' "$clearable" >/dev/null
+mv "$tmp/current-worker" "$clearable"
+clearable_stop "$clearable_pid" after-clear
+jq -e '.claudeSession.id == "after-clear" and (.claudeSession.transcript | endswith("/after-clear.jsonl"))
+  and .claudeDirection == null' "$clearable" >/dev/null
+
 sleep 60 &
 old_pid=$!
 jq --argjson old_pid "$old_pid" '
@@ -179,6 +219,8 @@ claude_role "$script/claim.sh" --rebind
 jq -e --argjson active "$claimer" '.pid == $active and .peerMessage.id == "pending-peer"' "$root_claim" >/dev/null
 codex_role "$script/claim.sh" --take-over
 jq -e '.provider == "codex" and .peerMessage == null' "$root_claim" >/dev/null
+codex_role "$script/worker.sh" message clearable 'Check the updated fixture.'
+jq -e '.claudeDirection.target == "after-clear"' "$clearable" >/dev/null
 
 jq -nc --arg dir "$PWD" '
   {name:"another-name",root:$dir,dir:$dir,adopted:true,sessionId:"fixture-claude"}' > "$claims/workers/another-name.json"
