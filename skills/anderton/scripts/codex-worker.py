@@ -191,24 +191,22 @@ def claim_thread(claim):
     return {"id": claim["sessionId"], "dir": claim["dir"], "name": claim["name"]}
 
 
-def has_message(client, thread, turn, marker, first_only=False):
-    for entry in client.pages("thread/items/list", threadId=thread, turnId=turn, limit=10):
-        item = entry["item"]
-        if item["type"] != "userMessage":
-            continue
-        if any(part["type"] == "text" and part["text"].partition("\n")[0] == marker
-               for part in item["content"]):
-            return True
-        if first_only:
-            return False
-    return False
-
-
 def started_with(client, thread, marker):
+    """True or False for a visible first user message, and None until it is visible."""
     turns = client.call("thread/turns/list", {
         "threadId": thread, "sortDirection": "asc", "limit": 1, "itemsView": "notLoaded",
     })["data"]
-    return bool(turns and has_message(client, thread, turns[0]["id"], marker, first_only=True))
+    if not turns:
+        return None
+    for entry in client.pages("thread/items/list", threadId=thread, turnId=turns[0]["id"], limit=10):
+        item = entry["item"]
+        if item["type"] == "userMessage":
+            parts = item["content"]
+            if not parts:
+                return None
+            return any(part["type"] == "text" and part["text"].partition("\n")[0] == marker
+                       for part in parts)
+    return None
 
 
 def find_thread(client, directory, after, token):
@@ -487,7 +485,10 @@ def main():
             if thread["dir"] != str(Path(worker["dir"]).resolve()):
                 raise ValueError("Codex worker launch directory differs from the thread")
             marker = f"Anderton launch {uuid.UUID(worker['codexLaunchToken'])}"
-            return 0 if started_with(client, thread["id"], marker) else 3
+            match = started_with(client, thread["id"], marker)
+            if match is None:
+                raise ValueError("The Codex thread's first user message is unavailable")
+            return 0 if match else 3
     elif args.command == "identity":
         with Codex(args.home) as client:
             info = thread_identity(client, args.thread)

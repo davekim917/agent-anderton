@@ -140,6 +140,30 @@ class WorkerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "More than one"):
             worker_api.find_thread(self.client, directory, "", token)
 
+    def test_launch_match_is_inconclusive_until_first_user_message_is_visible(self):
+        thread = self.worker["id"]
+        token = "00000000-0000-4000-8000-000000000789"
+        directory = Path(self.worker["dir"])
+        directory.mkdir()
+        self.record.write_text(json.dumps({**self.worker, "codexLaunchToken": token}))
+        with patch.object(worker_api.sys, "argv", ["codex-worker.py", "launch-matches", str(self.record), thread]):
+            original = self.client.call
+            with patch.object(self.client, "call", side_effect=lambda method, params:
+                              {"data": []} if method == "thread/turns/list" else original(method, params)):
+                with self.assertRaisesRegex(ValueError, "first user message is unavailable"):
+                    worker_api.main()
+                self.assertIsNone(worker_api.find_thread(self.client, directory, "", token))
+            self.client.items[thread] = [message("Waiting for the brief")]
+            with self.assertRaisesRegex(ValueError, "first user message is unavailable"):
+                worker_api.main()
+            self.assertIsNone(worker_api.find_thread(self.client, directory, "", token))
+            self.client.items[thread] = [user_message("Unrelated work")]
+            self.assertEqual(3, worker_api.main())
+            self.assertIsNone(worker_api.find_thread(self.client, directory, "", token))
+            self.client.items[thread] = [user_message(f"Anderton launch {token}\n\nBrief")]
+            self.assertEqual(0, worker_api.main())
+            self.assertEqual(thread, str(worker_api.find_thread(self.client, directory, "", token)))
+
     def test_inactivity_requires_empty_queue_and_current_idle_status(self):
         self.assertTrue(worker_api.is_inactive(self.client, self.worker))
         self.client.queue = [{"id": "next"}]

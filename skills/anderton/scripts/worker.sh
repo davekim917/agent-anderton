@@ -52,10 +52,21 @@ still=$(live_claude_worker "$record")
 [ "$reg" = "$still" ] && caller_matches_claim "$role" && worker_belongs "$record" "$root" "$role" || exit 1
 target=$(jq -r .sessionId "$reg")
 sender=$(invoking_session)
-if ! jq -e --arg sid "$target" '.claudeSession.id == $sid' "$record" >/dev/null; then
+if ! jq -e --arg sid "$target" '.claudeSession.id == $sid' "$record" >/dev/null ||
+  ! claude_binding_process_matches "$record" "$(jq -r .pid "$reg")"; then
   echo "The worker has not registered its Anderton Stop hook. Have it end a turn with the plugin loaded and retry." >&2
   exit 1
 fi
+case $(jq -r '.status // empty' "$reg") in
+  busy | waiting) ;;
+  *)
+    if ! read -r watch_pid watch_start 2>/dev/null < "${record%.json}.$target.watch" ||
+      [ -z "$watch_start" ] || [ "$(proc_start "$watch_pid")" != "$watch_start" ]; then
+      echo "The worker's Anderton Stop watcher has ended. Have it end a turn with the plugin loaded and retry." >&2
+      exit 1
+    fi
+    ;;
+esac
 if jq -e --arg from "$sender" '.claudeDirection.from == $from' "$record" >/dev/null &&
   ! "$anderton_scripts/claude-worker.py" acknowledged "$record"; then
   echo "Wait for the preceding Anderton direction to be delivered." >&2

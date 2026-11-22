@@ -31,7 +31,7 @@ take_claude_worker_watch() {
 }
 
 watch_claude_worker() {
-  local worker owner owner_provider transcript target updated pending tick worker_sid worker_pid worker_reg process_start now
+  local worker root owner owner_provider transcript target updated pending tick worker_sid worker_pid worker_reg process_start now
   worker_sid=$sid
   worker_pid=$(session_pid "$worker_sid")
   [ -n "$worker_pid" ] || return 0
@@ -40,9 +40,13 @@ watch_claude_worker() {
   transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty') || return 0
   case $transcript in "$home"/projects/*/"$worker_sid.jsonl") ;; *) return 0 ;; esac
   case $worker_sid in '' | *[!a-zA-Z0-9-]*) return 0 ;; esac
+  [ -f "$transcript" ] && [ -r "$transcript" ] || return 0
+  [ -z "${CLAUDE_CODE_SESSION_ID:-}" ] || [ "$CLAUDE_CODE_SESSION_ID" = "$worker_sid" ] || return 0
+  [ -z "${CLAUDE_PID:-}" ] || [ "$CLAUDE_PID" = "$worker_pid" ] || return 0
   worker=$(worker_record "$target" "$cwd" "$worker_sid" "$worker_pid" "$(jq -r '.startedAt // empty | floor' "$worker_reg")")
   [ -n "$worker" ] && [ "$(record_provider "$worker")" = claude ] || return 0
-  owner=$(answering_claim "$worker" "$(project_root "$cwd")")
+  root=$(project_root "$cwd")
+  owner=$(answering_claim "$worker" "$root")
   [ -n "$owner" ] || return 0
   owner_provider=$(record_provider "$owner")
   uses_claude_transcript "$worker" "$owner_provider" || return 0
@@ -60,20 +64,21 @@ watch_claude_worker() {
       | if .claudeDirection != null and .claudeDirection.target != $sid then del(.claudeDirection) else . end
       ' "$worker" > "$updated" && mv -f "$updated" "$worker"
   ) || return 0
-  [ "$owner_provider" = codex ] || return 0
   tick=${ANDERTON_WATCH_TICK:-30}
   while [ -f "$worker" ] && [ "$(live_claude_worker "$worker")" = "$worker_reg" ] &&
-    [ "$(jq -r .sessionId "$worker_reg" 2>/dev/null)" = "$worker_sid" ] && [ "$(record_provider "$owner")" = codex ]; do
+    [ "$(jq -r .sessionId "$worker_reg" 2>/dev/null)" = "$worker_sid" ]; do
+    owner=$(answering_claim "$worker" "$root")
     now=$(date +%s)
-    if pending=$(jq -er --arg sid "$worker_sid" --arg from "$(jq -r '.sessionId // empty' "$owner")" --argjson now "$now" '
+    if [ -n "$owner" ] && [ "$(record_provider "$owner")" = codex ] &&
+      pending=$(jq -er --arg sid "$worker_sid" --arg from "$(jq -r '.sessionId // empty' "$owner")" --argjson now "$now" '
       .claudeDirection | select(.target == $sid and .from == $from and ($now - (.attemptedAt // 0)) >= 60) | .id // empty
       ' "$worker" 2>/dev/null) && claude_direction_unreceived "$worker"; then
       if (
-        take_repository_lock "$(project_root "$cwd")"
+        take_repository_lock "$root"
         lock_worker "$worker" || exit 1
         [ "$(live_claude_worker "$worker")" = "$worker_reg" ] &&
           [ "$(jq -r '.sessionId // empty' "$worker_reg")" = "$worker_sid" ] &&
-          [ "$(answering_claim "$worker" "$(project_root "$cwd")")" = "$owner" ] || exit 1
+          [ "$(answering_claim "$worker" "$root")" = "$owner" ] || exit 1
         [ "$(jq -r '.status // empty' "$worker_reg")" != waiting ] || exit 1
         jq -e --arg id "$pending" --arg sid "$worker_sid" --arg from "$(jq -r '.sessionId // empty' "$owner")" --argjson now "$now" '
           .claudeDirection | .id == $id and .target == $sid and .from == $from and ($now - (.attemptedAt // 0)) >= 60

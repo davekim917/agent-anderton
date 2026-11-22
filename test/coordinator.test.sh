@@ -35,7 +35,10 @@ case $1 in
   identity) jq -cn --arg id "$3" --arg dir "$FIXTURE_ROOT" '{id:$id, dir:$dir, name:"fixture-codex"}' ;;
   claim-state) if [ -n "${NOT_REACHABLE:-}" ]; then exit 1; fi; echo "${CLAIM_STATE:-live}" ;;
   start-watch) ;;
-  launch-matches) [ "$3" = "${MATCHING_LAUNCH:-}" ] || exit 3 ;;
+  launch-matches)
+    [ -z "${LAUNCH_LOOKUP_FAIL:-}" ] || exit 1
+    [ "$3" = "${MATCHING_LAUNCH:-}" ] || exit 3
+    ;;
   find) case " $* " in *" --token "*) echo "$FIXTURE_WORKER" ;; esac ;;
   state) echo '{"type":"idle"}' ;;
   sweep) ;;
@@ -131,6 +134,12 @@ jq -nc --arg dir "$PWD" --arg home "$CODEX_HOME" '
   > "$claims/workers/registering-codex.json"
 refused_claim env CODEX_THREAD_ID="$pending" MATCHING_LAUNCH="$pending" "$script/claim.sh" --project worker-scope
 grep -q "managed as worker 'registering-codex'" "$tmp/refused"
+if MATCHING_LAUNCH="$pending" codex_role "$script/adopt.sh" --provider codex duplicate-pending "$pending" > "$tmp/refused" 2>&1; then exit 1; fi
+grep -q 'already has a worker record' "$tmp/refused"
+if LAUNCH_LOOKUP_FAIL=1 codex_role "$script/adopt.sh" --provider codex uncertain-pending "$pending" > "$tmp/refused" 2>&1; then exit 1; fi
+grep -q 'already has a worker record' "$tmp/refused"
+codex_role "$script/adopt.sh" --provider codex independent-thread "$pending"
+codex_role "$script/retire.sh" independent-thread
 rm "$claims/workers/registering-codex.json"
 printf 'Fixture task.\n' | claude_role env TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 \
   "$script/spawn.sh" --effort low --provider claude --mode default explicit-claude
@@ -182,14 +191,25 @@ replacement_pid=$!
 register_clearable() {
   jq -nc --argjson pid "$1" --arg sid "$2" --arg dir "$clearable_dir" '
     {pid:$pid, sessionId:$sid, name:"clearable", cwd:$dir}' > "$CLAUDE_CONFIG_DIR/sessions/$1.json"
+  touch "$CLAUDE_CONFIG_DIR/projects/fixture/$2.jsonl"
 }
 clearable_stop() {
   jq -nc --arg sid "$2" --arg dir "$clearable_dir" --arg file "$CLAUDE_CONFIG_DIR/projects/fixture/$2.jsonl" '
     {session_id:$sid, cwd:$dir, transcript_path:$file, hook_event_name:"Stop"}' |
-    env CLAUDE_PID="$1" CLAUDE_CODE_SESSION_ID="$2" "$script/watch.sh"
+    env CLAUDE_PID="$1" CLAUDE_CODE_SESSION_ID="$2" ANDERTON_WATCH_TICK=1 "$script/watch.sh"
+}
+wait_for_binding() {
+  local _
+  for _ in $(seq 1 50); do
+    if jq -e --arg sid "$1" '.claudeSession.id == $sid' "$clearable" >/dev/null; then return; fi
+    sleep 0.2
+  done
+  return 1
 }
 register_clearable "$clearable_pid" before-clear
-clearable_stop "$clearable_pid" before-clear
+clearable_stop "$clearable_pid" before-clear > "$tmp/before-clear-hook" 2>&1 &
+before_clear_watch=$!
+wait_for_binding before-clear
 jq -e --argjson pid "$clearable_pid" '.claudeSession | .id == "before-clear" and .pid == $pid and .procStart != ""' "$clearable" >/dev/null
 jq '.claudeDirection = {id:"old-direction", target:"before-clear"}' "$clearable" > "$tmp/updated-worker"
 mv "$tmp/updated-worker" "$clearable"
@@ -197,13 +217,16 @@ register_clearable "$replacement_pid" replacement-session
 clearable_stop "$replacement_pid" replacement-session
 jq -e '.claudeSession.id == "before-clear"' "$clearable" >/dev/null
 register_clearable "$clearable_pid" after-clear
+wait "$before_clear_watch"
 cp "$clearable" "$tmp/current-worker"
 jq '.claudeSession.procStart = "different-process"' "$clearable" > "$tmp/updated-worker"
 mv "$tmp/updated-worker" "$clearable"
 clearable_stop "$clearable_pid" after-clear
 jq -e '.claudeSession.id == "before-clear"' "$clearable" >/dev/null
 mv "$tmp/current-worker" "$clearable"
-clearable_stop "$clearable_pid" after-clear
+clearable_stop "$clearable_pid" after-clear > "$tmp/after-clear-hook" 2>&1 &
+after_clear_watch=$!
+wait_for_binding after-clear
 jq -e '.claudeSession.id == "after-clear" and (.claudeSession.transcript | endswith("/after-clear.jsonl"))
   and .claudeDirection == null' "$clearable" >/dev/null
 
@@ -220,7 +243,19 @@ jq -e --argjson active "$claimer" '.pid == $active and .peerMessage.id == "pendi
 codex_role "$script/claim.sh" --take-over
 jq -e '.provider == "codex" and .peerMessage == null' "$root_claim" >/dev/null
 codex_role "$script/worker.sh" message clearable 'Check the updated fixture.'
-jq -e '.claudeDirection.target == "after-clear"' "$clearable" >/dev/null
+watch_status=0
+wait "$after_clear_watch" || watch_status=$?
+[ "$watch_status" = 2 ]
+grep -q 'Check the updated fixture.' "$tmp/after-clear-hook"
+jq -e '.claudeDirection.target == "after-clear" and .claudeDirection.attemptedAt > 0' "$clearable" >/dev/null
+if codex_role "$script/worker.sh" message clearable 'Refuse an idle worker whose watcher ended.' > "$tmp/refused" 2>&1; then exit 1; fi
+grep -q 'Anderton Stop watcher has ended' "$tmp/refused"
+kill "$clearable_pid"
+wait "$clearable_pid" 2>/dev/null || true
+clearable_pid=""
+register_clearable "$replacement_pid" after-clear
+if codex_role "$script/worker.sh" message clearable 'Refuse before the resumed Stop hook.' > "$tmp/refused" 2>&1; then exit 1; fi
+grep -q 'has not registered its Anderton Stop hook' "$tmp/refused"
 
 jq -nc --arg dir "$PWD" '
   {name:"another-name",root:$dir,dir:$dir,adopted:true,sessionId:"fixture-claude"}' > "$claims/workers/another-name.json"

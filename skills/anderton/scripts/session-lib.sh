@@ -186,31 +186,65 @@ uses_claude_transcript() {
     ($owner == "codex" or .reportTransport == "transcript" or .spawnerProvider == "codex")' "$1" >/dev/null 2>&1
 }
 
-managed_invoker() {
-  local root=$1 provider=$2 sid=$3 identity=$4 dir=$5 r p reg name cwd started status
-  if [ "$provider" = claude ]; then
-    p=$identity
-    reg="$sessions/$p.json"
-    name=$(jq -r '.name // empty' "$reg" 2>/dev/null || true)
-    cwd=$(jq -r '.cwd // empty' "$reg" 2>/dev/null || true)
-    started=$(jq -r '.startedAt // empty | floor' "$reg" 2>/dev/null || true)
+# Call under the repository lock. Only a conclusive mismatch clears a candidate pending launch.
+codex_worker_record() {
+  local codex=$1 thread=$2 dir=$3 exclude=${4:-} r kind status
+  for r in "$holders"/workers/*.json; do
+    if [ ! -f "$r" ] || [ "$r" = "$exclude" ]; then continue; fi
+    kind=$(jq -r --arg home "$codex" --arg id "$thread" --arg dir "$dir" '
+      select(.provider == "codex" and .codexHome == $home)
+      | if .id == $id then "registered"
+        elif .id == "" and .dir == $dir and (.codexLaunchToken // "") != "" then "pending"
+        else empty end' "$r" 2>/dev/null) || continue
+    case $kind in
+      registered) printf '%s\n' "$r"; return ;;
+      pending)
+        status=0
+        "$anderton_scripts/codex-worker.py" launch-matches "$r" "$thread" >/dev/null 2>&1 || status=$?
+        if [ "$status" -ne 3 ]; then printf '%s\n' "$r"; return; fi
+        ;;
+    esac
+  done
+  return 0
+}
+
+# The caller holds the repository lock and this worker's lock.
+bind_codex_worker() {
+  local record=$1 thread=$2 launch=$3 details codex dir conflict updated
+  if ! details=$(jq -ce --arg id "$thread" --arg launch "$launch" '
+    select(.provider == "codex" and (.codexLaunchToken // "") == $launch
+      and $id != "" and (.id == "" or .id == $id))
+    | {id, codexHome, dir}' "$record"); then
+    echo "Codex worker record changed before registering thread $thread." >&2
+    return 1
   fi
+  codex=$(printf '%s' "$details" | jq -r .codexHome)
+  dir=$(printf '%s' "$details" | jq -r .dir)
+  conflict=$(codex_worker_record "$codex" "$thread" "$dir" "$record")
+  if [ -n "$conflict" ]; then
+    echo "Codex thread $thread already has a worker record at $conflict." >&2
+    return 1
+  fi
+  if [ "$(printf '%s' "$details" | jq -r .id)" = "$thread" ]; then return 0; fi
+  updated=$(mktemp "$record.XXXXXX") || return 1
+  if jq --arg id "$thread" '.id = $id' "$record" > "$updated" && mv -f "$updated" "$record"; then return 0; fi
+  rm -f "$updated"
+  return 1
+}
+
+managed_invoker() {
+  local root=$1 provider=$2 sid=$3 identity=$4 dir=$5 r p reg name cwd started
+  if [ "$provider" = codex ]; then codex_worker_record "$identity" "$sid" "$dir"; return; fi
+  p=$identity
+  reg="$sessions/$p.json"
+  name=$(jq -r '.name // empty' "$reg" 2>/dev/null || true)
+  cwd=$(jq -r '.cwd // empty' "$reg" 2>/dev/null || true)
+  started=$(jq -r '.startedAt // empty | floor' "$reg" 2>/dev/null || true)
   for r in "$holders"/workers/*.json; do
     [ -f "$r" ] || continue
-    jq -e --arg root "$root" --arg provider "$provider" '
-      .root == $root and (.provider // "claude") == $provider' "$r" >/dev/null 2>&1 || continue
-    if [ "$provider" = codex ]; then
-      if jq -e --arg id "$sid" --arg home "$identity" '.id == $id and .codexHome == $home' "$r" >/dev/null; then
-        printf '%s\n' "$r"
-        return
-      fi
-      if jq -e --arg dir "$dir" --arg home "$identity" '
-        .id == "" and .dir == $dir and .codexHome == $home and (.codexLaunchToken // "") != ""' "$r" >/dev/null; then
-        status=0
-        "$anderton_scripts/codex-worker.py" launch-matches "$r" "$sid" >/dev/null 2>&1 || status=$?
-        if [ "$status" -ne 3 ]; then printf '%s\n' "$r"; return; fi
-      fi
-    elif jq -e --arg id "$sid" --arg pid "$p" --arg start "$started" '
+    jq -e --arg root "$root" '
+      .root == $root and (.provider // "claude") == "claude"' "$r" >/dev/null 2>&1 || continue
+    if jq -e --arg id "$sid" --arg pid "$p" --arg start "$started" '
       .claudeSession.id == $id or (.adopted == true and
         (.sessionId == $id or ($start != "" and (.pid | tostring) == $pid and
           ((.sessionStartedAt // "") | tostring | split(".")[0]) == $start)))' "$r" >/dev/null; then
@@ -223,8 +257,16 @@ managed_invoker() {
   done
 }
 
+claude_binding_process_matches() {
+  local file=$1 pid=$2 start
+  start=$(proc_start "$pid")
+  [ -n "$start" ] || return 1
+  jq -e --arg pid "$pid" --arg start "$start" '
+    .claudeSession | (.pid | tostring) == $pid and .procStart == $start' "$file" >/dev/null
+}
+
 live_claude_worker() {
-  local file=$1 binding=${2:-} reg name dir sid pid started bound process_start
+  local file=$1 binding=${2:-} reg name dir sid pid started bound
   [ "$(record_provider "$file")" = claude ] || return 1
   name=$(jq -r .name "$file")
   bound=$(jq -r '.claudeSession.id // empty' "$file")
@@ -238,10 +280,7 @@ live_claude_worker() {
     if [ -z "$sid" ] || [ -z "$pid" ] || ! is_worker "$name" "$dir" "$sid" "$pid" "$started"; then continue; fi
     if [ -n "$bound" ] && [ "$sid" != "$bound" ]; then
       [ "$binding" = --allow-rebind ] || continue
-      process_start=$(proc_start "$pid")
-      [ -n "$process_start" ] || continue
-      jq -e --arg pid "$pid" --arg start "$process_start" '
-        .claudeSession | (.pid | tostring) == $pid and .procStart == $start' "$file" >/dev/null || continue
+      claude_binding_process_matches "$file" "$pid" || continue
     fi
     if registered_alive "$pid" "$started" "$(jq -r '.procStart // empty' "$reg")"; then
       printf '%s\n' "$reg"

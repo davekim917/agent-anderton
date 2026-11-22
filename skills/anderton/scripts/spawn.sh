@@ -366,10 +366,8 @@ if [ "$provider" = codex ]; then
     echo "Codex worker '$name' has no verified thread ID. Inspect $where for a startup prompt; the tab and worktree were kept." >&2
     exit 1
   fi
+  take_repository_lock "$root"
   lock_worker "$record"
-  updated=$(mktemp "$record.XXXXXX")
-  jq -e --arg id "$id" --arg launch "$launch_token" '
-    select(.codexLaunchToken == $launch and (.id == "" or .id == $id)) | .id = $id' "$record" > "$updated"
-  mv -f "$updated" "$record"
+  bind_codex_worker "$record" "$id" "$launch_token"
 fi
 echo "Started worker '$name' in $where, in $dir ($mode). It reports to '$me'."

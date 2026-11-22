@@ -51,12 +51,7 @@ if [ "$provider" = codex ]; then
   done <<EOF
 $records
 EOF
-  for r in "$holders"/workers/*.json; do
-    if [ -f "$r" ] && jq -e --arg id "$target" --arg home "$codex_home" '
-      .provider == "codex" and .id == $id and .codexHome == $home' "$r" >/dev/null 2>&1; then
-      refuse "$target already has a worker record."
-    fi
-  done
+  [ -z "$(codex_worker_record "$codex_home" "$target" "$cwd")" ] || refuse "$target already has a worker record."
   if ! (set -C && : > "$record") 2>/dev/null; then refuse "$name already has a worker record."; fi
   jq -nc --arg name "$name" --arg root "$root" --arg codex_home "$codex_home" --argjson thread "$data" \
     --arg spawner "$me" --arg sid "$sid" --arg scope "$role_scope" --arg provider "$caller_provider" \
