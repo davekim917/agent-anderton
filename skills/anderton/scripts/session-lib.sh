@@ -300,32 +300,35 @@ claude_stop_matches() {
       .sessionId == $sid and (.pid | tostring) == $pid' "$registry" >/dev/null
 }
 
-bind_claude_worker() {
-  local worker=$1 root=$2 session_id=$3 process=$4 start=$5 transcript=$6 updated status worker_attempts=0
-  while claude_stop_matches "$worker" "$session_id" "$process" "$start"; do
+with_claude_worker_lock() {
+  local root=$1 worker=$2 session_id=$3 process=$4 start=$5 attempt status
+  shift 5
+  for attempt in 1 2 3; do
+    claude_stop_matches "$worker" "$session_id" "$process" "$start" || return 3
     if (
       take_repository_lock "$root" 75 || exit 1
-      lock_worker "$worker" || exit 2
-      claude_stop_matches "$worker" "$session_id" "$process" "$start" || exit 1
-      updated=$(mktemp "$worker.XXXXXX") || exit 1
-      if jq --arg sid "$session_id" --arg file "$transcript" --argjson pid "$process" --arg start "$start" '
-        .claudeSession = {id: $sid, transcript: $file, pid: $pid, procStart: $start} | .reportTransport = "transcript"
-        | if .claudeDirection != null and .claudeDirection.target != $sid then del(.claudeDirection) else . end
-        ' "$worker" > "$updated" && mv -f "$updated" "$worker"; then exit 0; fi
-      rm -f "$updated"
-      exit 1
+      lock_worker "$worker" || exit 75
+      claude_stop_matches "$worker" "$session_id" "$process" "$start" || exit 3
+      "$@"
     ); then
       return 0
     else
       status=$?
     fi
-    case $status in
-      75) ;;
-      2) worker_attempts=$((worker_attempts + 1)); [ "$worker_attempts" -lt 3 ] || return 1 ;;
-      *) return 1 ;;
-    esac
-    sleep 1
+    [ "$status" = 75 ] || return "$status"
+    if [ "$attempt" -lt 3 ]; then sleep 1; fi
   done
+  return 1
+}
+
+bind_claude_worker() {
+  local worker=$1 session_id=$2 process=$3 start=$4 transcript=$5 updated
+  updated=$(mktemp "$worker.XXXXXX") || return 1
+  if jq --arg sid "$session_id" --arg file "$transcript" --argjson pid "$process" --arg start "$start" '
+    .claudeSession = {id: $sid, transcript: $file, pid: $pid, procStart: $start} | .reportTransport = "transcript"
+    | if .claudeDirection != null and .claudeDirection.target != $sid then del(.claudeDirection) else . end
+    ' "$worker" > "$updated" && mv -f "$updated" "$worker"; then return 0; fi
+  rm -f "$updated"
   return 1
 }
 

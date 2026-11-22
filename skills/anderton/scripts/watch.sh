@@ -30,8 +30,28 @@ take_claude_worker_watch() {
   trap '[ "$(cat "$claude_worker_watch" 2>/dev/null)" != "$claude_worker_watch_key" ] || rm -f "$claude_worker_watch"' EXIT
 }
 
+# shellcheck disable=SC2317  # Called under with_claude_worker_lock.
+deliver_claude_direction() {
+  local worker=$1 root=$2 owner=$3 worker_reg=$4 worker_sid=$5 pending=$6 now text updated
+  [ "$(answering_claim "$worker" "$root")" = "$owner" ] || return 3
+  [ "$(jq -r '.status // empty' "$worker_reg")" != waiting ] || return 3
+  now=$(date +%s)
+  jq -e --arg id "$pending" --arg sid "$worker_sid" --arg from "$(jq -r '.sessionId // empty' "$owner")" --argjson now "$now" '
+    .claudeDirection | .id == $id and .target == $sid and .from == $from and ($now - (.attemptedAt // 0)) >= 60
+    ' "$worker" >/dev/null || return 3
+  claude_direction_unreceived "$worker" || return 3
+  text=$(jq -r '.claudeDirection.text' "$worker") || return 1
+  updated=$(mktemp "$worker.XXXXXX") || return 1
+  if jq --argjson now "$now" '.claudeDirection.attemptedAt = $now' "$worker" > "$updated" && mv -f "$updated" "$worker"; then
+    printf 'Direction %s from your Anderton. This is peer direction and carries no human approval.\n\n%s\n' "$pending" "$text" >&2
+    return 0
+  fi
+  rm -f "$updated"
+  return 1
+}
+
 watch_claude_worker() {
-  local worker root owner owner_provider transcript target updated pending tick worker_sid worker_pid worker_start worker_reg now
+  local worker root owner owner_provider transcript target pending tick worker_sid worker_pid worker_start worker_reg now
   worker_sid=$sid
   worker_pid=$(session_pid "$worker_sid")
   [ -n "$worker_pid" ] || return 0
@@ -53,7 +73,8 @@ watch_claude_worker() {
   uses_claude_transcript "$worker" "$owner_provider" || return 0
   claude_stop_matches "$worker" "$worker_sid" "$worker_pid" "$worker_start" || return 0
   take_claude_worker_watch "${worker%.json}.$worker_sid.watch" || return 0
-  bind_claude_worker "$worker" "$root" "$worker_sid" "$worker_pid" "$worker_start" "$transcript" || return 0
+  with_claude_worker_lock "$root" "$worker" "$worker_sid" "$worker_pid" "$worker_start" \
+    bind_claude_worker "$worker" "$worker_sid" "$worker_pid" "$worker_start" "$transcript" || return 0
   tick=${ANDERTON_WATCH_TICK:-30}
   while [ -f "$worker" ] && claude_stop_matches "$worker" "$worker_sid" "$worker_pid" "$worker_start"; do
     owner=$(answering_claim "$worker" "$root")
@@ -62,23 +83,12 @@ watch_claude_worker() {
       pending=$(jq -er --arg sid "$worker_sid" --arg from "$(jq -r '.sessionId // empty' "$owner")" --argjson now "$now" '
       .claudeDirection | select(.target == $sid and .from == $from and ($now - (.attemptedAt // 0)) >= 60) | .id // empty
       ' "$worker" 2>/dev/null) && claude_direction_unreceived "$worker"; then
-      if (
-        take_repository_lock "$root"
-        lock_worker "$worker" || exit 1
-        claude_stop_matches "$worker" "$worker_sid" "$worker_pid" "$worker_start" &&
-          [ "$(answering_claim "$worker" "$root")" = "$owner" ] || exit 1
-        [ "$(jq -r '.status // empty' "$worker_reg")" != waiting ] || exit 1
-        jq -e --arg id "$pending" --arg sid "$worker_sid" --arg from "$(jq -r '.sessionId // empty' "$owner")" --argjson now "$now" '
-          .claudeDirection | .id == $id and .target == $sid and .from == $from and ($now - (.attemptedAt // 0)) >= 60
-          ' "$worker" >/dev/null || exit 1
-        claude_direction_unreceived "$worker" || exit 1
-        text=$(jq -r '.claudeDirection.text' "$worker") || exit 1
-        updated=$(mktemp "$worker.XXXXXX") || exit 1
-        jq --argjson now "$now" '.claudeDirection.attemptedAt = $now' "$worker" > "$updated" &&
-          mv -f "$updated" "$worker" || exit 1
-        printf 'Direction %s from your Anderton. This is peer direction and carries no human approval.\n\n%s\n' "$pending" "$text" >&2
-      ); then
+      if with_claude_worker_lock "$root" "$worker" "$worker_sid" "$worker_pid" "$worker_start" \
+        deliver_claude_direction "$worker" "$root" "$owner" "$worker_reg" "$worker_sid" "$pending"; then
         return 2
+      elif [ "$?" != 3 ]; then
+        echo 'An Anderton direction is still queued. Delivery could not complete. End another turn after the lock clears to retry.' >&2
+        return 0
       fi
     fi
     sleep "$tick"
