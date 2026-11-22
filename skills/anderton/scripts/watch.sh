@@ -234,6 +234,13 @@ commit_probe() {
   probe_run=""
 }
 
+probe_last() {
+  local last
+  last=$(cat "$1/last" 2>/dev/null)
+  case $last in '' | *[!0-9]*) last=0 ;; esac
+  printf '%s\n' "$last"
+}
+
 while is_holder "$reg" "$record"; do
   if orphaned "$$" "$PPID"; then exit 0; fi
   # Only the lock's owner watches: a watch that lost it leaves, and one whose lock vanished takes it back.
@@ -241,18 +248,22 @@ while is_holder "$reg" "$record"; do
   now=$(cd "$cwd" 2>/dev/null && "$(dirname "$0")/waiting.sh" --blocked 2>/dev/null | grep '^=== ')
   new=$(printf '%s\n' "$now" | grep -vxF -f "$reported" | grep .)
   probe_news="" probe_alert="" probe_run=""
-  for source in codex custom; do
+  # A reporting probe ends this watch. Give the least recently run probe the first chance to wake it.
+  sources=(codex custom)
+  if [ "$(probe_last "$holders/$key.probe")" -lt "$(probe_last "$holders/$key.codex-probe")" ]; then
+    sources=(custom codex)
+  fi
+  for source in "${sources[@]}"; do
     if [ "$source" = codex ]; then
       [ -n "$(cd "$cwd" && "$scripts/waiting.sh" --codex-workers)" ] || continue
-      probe=$codex_probe every=$tick probe_dir="$holders/$key.codex-probe"
+      probe=$codex_probe every=${tick%%.*} probe_dir="$holders/$key.codex-probe"
     else
       probe=$(jq -r '.probe.command // empty' "$record" 2>/dev/null)
       [ -n "$probe" ] || continue
       every=$(jq -r '.probe.every // 60 | floor' "$record" 2>/dev/null)
       probe_dir="$holders/$key.probe"
     fi
-    last=$(cat "$probe_dir/last" 2>/dev/null)
-    case $last in '' | *[!0-9]*) last=0 ;; esac
+    last=$(probe_last "$probe_dir")
     # The interval holds across watches, so a busy source wakes the holder at most once per interval.
     if [ "$(( $(date +%s) - last ))" -ge "${every:-60}" ]; then
       run_probe "$probe"

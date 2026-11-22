@@ -268,3 +268,14 @@ worker_record() {
 is_worker() {
   [ -n "$(worker_record "$@")" ]
 }
+
+lock_codex_worker() {
+  codex_worker_lock="$1.lock"
+  if ! mkdir -- "$codex_worker_lock" 2>/dev/null; then
+    echo "A Codex worker operation already holds $codex_worker_lock." >&2
+    return 1
+  fi
+  trap 'rmdir -- "$codex_worker_lock"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}

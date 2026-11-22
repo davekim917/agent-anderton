@@ -16,6 +16,8 @@ class FakeCodex:
         self.info = {"id": worker["id"], "cwd": worker["dir"], "status": {"type": "idle"}}
         self.turns = []
         self.items = {}
+        self.threads = [self.info]
+        self.latest = []
 
     def __enter__(self):
         return self
@@ -24,12 +26,17 @@ class FakeCodex:
         pass
 
     def call(self, method, params):
+        if method == "thread/turns/list":
+            return {"data": [{"id": params["threadId"]}]}
+        if method == "thread/items/list":
+            return {"data": self.latest}
         assert method == "thread/read"
         assert params["threadId"] == self.info["id"]
         return {"thread": self.info}
 
     def pages(self, method, **params):
-        assert params["threadId"] == self.info["id"]
+        if method == "thread/list":
+            return iter(self.threads)
         if method == "thread/turns/list":
             return iter(self.turns)
         assert method == "thread/items/list"
@@ -38,6 +45,10 @@ class FakeCodex:
 
 def message(text, phase="final_answer"):
     return {"item": {"type": "agentMessage", "text": text, "phase": phase}}
+
+
+def user_message(text):
+    return {"item": {"type": "userMessage", "content": [{"type": "text", "text": text}]}}
 
 
 class WorkerTest(unittest.TestCase):
@@ -81,9 +92,13 @@ class WorkerTest(unittest.TestCase):
     def test_reports_new_blockers_only(self):
         self.client.turns = [{"id": "first", "status": "inProgress"}]
         self.client.info["status"] = {"type": "active", "activeFlags": ["waitingOnApproval"]}
+        self.client.latest = [{"item": {"id": "approval-one"}}]
         self.assertIn("waiting on approval", self.scan()[0])
         self.delivered()
         self.assertEqual([], self.scan())
+        self.client.latest = [{"item": {"id": "approval-two"}}]
+        self.assertIn("waiting on approval", self.scan()[0])
+        self.delivered()
         self.client.info["status"] = {"type": "active", "activeFlags": []}
         self.assertEqual([], self.scan())
         self.delivered()
@@ -101,6 +116,29 @@ class WorkerTest(unittest.TestCase):
         self.assertIn("interrupted", self.scan()[0])
         self.delivered()
         self.assertEqual([], self.scan())
+
+    def test_launch_uses_first_user_message_of_the_matching_thread(self):
+        expected = self.worker["id"]
+        unrelated = "00000000-0000-7000-8000-000000000456"
+        token = "00000000-0000-4000-8000-000000000789"
+        marker = f"Anderton launch {token}"
+        directory = Path(self.worker["dir"])
+        self.client.threads = [{**self.client.info, "id": unrelated}, self.client.info]
+        self.client.items[unrelated] = [user_message("Unrelated work"), user_message(marker)]
+        self.client.items[expected] = [user_message(f"{marker}\n\nBrief")]
+        self.assertEqual(expected, str(worker_api.find_thread(self.client, directory, "", token)))
+        self.client.items[unrelated] = [user_message(marker)]
+        with self.assertRaisesRegex(ValueError, "More than one"):
+            worker_api.find_thread(self.client, directory, "", token)
+
+    def test_pending_direction_requires_a_user_receipt(self):
+        token = "00000000-0000-4000-8000-000000000789"
+        self.worker["codexPending"] = token
+        self.client.turns = [{"id": "first", "status": "completed"}]
+        self.client.items["first"] = [message(f"Anderton direction {token}")]
+        self.assertFalse(worker_api.direction_received(self.client, self.worker))
+        self.client.items["first"].append(user_message(f"Anderton direction {token}\n\nMore work"))
+        self.assertTrue(worker_api.direction_received(self.client, self.worker))
 
 
 if __name__ == "__main__":

@@ -156,6 +156,41 @@ def read_thread(client, worker):
     return info
 
 
+def has_message(client, thread, turn, marker, first_only=False):
+    for entry in client.pages("thread/items/list", threadId=thread, turnId=turn, limit=10):
+        item = entry["item"]
+        if item["type"] != "userMessage":
+            continue
+        if any(part["type"] == "text" and part["text"].partition("\n")[0] == marker
+               for part in item["content"]):
+            return True
+        if first_only:
+            return False
+    return False
+
+
+def started_with(client, thread, marker):
+    turns = client.call("thread/turns/list", {
+        "threadId": thread, "sortDirection": "asc", "limit": 1, "itemsView": "notLoaded",
+    })["data"]
+    return bool(turns and has_message(client, thread, turns[0]["id"], marker, first_only=True))
+
+
+def find_thread(client, directory, after, token):
+    marker = f"Anderton launch {uuid.UUID(token)}"
+    match = None
+    for thread in client.pages("thread/list", cwd=str(directory), limit=10):
+        if Path(thread["cwd"]).resolve() != directory:
+            raise ValueError("Codex daemon returned a thread in a different worktree")
+        if thread["id"] == after:
+            break
+        if started_with(client, thread["id"], marker):
+            if match is not None:
+                raise ValueError("More than one Codex thread has this worker's launch marker")
+            match = uuid.UUID(thread["id"])
+    return match
+
+
 def final_report(client, thread, turn):
     for entry in client.pages("thread/items/list", threadId=thread, turnId=turn,
                               sortDirection="desc", limit=10):
@@ -164,6 +199,18 @@ def final_report(client, thread, turn):
             text = item["text"].strip()
             return text if REPORT.match(text) else None
     return None
+
+
+def direction_received(client, worker):
+    token = worker.get("codexPending")
+    if not token:
+        return True
+    thread = worker["id"]
+    marker = f"Anderton direction {uuid.UUID(token)}"
+    for turn in client.pages("thread/turns/list", threadId=thread, limit=20, itemsView="notLoaded"):
+        if has_message(client, thread, turn["id"], marker):
+            return True
+    return False
 
 
 def sweep_worker(worker, state_dir, stage_dir):
@@ -190,7 +237,13 @@ def sweep_worker(worker, state_dir, stage_dir):
                     running = turn["id"]
             else:
                 completed.append(turn)
-        block = [running, waiting] if waiting else None
+        block = None
+        if waiting:
+            # A second tool can ask for approval in the same turn between polls.
+            items = client.call("thread/items/list", {
+                "threadId": thread, "turnId": running, "sortDirection": "desc", "limit": 1,
+            })["data"] if running else []
+            block = [running, waiting, items[0]["item"]["id"] if items else None]
         if block and block != state.get("block"):
             reasons = ["approval" if flag == "waitingOnApproval" else "user input" for flag in waiting]
             events.append(f"{name} (Codex {thread}) is waiting on {' and '.join(reasons)}. Open its worker tab.")
@@ -216,7 +269,8 @@ def main():
     endpoint = find.add_mutually_exclusive_group()
     endpoint.add_argument("--baseline", action="store_true")
     endpoint.add_argument("--after")
-    for command in ("state", "target", "inactive", "output"):
+    find.add_argument("--token")
+    for command in ("state", "target", "inactive", "output", "received"):
         action = commands.add_parser(command)
         action.add_argument("record", type=Path)
     sweep = commands.add_parser("sweep")
@@ -226,24 +280,18 @@ def main():
     if args.command == "find":
         directory = args.directory.resolve()
         with Codex(args.home) as client:
-            result = client.call("thread/list", {"cwd": str(directory), "limit": 2})
-        threads = result["data"]
-        if any(Path(thread["cwd"]).resolve() != directory for thread in threads):
-            raise ValueError("Codex daemon returned a thread in a different worktree")
-        if args.baseline:
-            if threads:
-                print(uuid.UUID(threads[0]["id"]))
-            return 0
-        for index, thread in enumerate(threads):
-            if thread["id"] == args.after:
-                threads = threads[:index]
-                break
-        if not threads:
+            if args.baseline:
+                threads = client.call("thread/list", {"cwd": str(directory), "limit": 1})["data"]
+                if threads:
+                    print(uuid.UUID(threads[0]["id"]))
+                return 0
+            if not args.token:
+                raise ValueError("Codex worker registration requires its launch token")
+            thread = find_thread(client, directory, args.after, args.token)
+        if thread is None:
             return 3
-        if len(threads) != 1:
-            raise ValueError("More than one Codex thread matches the new worker worktree")
-        print(uuid.UUID(threads[0]["id"]))
-    elif args.command in {"state", "target", "inactive", "output"}:
+        print(thread)
+    elif args.command in {"state", "target", "inactive", "output", "received"}:
         worker = json.loads(args.record.read_text())
         with Codex(Path(worker["codexHome"])) as client:
             if args.command == "inactive" and not worker["id"]:
@@ -251,6 +299,11 @@ def main():
                 threads = result["data"]
                 return int(bool(threads and threads[0]["id"] != worker.get("codexBaseline")))
             info = read_thread(client, worker)
+            if args.command == "received":
+                return int(not direction_received(client, worker))
+            if args.command == "inactive":
+                return int(info["status"]["type"] not in {"idle", "notLoaded"} or
+                           not direction_received(client, worker))
             if args.command == "output":
                 thread = worker["id"]
                 turns = client.call("thread/turns/list", {
@@ -269,8 +322,6 @@ def main():
                 return 0
         if args.command == "state":
             print(json.dumps(info["status"]))
-        elif args.command == "inactive":
-            return int(info["status"]["type"] not in {"idle", "notLoaded"})
         else:
             print(daemon_socket(Path(worker["codexHome"])))
     else:

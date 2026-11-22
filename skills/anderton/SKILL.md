@@ -155,8 +155,9 @@ For a Codex worker in herdr or tmux, pass `--provider codex`. The worker runs
 with workspace writes and user approvals. It uses the configured Codex model
 unless the user names one, with the effort you pass. The local Codex daemon
 and Python 3 must be available. If startup stops before the worker gets a
-thread ID, inspect its tab. Once it has received a prompt, run
-`scripts/codex-workers.sh register <name>` to bind it.
+thread ID, inspect its tab. Once it has received the launch brief, run
+`scripts/codex-workers.sh register <name>` to bind it. If launch ended before
+the brief was submitted, resolve the startup issue, retire the worker, and retry.
 
 Steer a Codex worker with `scripts/codex-workers.sh message <name> "<instruction>"`.
 The script queues the message to its registered thread. Read its status with

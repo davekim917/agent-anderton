@@ -19,6 +19,8 @@ if [ ! -f "$record" ]; then
   echo "No worker named '$name' was started by spawn.sh; nothing to retire." >&2
   exit 1
 fi
+provider=$(jq -r '.provider // "claude"' "$record")
+if [ "$provider" = codex ]; then lock_codex_worker "$record"; fi
 dir=$(jq -r .dir "$record")
 root=$(jq -r .root "$record")
 worktree=$(jq -r .worktree "$record")
@@ -29,7 +31,6 @@ socket=$(jq -r '.socket // empty' "$record")
 server=$(jq -r '.server // empty' "$record")
 label=$(jq -r '.label // empty' "$record")
 label=${label:-$name}
-provider=$(jq -r '.provider // "claude"' "$record")
 
 if [ "$(jq -r '.adopted // false' "$record")" = true ]; then
   spawner=$(jq -r '.spawner // "its Anderton"' "$record")
@@ -46,7 +47,7 @@ if [ "$provider" = codex ]; then
     exit 1
   fi
   if ! "$scripts/codex-worker.py" inactive "$record"; then
-    echo "Codex worker '$name' may still be running. Wait for its turn to finish or stop it in its tab." >&2
+    echo "Codex worker '$name' may still be running or have an undelivered direction. Inspect its thread before retiring." >&2
     exit 1
   fi
 elif ! command -v claude >/dev/null 2>&1; then

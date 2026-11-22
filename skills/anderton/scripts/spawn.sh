@@ -17,7 +17,7 @@ command -v claude >/dev/null 2>&1 || {
 }
 
 usage="usage: spawn.sh --effort low|medium|high|xhigh|max [--provider claude|codex] [--bg (not inside herdr)] [--model M] [--mode MODE] [--base REF] <name: a-z 0-9 -> [brief-file]"
-model="" effort="" mode="" base="" launcher="" provider=claude codex_home="" baseline=""
+model="" effort="" mode="" base="" launcher="" provider=claude codex_home="" baseline="" launch_token=""
 while [ $# -gt 0 ]; do
   case $1 in
     --bg) launcher="bg"; shift ;;
@@ -217,10 +217,10 @@ $report_footer
 write_record() {
   jq -nc --arg name "$name" --arg launcher "$launcher" --arg id "$id" --arg tab "$tab" --arg dir "$dir" --arg root "$root" \
     --arg socket "$socket" --arg server "$server" --arg base "$base" --arg spawner "$me" --arg label "$label" --argjson worktree "$worktree" \
-    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg provider "$provider" --arg codex "$codex_home" --arg baseline "$baseline" \
+    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg provider "$provider" --arg codex "$codex_home" --arg baseline "$baseline" --arg token "$launch_token" \
     '{name: $name, launcher: $launcher, id: $id, tab: $tab, socket: $socket, server: $server, dir: $dir, root: $root,
       base: $base, worktree: $worktree, spawner: $spawner, label: $label, startedAt: $at}
-      + if $provider == "codex" then {provider: $provider, codexHome: $codex, codexBaseline: $baseline} else {} end' >| "$record"
+      + if $provider == "codex" then {provider: $provider, codexHome: $codex, codexBaseline: $baseline, codexLaunchToken: $token} else {} end' >| "$record"
   reserved=""
 }
 
@@ -252,6 +252,10 @@ if [ "$provider" = codex ]; then
   provider_name=Codex
   codex_worker="$(dirname "$0")/codex-worker.py"
   baseline=$("$codex_worker" find "$codex_home" "$dir" --baseline) || failed "Could not read the Codex daemon."
+  launch_token=$(python3 -c 'import uuid; print(uuid.uuid4())') || failed "Could not create the Codex launch token."
+  brief="Anderton launch $launch_token
+
+$brief"
   config_env="CODEX_HOME=$codex_home"
   mode="workspace-write, user approvals"
   set -- --remote "unix://$codex_home/app-server-control/app-server-control.sock" \
@@ -285,7 +289,7 @@ if [ "$launcher" = herdr ]; then
     if [ "$provider" = codex ]; then
       echo "Codex worker '$name' could not take the brief: $out
 $screen
-The tab and worktree were kept. Inspect the tab and register the worker once it receives a prompt." >&2
+The tab and worktree were kept. Inspect the tab. If it received the launch brief, register it; otherwise retire the worker and retry once the startup issue is resolved." >&2
       exit 1
     fi
     herdr tab close "$tab" >/dev/null 2>&1 || true
@@ -338,7 +342,11 @@ fi
 if [ "$provider" = codex ]; then
   tries=$(( ${ANDERTON_START_WAIT:-30} * 2 ))
   while [ "$tries" -gt 0 ]; do
-    if id=$("$codex_worker" find "$codex_home" "$dir" --after "$baseline"); then break; else status=$?; fi
+    if id=$("$codex_worker" find "$codex_home" "$dir" --after "$baseline" --token "$launch_token"); then
+      break
+    else
+      status=$?
+    fi
     if [ "$status" -ne 3 ] || [ "$(place_state "$launcher" "$socket" "$tab" "$label" "$server")" != present ]; then break; fi
     tries=$((tries - 1))
     sleep 0.5

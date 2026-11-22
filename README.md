@@ -136,7 +136,7 @@ sent while no session had that name may not have arrived.
 
 **How do I stop everything?**
 
-Ask the Anderton to retire its workers. From a plain shell, `retire.sh <name>` does the same; it
+Ask the Anderton to retire its workers. A plain shell can also retire Claude workers with `retire.sh <name>`; it
 lives in the plugin's `skills/anderton/scripts/` folder under `~/.claude/plugins/cache/`. Then
 `/plugin uninstall agent-anderton@agent-anderton`. Uninstalling leaves `~/.claude/anderton/` (the role and
 worker records) and any worktree that was kept for unpushed work; delete those by hand.
