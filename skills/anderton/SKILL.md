@@ -1,6 +1,6 @@
 ---
 name: anderton
-description: "Make this session the Anderton: the one operator session that owns the line to production, watches every other session and PR, holds the engineering bar, and turns each repeated correction into structure. Invoke with /anderton in the session the user designates. Never self-invoke; worker sessions are not the Anderton."
+description: "Make the designated session the Anderton, the operator that owns the line to production, watches workers and pull requests, and holds the engineering bar. Invoke explicitly in Claude Code or Codex."
 disable-model-invocation: true
 ---
 
@@ -24,8 +24,9 @@ This role can run in Claude Code or Codex. In Codex, use an interactive thread o
 from herdr or tmux with `scripts/codex-anderton.sh` so its tools receive the pane's
 multiplexer context. Its tools need access to the selected Codex daemon socket,
 the shared Anderton files, and the worker worktrees. Ask the operator to approve
-the specific host command if Codex's sandbox requires it. Use `$anderton` to invoke
-the installed Codex skill and `/anderton` for Claude Code.
+the specific host command if Codex's sandbox requires it. Use
+`$agent-anderton:anderton` in Codex and `/anderton` in Claude Code. The operator
+designates the session that claims the role.
 
 Run `scripts/claim.sh` (in this skill's folder) once at invocation. It records this
 session as the repository's Anderton in a file under `~/.claude/anderton/` and refuses

@@ -36,6 +36,8 @@ jq -e '.name == "agent-anderton" and .plugins == [.plugins[0]]
   and .plugins[0].name == "agent-anderton" and .plugins[0].source.path == "./"' "$codex_marketplace" >/dev/null ||
   fail "Codex marketplace must install the root plugin"
 [ ! -e "$root/always-on.md" ] || fail "the role must stay invoke-only"
+grep -qx '  allow_implicit_invocation: false' "$root/skills/anderton/agents/openai.yaml" ||
+  fail "Codex must require explicit Anderton invocation"
 
 # A background hook cannot return a decision, and the reporting gate only blocks, so the plugin can never answer a
 # permission prompt.

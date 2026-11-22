@@ -26,7 +26,7 @@ to you: which session is sitting on a permission prompt, which one already opene
 is about to deploy something nobody reviewed.
 
 Anderton hands that job to a Claude Code or Codex session in your repository. Invoke
-`/anderton` in Claude Code or `$anderton` in Codex.
+`/anderton` in Claude Code or `$agent-anderton:anderton` in Codex.
 
 ## What it does
 
@@ -112,7 +112,7 @@ codex plugin add agent-anderton@agent-anderton
 ```
 
 With the local Codex daemon running, open `skills/anderton/scripts/codex-anderton.sh`
-from a herdr or tmux pane in the repository and invoke `$anderton`.
+from a herdr or tmux pane in the repository and invoke `$agent-anderton:anderton`.
 The launcher gives that interactive thread the current pane's context for opening
 workers. For a separate Claude profile, set the same `CLAUDE_CONFIG_DIR` Claude
 uses before launching Codex. Both coordinators read their claims and worker
