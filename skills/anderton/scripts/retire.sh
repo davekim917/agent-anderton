@@ -29,6 +29,7 @@ socket=$(jq -r '.socket // empty' "$record")
 server=$(jq -r '.server // empty' "$record")
 label=$(jq -r '.label // empty' "$record")
 label=${label:-$name}
+provider=$(jq -r '.provider // "claude"' "$record")
 
 if [ "$(jq -r '.adopted // false' "$record")" = true ]; then
   spawner=$(jq -r '.spawner // "its Anderton"' "$record")
@@ -38,7 +39,17 @@ if [ "$(jq -r '.adopted // false' "$record")" = true ]; then
 fi
 
 # A worker that may still be running keeps its worktree: stop it, or confirm Claude Code no longer lists it.
-if ! command -v claude >/dev/null 2>&1; then
+if [ "$provider" = codex ]; then
+  scripts=$(cd "$(dirname "$0")" && pwd)
+  if ! "$scripts/waiting.sh" --codex-workers | grep -Fxq "$record"; then
+    echo "This Anderton does not own Codex worker '$name'." >&2
+    exit 1
+  fi
+  if ! "$scripts/codex-worker.py" inactive "$record"; then
+    echo "Codex worker '$name' may still be running. Wait for its turn to finish or stop it in its tab." >&2
+    exit 1
+  fi
+elif ! command -v claude >/dev/null 2>&1; then
   echo "retire.sh needs the claude CLI to stop '$name' first." >&2
   exit 1
 fi
@@ -51,7 +62,15 @@ if [ "$launcher" != bg ]; then
       tmux) tmux -S "$socket" kill-window -t "$tab" >/dev/null 2>&1 || true ;;
     esac
   fi
-  if ! worker_gone "$launcher" "$socket" "$tab" "$name" "$server" "$label"; then
+  if [ "$provider" = codex ]; then
+    stopped() {
+      [ "$(place_state "$launcher" "$socket" "$tab" "$label" "$server")" = absent ] &&
+        "$scripts/codex-worker.py" inactive "$record"
+    }
+  else
+    stopped() { worker_gone "$launcher" "$socket" "$tab" "$name" "$server" "$label"; }
+  fi
+  if ! stopped; then
     echo "Could not confirm '$name' stopped ($launcher ${tab:-(no id recorded)} in ${socket:-(no server recorded)}); kept its worktree and record." >&2
     exit 1
   fi

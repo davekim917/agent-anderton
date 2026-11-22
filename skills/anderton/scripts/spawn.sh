@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Start a real Claude Code session to do one task: in its own worktree of the caller's repository (outside the
-# checkout), in the caller's permission mode, told to report to the caller by name. Inside herdr it opens in a new
-# tab, inside tmux in a new window, where the user can watch it and type into it; elsewhere it runs in the background.
+# Start a full worker in its own worktree of the caller's repository. Herdr and tmux open interactive workers
+# in a tab or window. Only Claude Code supports a background launch.
 # --bg asks for the background outside herdr; inside herdr it is refused, except once after spawn.sh itself failed to
 # start that name in a herdr tab and said to rerun with it. $ANDERTON_START_WAIT (seconds, default 30) bounds the wait for a tmux worker to register.
-# usage: spawn.sh --effort LEVEL [--bg (not inside herdr)] [--model M] [--mode MODE] [--base REF] <name> [brief-file]   (else the brief on stdin)
-# Workers run on Opus unless --model names another. Worktrees go under $ANDERTON_WORKTREES, default the folder that holds the repository, as wt-<name>.
+# Claude workers run on Opus unless --model supplies another model. Codex workers use their configured model.
+# Worktrees go under $ANDERTON_WORKTREES, default the folder that holds the repository, as wt-<name>.
 # Portable to macOS's bash 3.2 and BSD userland.
 set -euo pipefail
 # shellcheck source=SCRIPTDIR/session-lib.sh
@@ -17,18 +16,19 @@ command -v claude >/dev/null 2>&1 || {
   exit 1
 }
 
-usage="usage: spawn.sh --effort low|medium|high|xhigh|max [--bg (not inside herdr)] [--model M] [--mode MODE] [--base REF] <name: a-z 0-9 -> [brief-file]"
-model="" effort="" mode="" base="" launcher=""
+usage="usage: spawn.sh --effort low|medium|high|xhigh|max [--provider claude|codex] [--bg (not inside herdr)] [--model M] [--mode MODE] [--base REF] <name: a-z 0-9 -> [brief-file]"
+model="" effort="" mode="" base="" launcher="" provider=claude codex_home="" baseline=""
 while [ $# -gt 0 ]; do
   case $1 in
     --bg) launcher="bg"; shift ;;
-    --model | --effort | --mode | --base)
+    --model | --effort | --mode | --base | --provider)
       [ $# -ge 2 ] || { echo "$usage" >&2; exit 2; }
       case $1 in
         --model) model=$2 ;;
         --effort) effort=$2 ;;
         --mode) mode=$2 ;;
         --base) base=$2 ;;
+        --provider) provider=$2 ;;
       esac
       shift 2
       ;;
@@ -36,6 +36,14 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
+case $provider in
+  claude | codex) ;;
+  *) echo "$usage" >&2; exit 2 ;;
+esac
+if [ "$provider" = codex ] && { [ "$launcher" = bg ] || [ -n "$mode" ]; }; then
+  echo "Codex workers need a herdr tab or tmux window and use their own approval policy." >&2
+  exit 2
+fi
 name="${1:-}"
 case $name in
   '' | -* | *[!a-z0-9-]*) echo "$usage" >&2; exit 2 ;;
@@ -89,6 +97,21 @@ if [ -z "$launcher" ]; then
       echo "spawn.sh: inside herdr but without its workspace, socket or CLI here, so the worker starts in the background: open it with claude attach $name." >&2
   fi
 fi
+if [ "$provider" = codex ]; then
+  if [ "$launcher" = bg ] || ! git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Codex workers need a Git worktree and a herdr tab or tmux window." >&2
+    exit 2
+  fi
+  if ! command -v codex >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    echo "Codex workers need the codex CLI, its running local daemon, and python3." >&2
+    exit 2
+  fi
+  codex_home=$(cd "${CODEX_HOME:-$HOME/.codex}" && pwd -P)
+  if [ ! -S "$codex_home/app-server-control/app-server-control.sock" ]; then
+    echo "Start the local Codex daemon before launching a Codex worker." >&2
+    exit 2
+  fi
+fi
 if [ -z "$(printf '%s' "$brief" | tr -d '[:space:]')" ]; then
   echo "spawn.sh: the brief is empty." >&2
   exit 2
@@ -106,16 +129,29 @@ if [ -z "$me" ]; then
   exit 1
 fi
 
+if [ "$provider" = codex ]; then
+  claimed=""
+  while IFS= read -r r; do
+    if [ -n "$r" ] && is_holder "$sessions/$pid.json" "$r"; then claimed=1; break; fi
+  done <<EOF
+$(project_holders "$root")
+EOF
+  if [ -z "$claimed" ]; then
+    echo "Only the Anderton holding this repository or project can start a Codex worker." >&2
+    exit 1
+  fi
+fi
+
 # A peer in another permission mode holds this session's messages for its user's approval, so the worker
 # runs in this session's mode, which its transcript records on each prompt.
-if [ -z "$mode" ]; then
+if [ "$provider" = claude ] && [ -z "$mode" ]; then
   for t in "$home"/projects/*/"$sid".jsonl; do
     [ -e "$t" ] || continue
     mode=$(tail -n 2000 "$t" | jq -r 'select(.permissionMode != null) | .permissionMode' 2>/dev/null | tail -n 1)
     break
   done
 fi
-if [ -z "$mode" ]; then
+if [ "$provider" = claude ] && [ -z "$mode" ]; then
   echo "Cannot read this session's permission mode from its transcript; pass --mode." >&2
   exit 1
 fi
@@ -159,25 +195,32 @@ if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
   base=$(git -C "$dir" rev-parse HEAD)
 fi
 
+report_instructions="- Message \"$me\" by SendMessage"
+report_footer="  Never send acknowledgements, \"still waiting\" or \"holding\", restated instructions, or FYIs that change nothing: each message wakes \"$me\" and re-reads its whole context. A hook holds any message to \"$me\" without one of those four kinds, or one that repeats your last. Nobody reads this session, so a question left only in your reply is never answered."
+if [ "$provider" = codex ]; then
+  report_instructions="- Put each milestone in your final reply. Anderton reads those replies"
+  report_footer="  Skip acknowledgements, \"still waiting\" or \"holding\", restated instructions, and repeated reports. Each report wakes \"$me\"."
+fi
 brief="$brief
 
 ---
 You are a worker the Anderton session \"$me\" started for the task above, in $dir.
-- Message \"$me\" by SendMessage only when it changes what they do, one message per milestone, the kind as its first word:
+$report_instructions only when it changes what they do, one message per milestone, the kind as its first word:
   RESULT: a milestone done (PR ready, task finished), with its link and what you verified.
   QUESTION: a decision you need, with your recommendation.
   BLOCKED: what stops you and what would unblock it.
   ANSWER: a reply to something \"$me\" asked you.
-  Never send acknowledgements, \"still waiting\" or \"holding\", restated instructions, or FYIs that change nothing: each message wakes \"$me\" and re-reads its whole context. A hook holds any message to \"$me\" without one of those four kinds, or one that repeats your last. Nobody reads this session, so a question left only in your reply is never answered.
+$report_footer
 - Give every sub-agent you start an explicit effort that fits its task (low for lookups and mechanical edits). Prefer a one-shot sub-agent that returns its result over a named one you keep alive and message for days. /orchestrate, if installed, does both.
 - Do not deploy, restart a service, or message anyone off this machine unless the task says to; \"$me\" owns those."
 
 write_record() {
   jq -nc --arg name "$name" --arg launcher "$launcher" --arg id "$id" --arg tab "$tab" --arg dir "$dir" --arg root "$root" \
     --arg socket "$socket" --arg server "$server" --arg base "$base" --arg spawner "$me" --arg label "$label" --argjson worktree "$worktree" \
-    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg provider "$provider" --arg codex "$codex_home" --arg baseline "$baseline" \
     '{name: $name, launcher: $launcher, id: $id, tab: $tab, socket: $socket, server: $server, dir: $dir, root: $root,
-      base: $base, worktree: $worktree, spawner: $spawner, label: $label, startedAt: $at}' >| "$record"
+      base: $base, worktree: $worktree, spawner: $spawner, label: $label, startedAt: $at}
+      + if $provider == "codex" then {provider: $provider, codexHome: $codex, codexBaseline: $baseline} else {} end' >| "$record"
   reserved=""
 }
 
@@ -186,7 +229,7 @@ failed() {
   if [ "$worktree" = true ]; then git -C "$root" worktree remove --force "$dir"; fi
   rm -f "$record"
   # Written last, once the name is released, so a rerun it admits can reserve the name.
-  if [ "$launcher" = herdr ] && printf '%s %s\n' "$(date +%s)" "$root" 2>/dev/null >"$herdr_failed"; then
+  if [ "$provider" = claude ] && [ "$launcher" = herdr ] && printf '%s %s\n' "$(date +%s)" "$root" 2>/dev/null >"$herdr_failed"; then
     echo "Rerun with --bg to start it in the background instead." >&2
   fi
   exit 1
@@ -203,16 +246,29 @@ done <<EOF
 $(project_holders "$root")
 EOF
 
-set -- -n "$name" --permission-mode "$mode" --effort "$effort" --model "${model:-opus}"
+config_env="CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-}"
+provider_name="Claude Code"
+if [ "$provider" = codex ]; then
+  provider_name=Codex
+  codex_worker="$(dirname "$0")/codex-worker.py"
+  baseline=$("$codex_worker" find "$codex_home" "$dir" --baseline) || failed "Could not read the Codex daemon."
+  config_env="CODEX_HOME=$codex_home"
+  mode="workspace-write, user approvals"
+  set -- --remote "unix://$codex_home/app-server-control/app-server-control.sock" \
+    --sandbox workspace-write -a on-request -c 'approvals_reviewer="user"' -c "model_reasoning_effort=\"$effort\""
+  if [ -n "$model" ]; then set -- "$@" -m "$model"; fi
+else
+  set -- -n "$name" --permission-mode "$mode" --effort "$effort" --model "${model:-opus}"
+fi
 # A tab or window id is unique only within its server, so the record keeps which server it was opened in.
 id="" tab="" socket="" server=""
 if [ "$launcher" = herdr ]; then
   socket="${HERDR_SOCKET_PATH:-}"
   # A tab's or window's process takes its environment from its multiplexer, not from this script: a non-default
   # Claude home is passed on, or the worker would register where neither the caller nor these scripts look.
-  if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+  if [ -n "${config_env#*=}" ]; then
     out=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$dir" --label "$label" --no-focus \
-      --env "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR" 2>&1) || failed "Could not open a herdr tab: $out"
+      --env "$config_env" 2>&1) || failed "Could not open a herdr tab: $out"
   else
     out=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$dir" --label "$label" --no-focus 2>&1) ||
       failed "Could not open a herdr tab: $out"
@@ -223,17 +279,23 @@ if [ "$launcher" = herdr ]; then
   # Recorded as soon as the tab exists, so a spawn cut short still leaves retire.sh something to stop.
   write_record
   # A startup prompt (folder trust, a new permission mode) leaves the agent blocked: show it, then undo.
-  if ! out=$(herdr agent start "$name" --kind claude --pane "$pane" --timeout 120000 -- "$@" 2>&1) ||
+  if ! out=$(herdr agent start "$name" --kind "$provider" --pane "$pane" --timeout 120000 -- "$@" 2>&1) ||
     ! out=$(herdr agent prompt "$name" "$brief" 2>&1); then
     screen=$(herdr agent read "$name" 2>/dev/null | tail -n 20 || true)
+    if [ "$provider" = codex ]; then
+      echo "Codex worker '$name' could not take the brief: $out
+$screen
+The tab and worktree were kept. Inspect the tab and register the worker once it receives a prompt." >&2
+      exit 1
+    fi
     herdr tab close "$tab" >/dev/null 2>&1 || true
     if ! worker_gone herdr "$socket" "$tab" "$name" "" "$label"; then
-      echo "Claude Code in herdr tab '$name' did not take the brief: $out
+      echo "$provider_name in herdr tab '$name' did not take the brief: $out
 $screen
 It is not confirmed stopped, so $dir and its record are kept: close tab $tab, then run retire.sh $name." >&2
       exit 1
     fi
-    failed "Claude Code in herdr tab '$name' did not take the brief: $out
+    failed "$provider_name in herdr tab '$name' did not take the brief: $out
 $screen"
   fi
   where="herdr tab '$label' ($tab)"
@@ -241,8 +303,8 @@ elif [ "$launcher" = tmux ]; then
   socket="${TMUX%%,*}"
   server=$(printf '%s' "$TMUX" | cut -d, -f2)
   # Given as separate arguments, the window's command runs without a shell, so the brief needs no quoting.
-  set -- claude "$@" "$brief"
-  [ -z "${CLAUDE_CONFIG_DIR:-}" ] || set -- -e "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR" "$@"
+  set -- "$provider" "$@" "$brief"
+  [ -z "${config_env#*=}" ] || set -- -e "$config_env" "$@"
   out=$(tmux new-window -d -P -F '#{window_id}' -n "$label" -c "$dir" "$@" 2>&1) ||
     failed "Could not open a tmux window: $out"
   tab=$(printf '%s\n' "$out" | grep -E '^@[0-9]+$' | tail -n 1 || true)
@@ -250,7 +312,7 @@ elif [ "$launcher" = tmux ]; then
   write_record
   # The window closes when claude exits, so a worker that never registers and has no window failed to start.
   listed="" tries=$(( ${ANDERTON_START_WAIT:-30} * 2 ))
-  while [ "$tries" -gt 0 ]; do
+  while [ "$provider" = claude ] && [ "$tries" -gt 0 ]; do
     if claude agents --json 2>/dev/null | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null 2>&1; then
       listed=1
       break
@@ -262,7 +324,8 @@ elif [ "$launcher" = tmux ]; then
     sleep 0.5
   done
   where="tmux window '$label' ($tab)"
-  [ -n "$listed" ] || echo "Worker '$name' has not registered yet: it may be waiting at a startup prompt in its window." >&2
+  [ "$provider" = codex ] || [ -n "$listed" ] ||
+    echo "Worker '$name' has not registered yet: it may be waiting at a startup prompt in its window." >&2
 else
   out=$(cd "$dir" && claude --bg "$@" "$brief" 2>&1) || failed "$out"
   # `claude stop` and `claude rm` take the session's id, not its name.
@@ -272,5 +335,18 @@ else
   where="the background (${id:-id unknown})"
 fi
 
+if [ "$provider" = codex ]; then
+  tries=$(( ${ANDERTON_START_WAIT:-30} * 2 ))
+  while [ "$tries" -gt 0 ]; do
+    if id=$("$codex_worker" find "$codex_home" "$dir" --after "$baseline"); then break; else status=$?; fi
+    if [ "$status" -ne 3 ] || [ "$(place_state "$launcher" "$socket" "$tab" "$label" "$server")" != present ]; then break; fi
+    tries=$((tries - 1))
+    sleep 0.5
+  done
+  if [ -z "$id" ]; then
+    echo "Codex worker '$name' has no verified thread ID. Inspect $where for a startup prompt; the tab and worktree were kept." >&2
+    exit 1
+  fi
+fi
 write_record
 echo "Started worker '$name' in $where, in $dir ($mode). It reports to '$me'."
