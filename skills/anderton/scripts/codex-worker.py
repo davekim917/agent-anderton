@@ -533,15 +533,17 @@ def main():
                 queue_direction(client, args.record, worker, args.text)
                 return 0
             if args.command == "inactive" and not worker["id"]:
-                # retire.sh removes the worktree on this answer, so not the index: Codex can write a thread's rollout
-                # and run its turn without the index row. A listing that fails or times out keeps the worktree.
-                threads = client.call("thread/list", {"cwd": worker["dir"], "sortKey": "created_at",
-                                                      "sortDirection": "desc", "limit": 1},
-                                      timeout=DIRECTORY_LIST_SECONDS)["data"]
-                if "codexLaunchedAt" in worker:
-                    cutoff = worker["codexLaunchedAt"] - LAUNCH_MARGIN_SECONDS
-                    return int(bool(threads and threads[0]["createdAt"] >= cutoff))
-                return int(bool(threads and threads[0]["id"] != worker.get("codexBaseline")))
+                # retire.sh removes the worktree on this answer, so every thread in it is read, from the full listing:
+                # Codex can run a turn whose thread has no index row, and its order is not creation order (it sorts
+                # rollouts by local file time). A listing or read that fails keeps the worktree.
+                for thread in client.pages("thread/list", timeout=DIRECTORY_LIST_SECONDS, cwd=worker["dir"], limit=50):
+                    status = thread.get("status")
+                    if not isinstance(status, dict) or "type" not in status:
+                        status = client.call("thread/read", {"threadId": thread["id"], "includeTurns": False})[
+                            "thread"]["status"]
+                    if status["type"] not in {"idle", "notLoaded"}:
+                        return 1
+                return 0
             if args.command == "inactive":
                 return int(not is_inactive(client, worker))
             info = read_thread(client, worker)

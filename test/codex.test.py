@@ -31,10 +31,6 @@ class FakeCodex:
         pass
 
     def call(self, method, params, timeout=None):
-        if method == "thread/list":
-            self.listings.append({**params, "timeout": timeout})
-            threads = [thread for thread in self.threads if thread["cwd"] == params["cwd"]]
-            return {"data": threads[:params["limit"]]}
         if method == "thread/turns/list":
             return {"data": [{"id": params["threadId"]}]}
         if method == "thread/items/list":
@@ -48,8 +44,9 @@ class FakeCodex:
 
     def pages(self, method, timeout=None, **params):
         if method == "thread/list":
-            self.listings.append(params)
-            return (self.listed.append(thread["id"]) or thread for thread in self.threads)
+            self.listings.append({**params, "timeout": timeout})
+            threads = [thread for thread in self.threads if params.get("cwd", thread["cwd"]) == thread["cwd"]]
+            return (self.listed.append(thread["id"]) or thread for thread in threads)
         if method == "thread/turns/list":
             return iter(self.turns)
         if method == "thread/queue/list":
@@ -191,16 +188,32 @@ class WorkerTest(unittest.TestCase):
         self.assertIs(True, self.client.listings[-1]["useStateDbOnly"])
         self.assertEqual([elsewhere["id"], launch["id"], earlier["id"]], self.client.listed)
 
-    def test_an_unregistered_worker_is_busy_once_a_thread_starts_near_its_launch(self):
+    def test_an_unregistered_worker_is_inactive_only_while_no_thread_in_its_worktree_runs(self):
         self.worker.update(id="", codexLaunchedAt=1000)
         self.record.write_text(json.dumps(self.worker))
-        self.client.threads = [{"id": "00000000-0000-7000-8000-000000000a02", "cwd": self.worker["dir"],
-                                "createdAt": 1000 - 301}]
-        with patch.object(worker_api.sys, "argv", ["codex-worker.py", "inactive", str(self.record)]):
-            self.assertEqual(0, worker_api.main())
-            # A clock stepped back after launch, or an earlier worker's thread just before it, keeps the worktree.
-            self.client.threads.insert(0, {**self.client.info, "createdAt": 1000 - 240})
-            self.assertEqual(1, worker_api.main())
+        older = {"id": "00000000-0000-7000-8000-000000000a02", "cwd": self.worker["dir"], "createdAt": 600,
+                 "status": {"type": "notLoaded"}}
+        elsewhere = {"id": "00000000-0000-7000-8000-000000000a01", "cwd": str(self.state), "createdAt": 1001,
+                     "status": {"type": "active", "activeFlags": []}}
+        launch = {**self.client.info, "createdAt": 1001, "status": {"type": "idle"}}
+        # Codex orders this listing by local rollout file time, which a clock change can put out of creation order.
+        self.client.threads = [older, elsewhere, launch]
+
+        def inactive():
+            with patch.object(worker_api.sys, "argv", ["codex-worker.py", "inactive", str(self.record)]):
+                return worker_api.main()
+
+        self.assertEqual(0, inactive())
+        launch["status"] = {"type": "active", "activeFlags": ["waitingOnApproval"]}
+        self.assertEqual(1, inactive())
+        launch["status"] = {"type": "systemError"}
+        self.assertEqual(1, inactive())
+        # A listing without a status is settled by reading the thread.
+        del launch["status"]
+        self.client.info["status"] = {"type": "active", "activeFlags": []}
+        self.assertEqual(1, inactive())
+        self.client.info["status"] = {"type": "idle"}
+        self.assertEqual(0, inactive())
         # Retirement removes the worktree on this answer: the full listing, which sees a thread the index lacks.
         for params in self.client.listings:
             self.assertEqual(self.worker["dir"], params["cwd"])
@@ -211,7 +224,7 @@ class WorkerTest(unittest.TestCase):
         self.worker.update(id="", codexLaunchedAt=1000)
         self.record.write_text(json.dumps(self.worker))
         with patch.object(worker_api.sys, "argv", ["codex-worker.py", "inactive", str(self.record)]), \
-                patch.object(self.client, "call", side_effect=TimeoutError("timed out")), \
+                patch.object(self.client, "pages", side_effect=TimeoutError("timed out")), \
                 self.assertRaises(TimeoutError):
             worker_api.main()
 
