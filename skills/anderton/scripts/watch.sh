@@ -30,7 +30,7 @@ take_claude_worker_watch() {
   trap '[ "$(cat "$claude_worker_watch" 2>/dev/null)" != "$claude_worker_watch_key" ] || rm -f "$claude_worker_watch"' EXIT
 }
 
-# shellcheck disable=SC2317  # Called under with_claude_worker_lock.
+# shellcheck disable=SC2317,SC2329  # Called under with_claude_worker_lock.
 deliver_claude_direction() {
   local worker=$1 root=$2 owner=$3 worker_reg=$4 worker_sid=$5 pending=$6 now text updated
   [ "$(answering_claim "$worker" "$root")" = "$owner" ] || return 3
