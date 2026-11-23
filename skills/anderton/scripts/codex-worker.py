@@ -371,7 +371,7 @@ def save_worker(path, worker):
             os.unlink(temporary)
 
 
-def finish_replacements(client, record, worker):
+def finish_replacements(client, record, worker, finished=()):
     directions = pending_directions(worker)
     replacements = [entry for entry in reversed(directions) if entry.get("replaces") and not entry.get("unconfirmed")]
     if not replacements:
@@ -398,8 +398,11 @@ def finish_replacements(client, record, worker):
             save_worker(record, worker)
         if any(entry.get("deleteUnconfirmed") and entry["clientUserMessageId"] in targets for entry in directions):
             continue
-        replacement.pop("replaces")
-        replacement.pop("textHash")
+        if replacement["clientUserMessageId"] in finished:
+            directions.remove(replacement)
+        else:
+            replacement.pop("replaces")
+            replacement.pop("textHash")
         save_worker(record, worker)
 
 
@@ -414,7 +417,8 @@ def reconcile_directions(client, record, worker, info, new_id=None):
         state, _ = seen.get(entry["clientUserMessageId"], (None, None))
         if entry.get("unconfirmed") and state in {"queued", "running", "finished"}:
             print(f"Direction {entry['id']} confirmed by Codex.", file=sys.stderr)
-    finish_replacements(client, record, worker)
+    finished = {message for message, (state, _) in seen.items() if state == "finished"}
+    finish_replacements(client, record, worker, finished)
     if info["status"]["type"] == "notLoaded" and (new_id is not None or any(
             seen.get(entry["clientUserMessageId"], (None, None))[0] == "queued"
             for entry in pending_directions(worker))):

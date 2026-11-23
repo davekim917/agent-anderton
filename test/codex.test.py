@@ -475,6 +475,15 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(2, len(self.client.adds))
         self.assertEqual(1, len(self.client.deletes))
 
+    def test_inactive_prunes_a_finished_replacement_with_a_lost_add_reply(self):
+        self.send("Older direction")
+        with self.drop_reply("thread/queue/add"):
+            self.send("Replacement", "--replace")
+        while self.client.queue:
+            self.start_direction(self.client.queue[0], "completed")
+        self.assertEqual(0, self.worker_command("inactive", "--prune"))
+        self.assertEqual([], self.saved_directions())
+
     def test_replace_keeps_a_direction_that_starts_between_list_and_delete(self):
         starting = self.send("About to start")
         original = self.client.call
