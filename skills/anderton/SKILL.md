@@ -185,9 +185,10 @@ retire the worker, and retry.
 
 Steer a Codex worker with `scripts/worker.sh message <name> "<instruction>"`.
 Directions append to the registered thread's queue and run in order. Use
-`scripts/worker.sh message <name> --replace "<instruction>"` to drop queued
-Anderton directions and append the new one. A running turn is untouched.
-Read its status with
+`scripts/worker.sh message <name> --replace "<instruction>"` to queue the new
+direction and then drop older Anderton directions that are still queued. A
+running turn is untouched. If submission is reported as unconfirmed, retry
+the same command to reconcile the original submission. Read its status with
 `scripts/codex-workers.sh status <name>` and its recent assistant output with
 `scripts/codex-workers.sh output <name>`. Inspect the worker's diff directly
 when reviewing. Its final

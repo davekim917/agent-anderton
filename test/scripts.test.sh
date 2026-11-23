@@ -1095,7 +1095,7 @@ gate eeo-1 "$epsilon" epsilon-fleet-a '"Got it."'
 check "leaves a message to a scope's holder alone" [ "$status" -eq 0 ]
 # A named project's Anderton reaches the project's holder only to ship something or to ask a host fact; the user reads
 # its own tab.
-send eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nDave asks: can the export run tonight?"'
+send eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nMira asks: can the export run tonight?"'
 check "holds a scope's holder relaying to the project's holder" [ "$status" -eq 2 ]
 check "offering it DEPLOY" contains "DEPLOY: a change to ship"
 check "and LOOKUP for a host fact" contains "LOOKUP: a fact about the host"
@@ -1206,7 +1206,7 @@ printf '#!/bin/sh\nexit 1\n' > "$work/nops/ps"
 chmod +x "$work/nops/ps"
 PATH="$work/nops:$PATH" gate eeo-1 "$epsilon" epsilon-host '"Got it."'
 check "without ps, a message to the holder is allowed" [ "$status" -eq 0 ]
-PATH="$work/nops:$PATH" send eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nDave asks: one more?"'
+PATH="$work/nops:$PATH" send eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nMira asks: one more?"'
 check "without ps, a scope's holder's relay is allowed" [ "$status" -eq 0 ]
 
 # A holder record whose process has gone, and whose pid a later session now has, names no holder.
@@ -2599,6 +2599,11 @@ if [ "$1" = message ]; then
   printf '%s\n' "$@" >>"$FAKE_LOG.direction"
   exit 0
 fi
+if [ "$1" = state ]; then
+  [ -d "$2.lock" ] && [ "${3:-}" = --prune ] || exit 1
+  echo '{"type":"idle"}'
+  exit 0
+fi
 n=$(cat "$FAKE_LOG.inactive" 2>/dev/null || echo 0)
 echo $((n + 1)) >"$FAKE_LOG.inactive"
 if [ "$((n + 1))" = "${FAKE_RETITLE_AT:-}" ]; then
@@ -2648,6 +2653,11 @@ for entrypoint in worker.sh codex-workers.sh; do
           grep -qx -- "--literal direction" "$FAKE_LOG.direction"'
   rm -f "$FAKE_LOG.direction"
 done
+out=$(cd "$rho" && env CLAUDE_PID="$p_rl" CLAUDE_CODE_SESSION_ID=rl-1 "$codexdir/worker.sh" status cx-tab) &&
+  status=0 || status=$?
+check "worker status reconciles under the worker lock and releases it on exit" \
+  eval '[ "$status" -eq 0 ] && [ "$out" = '"'"'{"type":"idle"}'"'"' ] &&
+        [ ! -d "$CLAUDE_CONFIG_DIR/anderton/workers/cx-tab.json.lock" ]'
 cx_retire cx-tab FAKE_INACTIVE_PASSES=0
 check "retire.sh keeps a Codex worker while a direction is still pending" \
   eval '[ "$status" -eq 1 ] && contains "undelivered direction" && [ ! -s "$FAKE_LOG.killed" ] &&

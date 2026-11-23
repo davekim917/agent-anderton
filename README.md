@@ -134,8 +134,8 @@ The repository Anderton sets the default worker provider for all of its projects
 An inherited Codex default uses the daemon home of the repository Anderton.
 Use `--provider claude` or `--provider codex` to choose explicitly.
 `worker.sh message <name> "<direction>"` appends directions to a Codex worker's
-queue in order. Add `--replace` before the direction to drop queued Anderton
-directions and append the new one. A running turn is untouched.
+queue in order. Add `--replace` before the direction to queue it and then drop
+older Anderton directions that are still queued. A running turn is untouched.
 `worker.sh` also steers Claude workers from Codex through the Claude worker's
 Anderton Stop hook. A Claude session you adopt must already have this plugin
 loaded and end a turn to receive those directions.
