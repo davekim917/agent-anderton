@@ -366,7 +366,7 @@ jq -nc --arg dir "$clearable_dir" '
   def before_takeover: .timestamp = "2030-01-01T02:00:00Z";
   user("launch";"1";"Brief.\nYou are a worker the Anderton session \"former-claude\" started for the task above, in " + $dir + "."),
   send("historical";"1";"former-claude";"RESULT: historical transport"),
-  ((user("sent-turn";"1";"Continue."), send("sent-old";"1";"former-claude";"RESULT: old delivered echo"),
+  ((user("sent-turn";"1";"Continue."), send("sent-old";"1";"uds:/run/claude/984.sock";"RESULT: old delivered echo"),
     receipt("sent-result";"sent-old";true), reply("resent-old";"RESULT: old delivered echo")) | before_takeover),
   ((user("failed-turn";"1";"Continue."), send("missed-old";"1";"former-claude";"RESULT: old unread final"),
     receipt("missed-result";"missed-old";false), reply("unread-old";"RESULT: old unread final")) | before_takeover),
@@ -375,11 +375,26 @@ jq -nc --arg dir "$clearable_dir" '
   send("different-recipient";"3";"another-claude";"RESULT: unrelated message"),
   reply("duplicate-final";"RESULT: same milestone"),
   user("turn-two";"3";"Report the next milestone."),
-  send("outbound-two";"3";"former-claude [interactive]";"RESULT: same milestone"),
+  send("outbound-two";"3";"former-claude";"RESULT: same milestone"),
   send("prior-socket";"3";"uds:/run/claude/984.sock";"RESULT: scoped socket milestone"),
   send("wrong-socket";"3";"uds:/run/claude/985.sock";"RESULT: unrelated socket")
 ' > "$legacy_transcript"
 TZ=UTC touch -t 203001030100 "$legacy_transcript"
+jq -nc --argjson pid "$replacement_pid" --arg dir "$clearable_dir" '
+  {pid:$pid,sessionId:"legacy-native-report",name:"legacy-reporter",cwd:$dir}' > "$CLAUDE_CONFIG_DIR/sessions/$replacement_pid.json"
+native_gate() {
+  local status=0
+  jq -nc --arg dir "$clearable_dir" --arg file "$legacy_transcript" --arg tool "$1" --arg to "$2" --arg report "$3" '
+    {session_id:"legacy-native-report", cwd:$dir, transcript_path:$file, tool_use_id:$tool,
+     hook_event_name:"PreToolUse",tool_input:{to:$to,message:$report}}' |
+    "$script/report-gate.sh" > "$tmp/native-gate" 2>&1 || status=$?
+  [ "$status" -eq 2 ]
+  grep -q 'will read this milestone' "$tmp/native-gate"
+}
+native_gate outbound-one former-claude 'RESULT: same milestone'
+native_gate outbound-two former-claude 'RESULT: same milestone'
+native_gate prior-socket 'uds:/run/claude/984.sock' 'RESULT: scoped socket milestone'
+rm "$CLAUDE_CONFIG_DIR/sessions/$replacement_pid.json"
 fallback="$claims/workers/fallback-fixture.json"
 fallback_transcript="$CLAUDE_CONFIG_DIR/projects/fixture/fallback-native-report.jsonl"
 jq --arg transcript "$fallback_transcript" '.name = "fallback-fixture" | .spawnerScope = "vacant-project" |

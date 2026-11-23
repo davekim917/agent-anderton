@@ -245,9 +245,8 @@ wait on a person, leaving out every Anderton in the caller's repository, the rep
 project's: each is a tab the user reads directly. Run by an Anderton, it lists only the sessions that
 role answers for: the workers it started or adopted, and, for the repository's, a project's workers
 once that project's Anderton is gone. A session nobody started is the user's own tab, which no
-Anderton hears about until the user asks one to adopt it. A worker is matched to the session name it was started
-from, so renaming a worker releases it like a tab the user opened, and renaming a project's Anderton
-hands its workers to the repository's. It lists a
+Anderton hears about until the user asks one to adopt it. Verified Claude workers keep their recorded
+worker name for Anderton commands after a display rename. It lists a
 session when:
 
 - the turn ended with Claude's text;
@@ -279,6 +278,8 @@ would keep. `--blocked` leaves this section out.
 starts a full Claude Code or Codex worker labelled `<name>` in a new git worktree at
 `$ANDERTON_WORKTREES/wt-<name>` (default: the folder that holds the repository). The base is
 `origin/HEAD`, else `origin/main`, `origin/master` or `HEAD`.
+New Claude workers launch interactively from herdr or tmux. A failed launch stops there, with
+startup details for the operator. Existing background sessions use `claude attach`.
 
 - Inside herdr (`HERDR_ENV=1`), the worker opens in a new tab of the caller's workspace, labelled
   `<name>`, or `<caller>/<name>` when the caller is a named project's Anderton, its name folded to
@@ -304,12 +305,14 @@ starts a full Claude Code or Codex worker labelled `<name>` in a new git worktre
   and external actions.
 - The worker is recorded in `~/.claude/anderton/workers/<name>.json`, with the herdr or tmux server
   it was opened in. For Claude the record reserves its session UUID before opening the worker.
-  The startup hook records its process identity, so `/clear` can change the UUID in the same process.
-  For an older worker with no verified session binding, direct it in its own pane or retire it
-  and start a fresh worker.
-- After a Codex takeover of a Claude role, that role also reads new native milestone messages
-  addressed to the former Claude holder. It can read an older unbound worker's reports when one
-  transcript matches its original launch brief, including after the worker closes.
+  The startup hook records its process identity. A `/clear` in the same process keeps the worker's
+  previous transcript available for unread reports. An older Codex-launched Claude worker can bind
+  on its next Stop when its original pane and launch brief still verify its identity. Direct other
+  unbound workers in their own panes or retire them and start fresh workers.
+- When a worker messages its former Claude Anderton, the SendMessage hook can hold the stale route
+  and let its current Codex Anderton read that milestone from the transcript. This applies when
+  the repository's Codex Anderton inherits a scoped worker. Recovery of native sends with an unknown
+  recipient requires the worker to report again in its final reply.
 
 **`retire.sh <name>`** stops that worker, then removes its worktree and record. A herdr tab or tmux
 window is closed only when it still carries the label it was opened with, in the server recorded at spawn, and
@@ -322,9 +325,8 @@ cannot read or compare with its base is kept too. Gitignored files don't count a
 **`adopt.sh <name>`** makes the calling Anderton answer for a live session the user opened in its
 repository, as for a worker it started: it writes a worker record naming the caller, so the session's
 messages to it are judged as a worker's and its blocks wake the caller. The record keeps the session's
-id, pid and start time, and the session counts as adopted only while its id matches (a resume and
-`/restart` keep it) or its pid and start time do (`/clear` keeps both), so a later session that reuses
-the name or the pid gains nothing; renaming it, or a `/clear` followed by a resume, releases it. It refuses a caller holding no
+id, pid and start time. It recognizes the same session on resume, restart or display rename, and the
+same process after `/clear`. It refuses a caller holding no
 role, another Anderton, and a session another Anderton already answers for. The Anderton then tells
 the session by SendMessage that it reports there. `retire.sh <name>` releases an adopted session
 without stopping it.

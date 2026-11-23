@@ -279,30 +279,51 @@ claude_binding_process_matches() {
 }
 
 claude_worker_identity_matches() {
-  local file=$1 sid=$2 pid=$3 started=$4
-  jq -e --arg sid "$sid" --arg pid "$pid" --arg start "$started" '
-    ($sid != "" and (.claudeLaunchId == $sid or .claudeSession.id == $sid or
-      (.adopted == true and .sessionId == $sid))) or
-    (.adopted == true and $pid != "" and $start != "" and
-      (.pid | tostring) == $pid and ((.sessionStartedAt // "") | tostring | split(".")[0]) == $start)
-    ' "$file" >/dev/null 2>&1 || { [ -n "$pid" ] && claude_binding_process_matches "$file" "$pid"; }
+  [ -n "$(claude_worker_identities "$2" "$3" "$4" "$1")" ]
+}
+
+claude_worker_identities() {
+  local sid=$1 pid=$2 started=$3 process_start="" result file
+  local -a args
+  shift 3
+  [ "$#" -gt 0 ] || return 0
+  if [ "$#" -eq 1 ] && [ ! -f "$1" ]; then return 0; fi
+  if [ -n "$pid" ]; then process_start=$(proc_start "$pid"); fi
+  # shellcheck disable=SC2016 # jq expands the filter variables.
+  args=(-r --arg sid "$sid" --arg pid "$pid" --arg start "$started" --arg process "$process_start" '
+    select(type == "object" and (.provider // "claude") == "claude")
+    | select(($sid != "" and (.claudeLaunchId == $sid or .claudeSession.id == $sid or
+        (.adopted == true and .sessionId == $sid))) or
+      (.adopted == true and $pid != "" and $start != "" and
+        (.pid | tostring) == $pid and ((.sessionStartedAt // "") | tostring | split(".")[0]) == $start) or
+      ($process != "" and (.claudeSession.pid | tostring) == $pid and .claudeSession.procStart == $process))
+    | input_filename
+    ')
+  if result=$(jq "${args[@]}" "$@" 2>/dev/null); then
+    if [ -n "$result" ]; then printf '%s\n' "$result"; fi
+    return
+  fi
+  # jq stops at the first malformed input, including one unrelated to this session.
+  for file; do jq "${args[@]}" "$file" 2>/dev/null || true; done
 }
 
 live_claude_worker() {
-  local file=$1 binding=${2:-} reg name dir sid pid started bound
+  local file=$1 binding=${2:-} transcript=${3:-} reg dir sid pid started bound worker_dir
   [ "$(record_provider "$file")" = claude ] || return 1
-  name=$(jq -r .name "$file")
+  worker_dir=$(jq -r '.dir // empty' "$file")
+  [ -n "$worker_dir" ] || return 1
   bound=$(jq -r '.claudeSession.id // empty' "$file")
   for reg in "$sessions"/*.json; do
     [ -f "$reg" ] || continue
-    [ "$(jq -r '.name // empty' "$reg" 2>/dev/null || true)" = "$name" ] || continue
-    dir=$(jq -r '.cwd // empty' "$reg")
+    dir=$(jq -r '.cwd // empty' "$reg" 2>/dev/null) || continue
+    case $dir in "$worker_dir" | "$worker_dir"/*) ;; *) continue ;; esac
     sid=$(jq -r '.sessionId // empty' "$reg")
     pid=$(jq -r '.pid // empty' "$reg")
     started=$(jq -r '.startedAt // empty | floor' "$reg")
-    if [ -z "$sid" ] || [ -z "$pid" ] ||
-      [ "$(worker_record "$name" "$dir" "$sid" "$pid" "$started")" != "$file" ] ||
-      ! claude_worker_identity_matches "$file" "$sid" "$pid" "$started"; then continue; fi
+    [ -n "$sid" ] && [ -n "$pid" ] || continue
+    if ! claude_worker_identity_matches "$file" "$sid" "$pid" "$started"; then
+      legacy_claude_stop_matches "$file" "$sid" "$pid" "$transcript" || continue
+    fi
     if [ -n "$bound" ] && [ "$sid" != "$bound" ]; then
       [ "$binding" = --allow-rebind ] || continue
       claude_binding_process_matches "$file" "$pid" || continue
@@ -316,20 +337,20 @@ live_claude_worker() {
 claude_stop_matches() {
   local registry="$sessions/$3.json"
   process_start_matches "$3" "$4" &&
-    [ "$(live_claude_worker "$1" --allow-rebind)" = "$registry" ] &&
+    [ "$(live_claude_worker "$1" --allow-rebind "${5:-}")" = "$registry" ] &&
     jq -e --arg sid "$2" --arg pid "$3" '
       .sessionId == $sid and (.pid | tostring) == $pid' "$registry" >/dev/null
 }
 
 with_claude_worker_lock() {
-  local root=$1 worker=$2 session_id=$3 process=$4 start=$5 attempt status
-  shift 5
+  local root=$1 worker=$2 session_id=$3 process=$4 start=$5 transcript=$6 attempt status
+  shift 6
   for attempt in 1 2 3; do
-    claude_stop_matches "$worker" "$session_id" "$process" "$start" || return 3
+    claude_stop_matches "$worker" "$session_id" "$process" "$start" "$transcript" || return 3
     if (
       take_repository_lock "$root" 75 || exit 1
       lock_worker "$worker" || exit 75
-      claude_stop_matches "$worker" "$session_id" "$process" "$start" || exit 3
+      claude_stop_matches "$worker" "$session_id" "$process" "$start" "$transcript" || exit 3
       "$@"
     ); then
       return 0
@@ -346,11 +367,49 @@ bind_claude_worker() {
   local worker=$1 session_id=$2 process=$3 start=$4 transcript=$5 updated
   updated=$(mktemp "$worker.XXXXXX") || return 1
   if jq --arg sid "$session_id" --arg file "$transcript" --argjson pid "$process" --arg start "$start" '
-    .claudeSession = {id: $sid, transcript: $file, pid: $pid, procStart: $start}
+    if .claudeSession.id != null and .claudeSession.id != $sid and .claudeSession.transcript != null then
+      .claudeSession as $old
+      | .claudePreviousSessions = ([.claudePreviousSessions[]? | select(.id != $sid and .id != $old.id)] +
+        [$old | {id,transcript}])
+    else . end
+    | .claudeSession = {id: $sid, transcript: $file, pid: $pid, procStart: $start}
     | if .claudeDirection != null and .claudeDirection.target != $sid then del(.claudeDirection) else . end
     ' "$worker" > "$updated" && mv -f "$updated" "$worker"; then return 0; fi
   rm -f "$updated"
   return 1
+}
+
+claude_in_worker_pane() {
+  local file=$1 sid=$2 pid=$3 launcher socket pane server listed pane_pid
+  IFS=$'\x1f' read -r launcher socket pane server <<EOF
+$(jq -r '[.launcher, .socket, .pane, .server] | map(. // "") | join("\u001f")' "$file")
+EOF
+  [ -n "$socket" ] && [ -n "$pane" ] || return 1
+  case $launcher in
+    herdr)
+      listed=$(HERDR_SOCKET_PATH="$socket" herdr agent list 2>/dev/null) || return 1
+      printf '%s' "$listed" | jq -e --arg sid "$sid" --arg pane "$pane" '
+        [.result.agents[]? | select(.agent_session.value == $sid) | .pane_id] == [$pane]' >/dev/null ;;
+    tmux)
+      [ -n "$server" ] || return 1
+      listed=$(tmux -S "$socket" list-panes -a -F '#{pid} #{pane_id} #{pane_pid}' 2>/dev/null) || return 1
+      pane_pid=$(printf '%s\n' "$listed" | awk -v p="$server" -v id="$pane" '$1 == p && $2 == id {print $3}')
+      [ -n "$pane_pid" ] && has_ancestor "$pid" "$pane_pid" ;;
+    *) return 1 ;;
+  esac
+}
+
+legacy_claude_stop_matches() {
+  local file=$1 sid=$2 pid=$3 transcript=$4 launched age drift
+  case $transcript in "$home"/projects/*/"$sid.jsonl") ;; *) return 1 ;; esac
+  launched=$(jq -er 'select(.claudeLaunchId == null and .claudeSession == null and .adopted != true and
+    .spawnerProvider == "codex") | .startedAt | fromdateiso8601' "$file" 2>/dev/null) || return 1
+  age=$(proc_age "$pid")
+  [ -n "$age" ] || return 1
+  drift=$(( $(date +%s) - age - launched ))
+  # The old launcher reserved the record before opening the pane and waited up to 120 seconds for readiness.
+  [ "$drift" -ge -2 ] && [ "$drift" -le 120 ] && claude_in_worker_pane "$file" "$sid" "$pid" &&
+    "$anderton_scripts/claude-worker.py" legacy-launch-matches "$file" "$transcript"
 }
 
 has_ancestor() {
@@ -531,22 +590,22 @@ worker_gone() { # worker_gone <launcher> <socket> <tab> <name> [server] [label]:
   [ "$(place_state "$1" "$2" "$3" "$label" "${5:-}")" = absent ] && session_gone "$4"
 }
 
-# The worker record of the session named $1, running in directory $2 (session id $3, pid $4, registry start $5),
-# or nothing: the record spawn.sh or adopt.sh wrote under that name. A worker is matched by the name it was started
-# under, so renaming it releases it, like a tab the user opened. An adopted session shares its directory with the
-# user's other sessions, so it must also be the session adopted: its session id as recorded (a resume and /restart
-# keep it), or its pid with the same start (/clear keeps both), never a later process given the same pid.
+# Native identity survives display renames. A launch without an identity can only be found by its old name
+# and directory, which lets its Stop hook recheck the original pane before assigning identity.
 worker_record() {
   local f dir
+  if [ -n "${3:-}${4:-}" ]; then
+    f=$(claude_worker_identities "${3:-}" "${4:-}" "${5:-}" "$holders"/workers/*.json)
+    if [ -n "$f" ]; then printf '%s\n' "${f%%$'\n'*}"; return; fi
+  fi
   f="$holders/workers/$1.json"
   if [ -n "$1" ] && [ -f "$f" ]; then
     if [ "$(record_provider "$f")" = codex ]; then return 0; fi
     dir=$(jq -r '.dir // empty' "$f" 2>/dev/null || true)
     case $2 in
       "$dir" | "$dir"/*)
-        if [ -n "$dir" ] && { jq -e '
-          .adopted != true and .claudeLaunchId == null and .claudeSession == null' "$f" >/dev/null 2>&1 ||
-          claude_worker_identity_matches "$f" "${3:-}" "${4:-}" "${5:-}"; }; then
+        if [ -n "$dir" ] && jq -e '
+          .adopted != true and .claudeLaunchId == null and .claudeSession == null' "$f" >/dev/null 2>&1; then
           printf '%s\n' "$f"
           return
         fi

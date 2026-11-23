@@ -72,7 +72,10 @@ EOF
 $(project_holders "$root")
 EOF
   wrec=$(worker_record "$name" "$cwd" "$sid" "$pid" "$(jq -r '.startedAt // empty | floor' "$reg" 2>/dev/null)")
-  if [ -n "$wrec" ]; then worker=1; fi
+  if [ -n "$wrec" ]; then
+    worker=1
+    gate_stale_worker_report "$wrec" "$root"
+  fi
 
   # The project's holder, only while it is the live process its record names; when that is uncertain, allow.
   if [ -n "$project" ]; then
@@ -137,7 +140,7 @@ EOF
   case $window in '' | *[!0-9]*) exit 0 ;; esac
   [ $((window / 60 + 1)) -le "$keep" ] || keep=$((window / 60 + 1))
   mkdir -p "$pending" 2>/dev/null || exit 0
-  find "$holders/reports" -type f -mmin +"$keep" -exec rm -f {} + 2>/dev/null
+  find "$holders/reports" -name routes -type d -prune -o -type f -mmin +"$keep" -exec rm -f {} + 2>/dev/null
   hash=$(printf '%s' "$input" | jq -j '.tool_input.message' 2>/dev/null | cksum | tr -s ' ' '-')
   state="$holders/reports/$(printf '%s\n%s' "$sid" "$rkey" | cksum | cut -d' ' -f1)"
   if [ -f "$state" ] && read -r at sum 2>/dev/null < "$state" && [ "$sum" = "$hash" ] && [ $(($(date +%s) - at)) -lt "$window" ]; then
@@ -146,6 +149,83 @@ EOF
   fi
   [ -z "$id" ] || printf '%s\n%s\n' "$state" "$hash" >| "$pending/$id" 2>/dev/null
   exit 0
+}
+
+gate_stale_worker_report() {
+  local wrec=$1 root=$2 old old_sid old_pid owner owner_provider transcript
+  old=$(jq -r '.spawner // empty' "$wrec")
+  old_sid=$(jq -r '.spawnerSession // empty' "$wrec")
+  [ -n "$old$old_sid" ] || return 0
+  case $to in "$old" | "$old ["* | uds:*.sock) ;; *) return 0 ;; esac
+  owner=$(answering_claim "$wrec" "$root")
+  owner_provider=$(record_provider "${owner:-/dev/null}")
+  old_pid=""
+  if [ -n "$old_sid" ]; then
+    old_pid=$(session_pid "$old_sid")
+  elif [ "$owner_provider" = claude ] && [ "$to" = "$old" ]; then
+    old_pid=$(jq -r '.pid // empty' "$owner")
+    old_sid=$(jq -r '.sessionId // empty' "$sessions/$old_pid.json" 2>/dev/null)
+  fi
+  if [ "$owner_provider" = codex ] && [ -n "$old_sid" ] && [ -z "$old_pid" ]; then
+    old_pid=$(jq -r --arg sid "$old_sid" '.claudeReportPreviousHolder | select(.sessionId == $sid) | .pid // empty' "$owner")
+  fi
+  case $to in
+    "$old" | "$old ["*) [ -n "$old" ] || return 0 ;;
+    uds:*.sock) [ -n "$old_pid" ] && [[ $to == uds:*/"$old_pid.sock" ]] || return 0 ;;
+    *) return 0 ;;
+  esac
+
+  if [ -n "$old_pid" ] &&
+    { [ -z "$owner" ] || { [ "$owner_provider" = claude ] &&
+      { is_holder "$sessions/$old_pid.json" "$owner" ||
+        jq -e 'has("spawnerScope") | not' "$wrec" >/dev/null; }; }; } &&
+    original_report_target "$old" "$old_pid" "$old_sid"; then
+    return 0
+  fi
+  # A listing reference can deliberately address somebody else who now uses the old display name.
+  case $to in "$old ["*) exit 0 ;; esac
+  printf '%s\n' "$first" | sed -nE -e 's/^[[:space:]*_#>`-]*//' -e 's/^(RESULT|QUESTION|BLOCKED|ANSWER):.*/x/p' | grep -qx x || exit 0
+
+  if [ "$owner_provider" = codex ]; then
+    if ! claude_worker_identity_matches "$wrec" "$sid" "$pid" "$(jq -r '.startedAt // empty | floor' "$reg")"; then
+      transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty')
+      case $transcript in "$home"/projects/*/"$sid.jsonl")
+        "$anderton_scripts/claude-worker.py" legacy-launch-matches "$wrec" "$transcript" >/dev/null 2>&1 || transcript="" ;;
+        *) transcript="" ;;
+      esac
+    else
+      transcript=verified
+    fi
+    if [ -n "${transcript:-}" ] &&
+      printf '%s' "$input" | "$anderton_scripts/claude-worker.py" record-native-route "$wrec" "$owner" >/dev/null 2>&1; then
+      echo "The native SendMessage was held. Your Codex Anderton will read this milestone from your transcript." >&2
+    else
+      echo "This recipient is no longer your Anderton. Put the milestone in your final reply." >&2
+    fi
+  else
+    echo "This recipient is no longer your Anderton. Use the current Claude Anderton's verified listing entry." >&2
+  fi
+  exit 10
+}
+
+original_report_target() {
+  local name=$1 original_pid=$2 original_sid=$3 file other
+  file="$sessions/$original_pid.json"
+  [ "$(jq -r '.sessionId // empty' "$file" 2>/dev/null)" = "$original_sid" ] &&
+    registered_alive "$original_pid" "$(jq -r '.startedAt // empty | floor' "$file")" "$(jq -r '.procStart // empty' "$file")" ||
+    return 1
+  case $to in uds:*.sock) return 0 ;; esac
+  [ "$(jq -r '.name // empty' "$file")" = "$name" ] || return 1
+  for file in "$sessions"/*.json; do
+    [ -f "$file" ] && [ "$file" != "$sessions/$original_pid.json" ] || continue
+    [ "$(jq -r '.name // empty' "$file" 2>/dev/null)" = "$name" ] || continue
+    other=$(jq -r '.pid // empty' "$file")
+    if [ -n "$other" ] &&
+      registered_alive "$other" "$(jq -r '.startedAt // empty | floor' "$file")" "$(jq -r '.procStart // empty' "$file")"; then
+      return 1
+    fi
+  done
+  return 0
 }
 
 # The repository's Anderton writing to a named project's Anderton ($recipient): only DIRECTION:, QUESTION: or ANSWER:,

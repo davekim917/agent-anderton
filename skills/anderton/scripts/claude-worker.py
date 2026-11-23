@@ -3,13 +3,15 @@
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 
-REPORT = re.compile(r"^(RESULT|QUESTION|BLOCKED|ANSWER):[ \t]*\S")
+REPORT = re.compile(r"^(RESULT|QUESTION|BLOCKED|ANSWER):\s*\S")
 
 def report_text(text):
     return text.strip().lstrip(" \t*_#>`-")
@@ -85,37 +87,76 @@ def legacy_worker_transcript(worker, home, cutoff):
     return matches[0] if len(matches) == 1 else None
 
 
-def reports_and_replies(worker, previous=None, cutoff=None):
-    spawner = worker.get("spawner", "")
-    previous = previous or {}
-    socket_pid = previous.get("pid") if worker.get("spawnerSession") == previous.get("sessionId") else None
+def route_path(routes, session, tool_id):
+    if not all(isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9_-]+", value) for value in (session, tool_id)):
+        raise ValueError("Invalid native route identity")
+    return routes / session / f"{tool_id}.json"
+
+
+def route_receipt(worker, claim, to, text):
+    if not isinstance(to, str) or not isinstance(text, str):
+        raise ValueError("Invalid native report")
+    return {
+        "worker": worker["name"], "root": claim["root"], "scope": claim.get("scope"),
+        "to": to, "digest": hashlib.sha256(text.encode()).hexdigest(),
+    }
+
+
+def record_native_route(worker, claim, routes, hook):
+    if claim.get("provider") != "codex" or hook.get("hook_event_name") != "PreToolUse":
+        raise ValueError("Native route requires a Codex owner and a SendMessage attempt")
+    path = route_path(routes, hook["session_id"], hook["tool_use_id"])
+    payload = route_receipt(worker, claim, hook["tool_input"]["to"], hook["tool_input"]["message"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as file:
+        temporary = Path(file.name)
+        try:
+            json.dump(payload, file)
+            file.close()
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def routed_native_report(worker, claim, routes, tool, to, text):
+    if routes is None or claim.get("provider") != "codex":
+        return False
+    try:
+        path = route_path(routes, worker["claudeSession"]["id"], tool)
+        return json.loads(path.read_text()) == route_receipt(worker, claim, to, text)
+    except FileNotFoundError:
+        return False
+
+
+def reports_and_replies(worker, claim=None, routes=None):
     turn = None
+    cutoff = native_report_cutoff(worker, claim) if claim else None
+    previous = (claim or {}).get("claudeReportPreviousHolder") or {}
+    old_pid = previous.get("pid") if worker.get("spawnerSession") == previous.get("sessionId") else None
     earlier_sends = {}
-    delivered_earlier = set()
+    delivered = set()
     for event in transcript_events(worker):
         if event.get("type") == "user" and not event.get("isMeta"):
             content = event.get("message", {}).get("content", "")
-            result = event.get("toolUseResult")
             if isinstance(content, str) or (isinstance(content, list) and
                                             any(block["type"] != "tool_result" for block in content)):
                 turn = event.get("uuid")
                 earlier_sends.clear()
-                delivered_earlier.clear()
-            elif (isinstance(content, list) and earlier_sends and isinstance(result, dict) and result.get("success") is True
-                  and instant(event["timestamp"]) < cutoff):
+                delivered.clear()
+            result = event.get("toolUseResult")
+            if (cutoff is not None and earlier_sends and isinstance(content, list) and isinstance(result, dict)
+                and result.get("success") is True and instant(event["timestamp"]) < cutoff):
                 for block in content:
                     tool_id = block.get("tool_use_id")
                     if tool_id in earlier_sends and not block.get("is_error"):
-                        delivered_earlier.add(earlier_sends[tool_id])
+                        delivered.add(earlier_sends[tool_id])
         if event.get("type") != "assistant":
             continue
         message = event["message"]
         event_id, timestamp = event["uuid"], event["timestamp"]
         if message.get("stop_reason") == "end_turn":
             text = "\n".join(block["text"] for block in message["content"] if block["type"] == "text")
-            yield event_id, timestamp, text.strip(), False, turn, report_text(text) in delivered_earlier
-        if not spawner:
-            continue
+            yield event_id, timestamp, text, False, turn, report_text(text) not in delivered
         for block in message["content"]:
             if block["type"] != "tool_use" or block.get("name") != "SendMessage":
                 continue
@@ -123,14 +164,20 @@ def reports_and_replies(worker, previous=None, cutoff=None):
             to, text = args.get("to"), args.get("message")
             if not isinstance(to, str) or not isinstance(text, str):
                 continue
-            prior_socket = socket_pid and to.startswith("uds:") and to.endswith(f"/{socket_pid}.sock")
-            if to == spawner or to.startswith(f"{spawner} [") or prior_socket:
-                if cutoff is not None and instant(timestamp) < cutoff:
-                    earlier_sends[block["id"]] = report_text(text)
-                yield f'{event_id}:{block["id"]}', timestamp, text.strip(), True, turn, False
+            if old_pid and cutoff is not None and instant(timestamp) < cutoff and to.startswith("uds:") and to.endswith(f"/{old_pid}.sock"):
+                earlier_sends[block["id"]] = report_text(text)
+            routed = routed_native_report(worker, claim, routes, block["id"], to, text)
+            yield f'{event_id}:{block["id"]}', timestamp, text, True, turn, routed
 
 
-def sweep(worker, claim):
+def sweep(worker, claim, routes):
+    for identity in worker.get("claudePreviousSessions", []):
+        if Path(identity["transcript"]).is_file():
+            sweep_transcript({**worker, "claudeSession": identity}, claim, routes)
+    sweep_transcript(worker, claim, routes)
+
+
+def sweep_transcript(worker, claim, routes):
     identity = worker.get("claudeSession") or {}
     if "id" not in identity:
         return
@@ -141,12 +188,9 @@ def sweep(worker, claim):
     passed_checkpoint = checkpoint is None
     started = instant(worker["startedAt"])
     latest = checkpoint
-    cutoff = native_report_cutoff(worker, claim)
     native = set()
     last_turn = None
-    for event_id, timestamp, text, sent, turn, delivered in reports_and_replies(
-        worker, claim.get("claudeReportPreviousHolder"), cutoff,
-    ):
+    for event_id, timestamp, text, sent, turn, eligible in reports_and_replies(worker, claim, routes):
         if turn != last_turn:
             native.clear()
             last_turn = turn
@@ -154,7 +198,7 @@ def sweep(worker, claim):
             passed_checkpoint = True
         if timestamp and instant(timestamp) < started:
             continue
-        if sent and (cutoff is None or instant(timestamp) < cutoff):
+        if not eligible:
             continue
         text = report_text(text)
         duplicate = text in native
@@ -165,7 +209,7 @@ def sweep(worker, claim):
         if not passed_checkpoint:
             continue
         latest = event_id
-        if REPORT.match(text) and not (duplicate or delivered):
+        if REPORT.match(text) and not duplicate:
             print(f"{worker['name']} (Claude {identity['id']}) report:\n{text[:2000]}")
     if not passed_checkpoint:
         raise ValueError("Claude transcript no longer contains its report bookmark")
@@ -201,6 +245,9 @@ def main():
     scan.add_argument("record", type=Path)
     scan.add_argument("--claim", type=Path)
     scan.add_argument("--legacy-home", type=Path)
+    route = commands.add_parser("record-native-route")
+    route.add_argument("record", type=Path)
+    route.add_argument("claim", type=Path)
     legacy = commands.add_parser("legacy-launch-matches")
     legacy.add_argument("record", type=Path)
     legacy.add_argument("transcript", type=Path)
@@ -213,6 +260,10 @@ def main():
         worker = {"claudeSession": {"id": args.session, "transcript": str(args.transcript)}}
         return 0 if transcript_contains_notice(worker, f"Peer message {args.peer} from Anderton ") else 3
     worker = json.loads(args.record.read_text())
+    if args.command == "record-native-route":
+        claim = json.loads(args.claim.read_text())
+        record_native_route(worker, claim, args.claim.parent / "reports/routes", json.load(sys.stdin))
+        return 0
     if args.command == "legacy-launch-matches":
         worker["claudeSession"] = {"id": args.transcript.stem, "transcript": str(args.transcript)}
         return 0 if legacy_launch_matches(worker) else 3
@@ -221,12 +272,14 @@ def main():
     if args.command == "sweep":
         claim = json.loads(args.claim.read_text()) if args.claim else {}
         if args.legacy_home:
-            cutoff = native_report_cutoff(worker, claim)
-            identity = legacy_worker_transcript(worker, args.legacy_home, cutoff) if cutoff else None
+            if claim.get("provider") != "codex":
+                return 0
+            cutoff = native_report_cutoff(worker, claim) or instant(worker["startedAt"])
+            identity = legacy_worker_transcript(worker, args.legacy_home, cutoff)
             if not identity:
                 return 0
             worker["claudeSession"] = identity
-        sweep(worker, claim)
+        sweep(worker, claim, args.claim.parent / "reports/routes" if args.claim else None)
     else:
         last = None
         for _, _, text, sent, _, _ in reports_and_replies(worker):

@@ -103,9 +103,9 @@ watch_claude_worker() {
   owner=$(answering_claim "$worker" "$root")
   [ -n "$owner" ] || return 0
   owner_provider=$(record_provider "$owner")
-  claude_stop_matches "$worker" "$worker_sid" "$worker_pid" "$worker_start" || return 0
+  claude_stop_matches "$worker" "$worker_sid" "$worker_pid" "$worker_start" "$transcript" || return 0
   take_claude_worker_watch "${worker%.json}.$worker_sid.watch" || return 0
-  with_claude_worker_lock "$root" "$worker" "$worker_sid" "$worker_pid" "$worker_start" \
+  with_claude_worker_lock "$root" "$worker" "$worker_sid" "$worker_pid" "$worker_start" "$transcript" \
     bind_claude_worker "$worker" "$worker_sid" "$worker_pid" "$worker_start" "$transcript" || return 0
   uses_claude_transcript "$worker" "$owner_provider" || return 0
   tick=${ANDERTON_WATCH_TICK:-30}
@@ -116,7 +116,7 @@ watch_claude_worker() {
       pending=$(jq -er --arg sid "$worker_sid" --arg from "$(jq -r '.sessionId // empty' "$owner")" --argjson now "$now" '
       .claudeDirection | select(.target == $sid and .from == $from and ($now - (.attemptedAt // 0)) >= 60) | .id // empty
       ' "$worker" 2>/dev/null) && claude_direction_unreceived "$worker"; then
-      if with_claude_worker_lock "$root" "$worker" "$worker_sid" "$worker_pid" "$worker_start" \
+      if with_claude_worker_lock "$root" "$worker" "$worker_sid" "$worker_pid" "$worker_start" "$transcript" \
         deliver_claude_direction "$worker" "$root" "$owner" "$worker_reg" "$worker_sid" "$pending"; then
         return 2
       elif [ "$?" != 3 ]; then

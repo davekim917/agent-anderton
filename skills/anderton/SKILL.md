@@ -153,8 +153,8 @@ when the work is small and self-contained.
 **Start a session** with `scripts/spawn.sh --effort <level> <name> <brief-file>`
 (`--model`, `--base <ref>`). It makes a worktree beside the repository (under
 `$ANDERTON_WORKTREES` when set), starts a full session there, and appends to the
-brief that the worker reports to you by name. You must run
-inside herdr or tmux to launch workers. Each worker opens in a new tab or window
+brief that the worker reports to you by name. Launch workers interactively
+from herdr or tmux. Each worker opens in a new tab or window
 the user can watch and type into. A project's Anderton
 labels the tab with its own name, as `<its name>/<worker>`.
 
@@ -199,9 +199,10 @@ If either end is Codex, tell it to use the four kinds below at the start of its
 final replies. Use `scripts/worker.sh message <name> "<instruction>"` for the
 direction and `status` or `output` to inspect it. A Claude worker must load the
 Anderton plugin and end a turn before a Codex Anderton can steer it through its
-Stop hook. Workers started before Claude session UUIDs were recorded may have
-a verifiable transcript for reports. Direct an unbound worker in its own pane
-or retire it and start a fresh worker.
+Stop hook. A legacy Codex-launched Claude worker can register on Stop when its
+original pane and launch brief verify its identity. Direct an unbound worker in
+its own pane or retire it and start a fresh worker. Keep using the worker name
+recorded at launch or adoption after it changes its Claude display name.
 `scripts/retire.sh <name>` releases it and leaves it running.
 
 **Choose the effort yourself for every worker.** `spawn.sh` refuses to start without

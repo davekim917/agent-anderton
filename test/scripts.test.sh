@@ -1193,7 +1193,7 @@ check "the project's holder recorded as a worker is still never held" [ "$status
 jq -nc --arg d "$epsilon" '{name: "epsilon-fleet-a", dir: $d, spawner: "epsilon-host"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
 send eea-1 "$epsilon" epsilon-host '"DEPLOY: ship the dashboard fix, merged as https://example.invalid/pr/8"'
 check "a scope's holder recorded as a worker is still judged as a scope's holder" [ "$status" -eq 0 ]
-jq -nc --arg d "$epsilon" '{name: "epsilon-fleet-a", dir: $d, spawner: "epsilon-other"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
+jq -nc --arg d "$epsilon" '{name: "epsilon-fleet-a", dir: $d, spawner: "epsilon-other", spawnerSession: "eeo-1"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
 send eea-1 "$epsilon" epsilon-other '"QUESTION: keep the export schedule? I recommend yes."'
 check "reporting to the session that started it, it has a worker's kinds" [ "$status" -eq 0 ]
 gate eea-1 "$epsilon" epsilon-other '"Got it."'

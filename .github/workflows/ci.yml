@@ -24,6 +24,8 @@ jobs:
         run: /bin/bash test/scripts.test.sh
       - name: Mixed-provider coordination
         run: /bin/bash test/coordinator.test.sh
+      - name: Claude worker custody
+        run: /bin/bash test/custody.test.sh
       - name: Codex worker reports
         run: python3 -B test/codex.test.py
       - name: shellcheck

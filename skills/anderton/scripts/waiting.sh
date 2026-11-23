@@ -97,12 +97,12 @@ EOF
     judged="$judged $sid"
     continue
   fi
+  if [ -n "$blocked" ] && [ "$status" != waiting ]; then continue; fi
   tag=""
   if is_worker "$name" "$cwd" "$sid" "$pid" "$start"; then
     [ "$status" = waiting ] || continue
     tag=" (worker)"
   fi
-  if [ -n "$blocked" ] && [ "$status" != waiting ]; then continue; fi
   if [ -z "$all" ] && { [ -z "$cwd" ] || [ "$(project_root "$cwd")" != "$root" ]; }; then
     continue
   fi
