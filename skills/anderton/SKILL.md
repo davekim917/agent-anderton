@@ -188,8 +188,11 @@ Directions and corrections append to the registered thread's queue and run in
 order. If `message` exits 4, check `scripts/worker.sh status <name>` for the
 direction ID printed by `message`. Status reports `queued`, `ran` (reached
 a turn), `never arrived`, or `still unconfirmed` on stderr. Resend only after status
-reports `never arrived` for that ID. For `still unconfirmed`, check status
-again before deciding. Read recent assistant output with
+reports `never arrived` for that ID. That verdict remains visible until the next
+message to the worker or its retirement. For `still unconfirmed`, check status
+again before deciding. If `message` reports that it queued the direction but
+could not resume the worker or start the queue, inspect the worker before
+taking further action. Read recent assistant output with
 `scripts/codex-workers.sh output <name>`. Inspect the worker's diff directly
 when reviewing. Its final
 `RESULT:`, `QUESTION:`, `BLOCKED:`, and `ANSWER:` replies wake you through

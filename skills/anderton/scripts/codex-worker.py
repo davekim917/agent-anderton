@@ -261,7 +261,7 @@ def final_report(client, thread, turn):
 def is_inactive(client, worker, directions_only=False, reconcile=True):
     if reconcile:
         refresh_directions(client, worker)
-    if pending_directions(worker):
+    if any(not entry.get("neverArrived") for entry in pending_directions(worker)):
         return False
     if directions_only:
         return True
@@ -324,7 +324,7 @@ def direction_seen(client, worker, pending):
 def refresh_directions(client, worker, except_id=None, include_unconfirmed=False):
     directions = pending_directions(worker)
     # Only explicit status can settle an unconfirmed send and report its verdict to the caller.
-    observed = [entry for entry in directions if entry["id"] != except_id
+    observed = [entry for entry in directions if entry["id"] != except_id and not entry.get("neverArrived")
                 and (include_unconfirmed or not entry.get("unconfirmed"))]
     seen = directions_seen(client, worker, observed)
     now = time.time()
@@ -338,13 +338,16 @@ def refresh_directions(client, worker, except_id=None, include_unconfirmed=False
     pending = []
     for entry in directions:
         state, _ = seen.get(entry["clientUserMessageId"], (None, None))
+        if state == "finished":
+            continue
         if state == "lost" and not entry.get("unconfirmed"):
             print(f"Direction {entry['id']} is absent from the Codex queue and turn history.", file=sys.stderr)
-        if state in {"lost", "finished"}:
             continue
-        if state in {"queued", "running"} and entry.get("unconfirmed"):
+        if state in {"queued", "running", "lost"} and entry.get("unconfirmed"):
             entry = entry.copy()
             del entry["unconfirmed"]
+            if state == "lost":
+                entry["neverArrived"] = True
         pending.append(entry)
     if pending != directions:
         worker["codexDirections"] = pending
@@ -371,24 +374,47 @@ def reconcile_directions(client, record, worker, except_id=None, report_unconfir
     if report_unconfirmed:
         verdicts = {"queued": "queued", "running": "ran", "finished": "ran", "lost": "never arrived"}
         for entry in original.get("codexDirections", []):
-            if entry.get("unconfirmed"):
+            if entry.get("neverArrived"):
+                state = "lost"
+            elif entry.get("unconfirmed"):
                 state, _ = seen[entry["clientUserMessageId"]]
-                print(f"Direction {entry['id']}: {verdicts.get(state, 'still unconfirmed')}.", file=sys.stderr)
+            else:
+                continue
+            print(f"Direction {entry['id']}: {verdicts.get(state, 'still unconfirmed')}.", file=sys.stderr)
     return seen
 
 
 def resume_worker(client, thread):
     try:
         client.call("thread/resume", {"threadId": thread, "excludeTurns": True})
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, KeyError) as error:
         print(f"Direction was queued. Could not resume worker: {error}", file=sys.stderr)
+        return False
+    return True
+
+
+def dispatch_queued_direction(client, worker, submission, status):
+    thread = worker["id"]
+    if status == "notLoaded" and not resume_worker(client, thread):
+        return False
+    try:
+        queued = client.call("thread/queue/list", {"threadId": thread, "limit": QUEUE_PAGE_SIZE})["data"]
+        if any(entry["id"] == submission for entry in queued):
+            current = read_thread(client, worker)["status"]["type"]
+            if current == "notLoaded":
+                return resume_worker(client, thread)
+            if current == "idle":
+                # With no submission ID, Codex starts the head of the queue under its dispatch lock.
+                client.call("thread/queue/start", {"threadId": thread})
+    except (OSError, ValueError, KeyError) as error:
+        print(f"Direction was queued. Could not start worker queue: {error}", file=sys.stderr)
         return False
     return True
 
 
 def queue_direction(client, record, worker, text):
     info = read_thread(client, worker)
-    directions = pending_directions(worker)
+    directions = [entry for entry in pending_directions(worker) if not entry.get("neverArrived")]
     thread = worker["id"]
     turns = client.call("thread/turns/list", {
         "threadId": thread, "sortDirection": "desc", "limit": 1, "itemsView": "notLoaded",
@@ -414,7 +440,7 @@ def queue_direction(client, record, worker, text):
         print(f"Direction {token} is unconfirmed: {error}. Check worker status before resending.", file=sys.stderr)
         return DIRECTION_UNCONFIRMED_EXIT
     print(f"Queued message {submission} for thread {thread}.")
-    ready = info["status"]["type"] != "notLoaded" or resume_worker(client, thread)
+    ready = dispatch_queued_direction(client, worker, submission, info["status"]["type"])
     del direction["unconfirmed"]
     try:
         save_worker(record, worker)
@@ -422,7 +448,7 @@ def queue_direction(client, record, worker, text):
             reconcile_directions(client, record, worker, except_id=token)
     except (OSError, ValueError, KeyError) as error:
         print(f"Direction was queued. Could not update direction tracking: {error}", file=sys.stderr)
-    return 0
+    return int(not ready)
 
 
 def deliver_notice(client, claim, notice):
@@ -628,8 +654,9 @@ def main():
                                            reconcile=not args.prune))
             if args.command == "state" and args.prune:
                 seen = reconcile_directions(client, args.record, worker, report_unconfirmed=True)
-                if info["status"]["type"] == "notLoaded" and any(state == "queued" for state, _ in seen.values()):
-                    resume_worker(client, worker["id"])
+                if (info["status"]["type"] == "notLoaded" and any(state == "queued" for state, _ in seen.values())
+                        and not resume_worker(client, worker["id"])):
+                    return 1
             if args.command == "output":
                 thread = worker["id"]
                 turns = client.call("thread/turns/list", {

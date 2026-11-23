@@ -48,7 +48,7 @@ if [ "$(jq -r '.adopted // false' "$record")" = true ]; then
       echo "This Anderton does not own worker '$name'." >&2
       exit 1
     fi
-    if jq -e '.codexDirection != null or ((.codexDirections // []) | length > 0)' "$record" >/dev/null &&
+    if jq -e '.codexDirection != null or any(.codexDirections[]?; .neverArrived != true)' "$record" >/dev/null &&
       ! "$anderton_scripts/codex-worker.py" inactive "$record" --directions-only --prune; then
       echo "Codex worker '$name' may have an undelivered direction. Check its status before retiring." >&2
       exit 1
