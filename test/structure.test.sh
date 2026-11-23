@@ -42,9 +42,12 @@ grep -qx '  allow_implicit_invocation: false' "$root/skills/anderton/agents/open
 # A background hook cannot return a decision, and the reporting gate only blocks, so the plugin can never answer a
 # permission prompt.
 hooks="$root/hooks/hooks.json"
-[ "$(jq -c '.hooks | keys' "$hooks")" = '["PostToolUse","PreToolUse","Stop"]' ] ||
-  fail "hooks.json must hook only Stop, PreToolUse and PostToolUse"
-[ "$(jq '[.hooks[][].hooks[]] | length' "$hooks")" = 3 ] || fail "hooks.json must have three handlers"
+[ "$(jq -c '.hooks | keys' "$hooks")" = '["PostToolUse","PreToolUse","SessionStart","Stop"]' ] ||
+  fail "hooks.json must hook only SessionStart, Stop, PreToolUse and PostToolUse"
+[ "$(jq '[.hooks[][].hooks[]] | length' "$hooks")" = 4 ] || fail "hooks.json must have four handlers"
+jq -e '.hooks.SessionStart[0] | .matcher == "startup" and
+  (.hooks[0].command | endswith("/skills/anderton/scripts/watch.sh\" --claude-start"))' "$hooks" >/dev/null ||
+  fail "the startup hook must register the Claude launch"
 for event in PreToolUse PostToolUse; do
   jq -e --arg e "$event" '.hooks[$e] | length == 1 and .[0].matcher == "SendMessage"
     and (.[0].hooks[0].command | endswith("/skills/anderton/scripts/report-gate.sh\""))' "$hooks" >/dev/null ||

@@ -104,24 +104,29 @@ ask_for() { # ask_for <name> <command>: makes the session run <command>, which s
   wait_blocked "$1"
 }
 
-ran() { # ran <marker>: the blocked command ran, which only an allowed prompt can do
-  for _ in 1 2 3 4 5 6 7 8; do
-    if [ -e "$repo/$1" ]; then return 0; fi
-    sleep 1
-  done
-  return 1
-}
-never_ran() { sleep 3; [ ! -e "$repo/$1" ]; }
-
-answer() { # answer [args...]: runs prompt.sh as the holder; sets $out and $status
+inspect() { # inspect [args...]: runs prompt.sh as the holder; sets $out and $status
   set +e
   out=$(cd "$repo" && env TMUX="$tmux_env" CLAUDE_PID="$lead_pid" CLAUDE_CODE_SESSION_ID="$lead_sid" "$prompt_sh" "$@" 2>&1)
   status=$?
   set -e
 }
 contains() { case $out in *"$1"*) return 0 ;; *) return 1 ;; esac; }
-fingerprint_of() { printf '%s\n' "$out" | sed -n 's/^Fingerprint: //p'; }
 screen_of() { t capture-pane -p -t "live:$1"; }
+still_blocked() {
+  local f
+  f=$(registry_of "$1")
+  [ -n "$f" ] && [ "$(jq -r '.waitingFor // empty' "$f")" = "permission prompt" ]
+}
+check_old_answers() {
+  local target=$1 marker=${2:-} answer
+  for answer in yes no; do
+    inspect "$target" "$answer" 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    check "$target: the old $answer form tells the user to open the pane" \
+      eval '[ "$status" -eq 2 ] && contains "inspection-only" && contains "directly in the session"'
+    check "$target: the old $answer form leaves the prompt open" still_blocked "$target"
+  done
+  if [ -n "$marker" ]; then check "$target: its command did not run" [ ! -e "$repo/$marker" ]; fi
+}
 
 # A window keeps the server alive for the whole run.
 t -f /dev/null new-session -d -s live -n idle -x 130 -y 50 "sleep 3600"
@@ -138,146 +143,71 @@ holder_record=$(. "$scripts/session-lib.sh"; holder_path "$(project_root "$repo"
 start_session live-a
 start_session live-b
 
-# One session blocks on the prompt every refusal below reads, so no refusal needs a prompt of its own.
-ask_for live-a 'touch marker-yes'
-answer live-a
-fp=$(fingerprint_of)
-check "reading names the session" contains "Session: live-a"
-check "and shows the prompt's exact text" contains "touch marker-yes"
-check "and matches what the pane shows" eval 'screen_of live-a | grep -qF "touch marker-yes"'
-check "and gives a fingerprint" [ -n "$fp" ]
-check "and answers nothing" never_ran marker-yes
-check "the dialog offers an option wider than this call" eval 'screen_of live-a | grep -Eq "don.t ask again|always allow"'
+ask_for live-a 'touch marker-a'
+inspect live-a
+check "reading names the session and shows the prompt's exact text" eval 'contains "Session: live-a" && contains "touch marker-a"'
+check "the visible prompt remains open" eval 'screen_of live-a | grep -qF "touch marker-a"'
+check_old_answers live-a marker-a
 
-# Scope: only the role holder runs it, and only the pane that session runs in is touched.
 set +e
-out=$(cd "$repo" && env TMUX="$tmux_env" CLAUDE_PID="$(jq -r .pid "$(registry_of live-b)")" CLAUDE_CODE_SESSION_ID="$(jq -r .sessionId "$(registry_of live-b)")" "$prompt_sh" live-a yes "$fp" 2>&1)
+out=$(cd "$repo" && env TMUX="$tmux_env" CLAUDE_PID="$(jq -r .pid "$(registry_of live-b)")" CLAUDE_CODE_SESSION_ID="$(jq -r .sessionId "$(registry_of live-b)")" "$prompt_sh" live-a 2>&1)
 status=$?
 set -e
-check "a session holding no role is refused" [ "$status" -eq 3 ]
-check "  and its yes does not run the command" never_ran marker-yes
-answer live-b yes "$fp"
+check "a session holding no role is refused inspection" [ "$status" -eq 3 ]
+inspect live-b
 check "a session that isn't blocked is refused" eval '[ "$status" -eq 3 ] && contains "not blocked"'
-check "  and a fingerprint from another session answers nothing" never_ran marker-yes
 
-# Which key: a cursor moved onto "don't ask again" must not be pressed.
 t send-keys -t live:live-a Down
 sleep 1
-check "the cursor has moved to the wider option" eval 'screen_of live-a | grep -q "❯ 2\."'
-answer live-a
-check "a prompt read with the cursor off '1. Yes' is refused" eval '[ "$status" -eq 3 ] && contains "open its tab"'
-moved_fp=$(fingerprint_of)
-answer live-a yes "${moved_fp:-$fp}"
-check "and answering it is refused" [ "$status" -eq 3 ]
-check "  and nothing ran" never_ran marker-yes
-check "  and no permission was widened" eval '! grep -qs "touch" "$repo/.claude/settings.local.json"'
-t send-keys -t live:live-a Up
-sleep 1
+inspect live-a
+check "a wider option can be inspected without selecting it" eval '[ "$status" -eq 0 ] && contains "❯ 2."'
+check "the command is still waiting in its own pane" still_blocked live-a
 
-# Right before the press: a fingerprint that isn't this prompt's is refused.
-answer live-a yes 0000000000000000000000000000000000000000000000000000000000000000
-check "a fingerprint that doesn't match is refused" eval '[ "$status" -eq 3 ] && contains "changed since it was read"'
-check "  and nothing ran" never_ran marker-yes
-
-# The press itself: a key that never reaches the pane must not read as answered.
-mkdir -p "$work/nokeys"
-cat > "$work/nokeys/tmux" <<EOF
-#!/usr/bin/env bash
-if [ "\$1" = send-keys ]; then exit 0; fi
-exec "$(command -v tmux)" "\$@"
-EOF
-chmod +x "$work/nokeys/tmux"
-real_path=$PATH
-PATH="$work/nokeys:$PATH"
-answer live-a yes "$fp"
-PATH=$real_path
-check "a press that doesn't land exits 4, with the prompt still open" eval '[ "$status" -eq 4 ] && screen_of live-a | grep -qF "Do you want to proceed"'
-
-answer live-a yes "$fp"
-check "yes answers the prompt" [ "$status" -eq 0 ]
-check "  and the command ran" ran marker-yes
-check "  and the dialog has gone" eval '! screen_of live-a | grep -qF "Do you want to proceed"'
-check "  and the answer allowed that one call" eval '! grep -qs "touch" "$repo/.claude/settings.local.json"'
-answer live-a yes "$fp"
-check "the same answer can't be replayed" [ "$status" -eq 3 ]
-
-# An identical second prompt is a new prompt: the first one's fingerprint must not answer it.
-ask_for live-a 'touch marker-yes'
-answer live-a
-fp_second=$(fingerprint_of)
-check "an identical later prompt reads a new fingerprint" [ "$fp_second" != "$fp" ]
-rm -f "$repo/marker-yes"
-answer live-a yes "$fp"
-check "  and the old one is refused" [ "$status" -eq 3 ]
-check "  and nothing ran" never_ran marker-yes
-answer live-a no "$fp_second"
-check "no answers the prompt" [ "$status" -eq 0 ]
-check "  and the command did not run" never_ran marker-yes
-
-# Two blocked sessions: an answer lands only in the session it names.
-ask_for live-a 'touch marker-a'
 ask_for live-b 'touch marker-b'
-answer live-b
-fp_b=$(fingerprint_of)
-check "the second pane's prompt reads its own text" contains "touch marker-b"
-answer live-b yes "$fp_b"
-check "yes in one of two blocked sessions runs that session's command" ran marker-b
-check "  and not the other's" never_ran marker-a
-check "  whose prompt stays open" eval 'screen_of live-a | grep -qF "touch marker-a"'
-answer live-a
-answer live-a no "$(fingerprint_of)"
+inspect live-b
+check "the second pane's prompt reads its own text" eval 'contains "touch marker-b" && ! contains "touch marker-a"'
+check_old_answers live-b marker-b
+check "the first pane is still waiting" still_blocked live-a
 
-# Permissions bypassed: a prompt a hook raises is answered the same way.
-start_session live-hook bypassPermissions --settings "$work/hook-settings.json"
-ask_for live-hook 'touch marker-hook'
-answer live-hook
-check "a hook's prompt in a bypassed session reads" contains "touch marker-hook"
-answer live-hook yes "$(fingerprint_of)"
-check "  and yes runs its command" ran marker-hook
-
-# A dialog taller than its pane: its top is gone from the screen and from tmux's history, so the transcript supplies it.
+# The visible pane lacks the first lines. The native transcript supplies the full Bash command.
 start_session live-tall
-t resize-window -t "live:live-tall" -x 40 -y 16
+t resize-window -t live:live-tall -x 40 -y 16
 sleep 1
 ask_for live-tall "touch $(seq -f 'tall-marker-%02g' 1 40 | tr '\n' ' ')"
 check "a tall dialog's first lines are off the screen" eval '! screen_of live-tall | grep -qF "tall-marker-01"'
-answer live-tall
+inspect live-tall
 check "it reads in full from the transcript" eval '[ "$status" -eq 0 ] && contains "tall-marker-01" && contains "tall-marker-40"'
-answer live-tall yes "$(fingerprint_of)"
-check "  and yes runs the whole command" eval '[ "$status" -eq 0 ] && ran tall-marker-01 && ran tall-marker-40'
+check_old_answers live-tall tall-marker-01
 
-# A permission rule or a hook gives its reason between the command and the question.
+# A permission rule or hook gives its reason between the command and the question.
 start_session live-rule default --settings "$work/ask-settings.json"
-t resize-window -t "live:live-rule" -x 40 -y 16
+t resize-window -t live:live-rule -x 40 -y 16
 sleep 1
 ask_for live-rule "touch $(seq -f 'rule-marker-%02g' 1 30 | tr '\n' ' ')"
-answer live-rule
-check "a tall dialog with a permission rule's reason reads in full" eval '[ "$status" -eq 0 ] && contains "rule-marker-01" && contains "rule-marker-30"'
-check "  and shows the reason" contains "Permission rule"
-answer live-rule no "$(fingerprint_of)"
-check "  and no refuses it" eval '[ "$status" -eq 0 ] && never_ran rule-marker-01'
-t resize-window -t "live:live-hook" -x 40 -y 16
+inspect live-rule
+check "a tall dialog with a permission rule's reason reads in full" eval '[ "$status" -eq 0 ] && contains "rule-marker-01" && contains "rule-marker-30" && contains "Permission rule"'
+check_old_answers live-rule rule-marker-01
+
+start_session live-hook bypassPermissions --settings "$work/hook-settings.json"
+t resize-window -t live:live-hook -x 40 -y 16
 sleep 1
 ask_for live-hook "touch $(seq -f 'hook-marker-%02g' 1 30 | tr '\n' ' ')"
-answer live-hook
-check "a tall dialog with a hook's reason reads in full" eval '[ "$status" -eq 0 ] && contains "hook-marker-01" && contains "hook-marker-30"'
-check "  and shows the reason" contains "live test"
-answer live-hook no "$(fingerprint_of)"
-check "  and no refuses it" eval '[ "$status" -eq 0 ] && never_ran hook-marker-01'
+inspect live-hook
+check "a tall dialog with a hook's reason reads in full" eval '[ "$status" -eq 0 ] && contains "hook-marker-01" && contains "hook-marker-30" && contains "live test"'
+check_old_answers live-hook hook-marker-01
 
-# A sub-agent asks through the session's screen, and its command is only in its own transcript.
+# A sub-agent asks through the session's screen, and its command is in its own transcript.
 start_session live-sub
-t resize-window -t "live:live-sub" -x 40 -y 16
+t resize-window -t live:live-sub -x 40 -y 16
 sleep 1
-t send-keys -t "live:live-sub" -l "Use the Agent tool once, with subagent_type general-purpose. Tell it to run exactly this Bash command and nothing else, with no commentary: touch $(seq -f 'sub-marker-%02g' 1 30 | tr '\n' ' ')"
+t send-keys -t live:live-sub -l "Use the Agent tool once, with subagent_type general-purpose. Tell it to run exactly this Bash command and nothing else, with no commentary: touch $(seq -f 'sub-marker-%02g' 1 30 | tr '\n' ' ')"
 sleep 1
-t send-keys -t "live:live-sub" Enter
+t send-keys -t live:live-sub Enter
 wait_blocked live-sub
 sleep 2
-answer live-sub
+inspect live-sub
 check "a sub-agent's tall dialog reads in full" eval '[ "$status" -eq 0 ] && contains "sub-marker-01" && contains "sub-marker-30"'
-answer live-sub no "$(fingerprint_of)"
-check "  and no refuses it" eval '[ "$status" -eq 0 ] && never_ran sub-marker-01'
+check_old_answers live-sub sub-marker-01
 
 # A real herdr tab, when this runs inside herdr.
 if [ -n "${HERDR_SOCKET_PATH:-}" ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] && [ -z "${LIVE_TMUX_ONLY:-}" ]; then
@@ -287,26 +217,9 @@ if [ -n "${HERDR_SOCKET_PATH:-}" ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] && [ -z "
     --timeout 120000 -- -n live-h --permission-mode default --model haiku >/dev/null
   herdr agent prompt live-h "Use the Bash tool to run exactly this command and nothing else, with no commentary: touch marker-herdr" >/dev/null
   wait_blocked live-h
-  answer live-h
-  fp=$(fingerprint_of)
+  inspect live-h
   check "herdr: reading shows the prompt" contains "touch marker-herdr"
-  check "herdr: and answers nothing" never_ran marker-herdr
-  answer live-h yes "$fp"
-  check "herdr: yes answers the prompt" [ "$status" -eq 0 ]
-  check "herdr: and the command ran" ran marker-herdr
-  herdr agent prompt live-h "Use the Bash tool to run exactly this command and nothing else, with no commentary: touch marker-herdr-no" >/dev/null
-  wait_blocked live-h
-  answer live-h
-  answer live-h no "$(fingerprint_of)"
-  check "herdr: no answers the prompt" [ "$status" -eq 0 ]
-  check "herdr: and the command did not run" never_ran marker-herdr-no
-  herdr agent prompt live-h "Use the Bash tool once to run one single command made of 90 separate lines, touch h-file-1 through touch h-file-90, each on its own line, with no loop and no commentary." >/dev/null
-  wait_blocked live-h
-  sleep 2
-  answer live-h
-  check "herdr: a dialog taller than its tab reads in full" eval '[ "$status" -eq 0 ] && contains "touch h-file-1" && contains "touch h-file-90"'
-  answer live-h no "$(fingerprint_of)"
-  check "herdr: and no refuses it" eval '[ "$status" -eq 0 ] && never_ran h-file-1'
+  check_old_answers live-h marker-herdr
   created=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$repo" --label live-hr --no-focus)
   herdr_tabs="$herdr_tabs $(printf '%s' "$created" | jq -r '.result.tab.tab_id')"
   herdr agent start live-hr --kind claude --pane "$(printf '%s' "$created" | jq -r '.result.root_pane.pane_id')" \
@@ -314,11 +227,10 @@ if [ -n "${HERDR_SOCKET_PATH:-}" ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] && [ -z "
   herdr agent prompt live-hr "Use the Bash tool once to run one single command: ./node_modules/.bin/vitest run followed by 90 test file arguments, tests/file-1.test.ts through tests/file-90.test.ts, one per line with backslash continuations, no loop and no commentary." >/dev/null
   wait_blocked live-hr
   sleep 2
-  answer live-hr
+  inspect live-hr
   check "herdr: a tall vitest command stopped by a rule reads in full" eval '[ "$status" -eq 0 ] && contains "vitest run" && contains "tests/file-1.test.ts" && contains "tests/file-90.test.ts"'
   check "herdr: and shows the rule's reason" contains "Permission rule"
-  answer live-hr no "$(fingerprint_of)"
-  check "herdr: and no refuses it" [ "$status" -eq 0 ]
+  check_old_answers live-hr
 fi
 
 [ "$failures" -eq 0 ] || { echo "$failures check(s) failed"; exit 1; }

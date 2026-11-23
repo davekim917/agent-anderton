@@ -11,10 +11,17 @@ action=${1:-}
 name=${2:-}
 if [ "$action" = sweep ] && [ "$#" -eq 1 ]; then
   result=0
+  root=$(invoking_root)
+  role=$(caller_claim "$root")
   "$anderton_scripts/codex-workers.sh" sweep || result=1
   while IFS= read -r record; do
     [ -n "$record" ] || continue
-    "$anderton_scripts/claude-worker.py" sweep "$record" || result=1
+    args=(sweep "$record" --claim "$role")
+    if [ "$(record_provider "$role")" = codex ] &&
+      jq -e '.claudeSession == null and .claudeLaunchId == null and .adopted != true' "$record" >/dev/null; then
+      args+=(--legacy-home "$home")
+    fi
+    "$anderton_scripts/claude-worker.py" "${args[@]}" || result=1
   done <<RECORDS
 $("$anderton_scripts/waiting.sh" --transcript-workers)
 RECORDS

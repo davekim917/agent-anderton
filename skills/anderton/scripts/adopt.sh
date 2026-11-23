@@ -52,12 +52,14 @@ if [ "$provider" = codex ]; then
 $records
 EOF
   [ -z "$(codex_worker_record "$codex_home" "$target" "$cwd")" ] || refuse "$target already has a worker record."
+  adoption=$(python3 -c 'import uuid; print(uuid.uuid4())') || refuse "cannot assign an adoption ID."
   if ! (set -C && : > "$record") 2>/dev/null; then refuse "$name already has a worker record."; fi
   jq -nc --arg name "$name" --arg root "$root" --arg codex_home "$codex_home" --argjson thread "$data" \
     --arg spawner "$me" --arg sid "$sid" --arg scope "$role_scope" --arg provider "$caller_provider" \
-    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    --arg adoption "$adoption" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
     {name: $name, provider: "codex", launcher: "adopted", id: $thread.id, dir: $thread.dir, root: $root,
-     codexHome: $codex_home, codexBaselineTurn: $thread.baseline, worktree: false, adopted: true, startedAt: $at,
+     codexHome: $codex_home, codexAdoptionId: $adoption, codexBaselineTurn: $thread.baseline,
+     worktree: false, adopted: true, startedAt: $at,
      spawner: $spawner, spawnerSession: $sid, spawnerProvider: $provider, spawnerScope: (if $scope == "" then null else $scope end)}' >| "$record"
   echo "Adopted '$name' (Codex thread $target). Tell it to report milestones in its final reply with worker.sh message."
   exit 0

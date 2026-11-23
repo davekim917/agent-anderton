@@ -6,9 +6,10 @@ tmp=$(cd "$tmp" && pwd -P)
 claimer=""
 clearable_pid=""
 replacement_pid=""
+fixture_watch=""
 cleanup() {
   local pid
-  for pid in "$claimer" "$clearable_pid" "$replacement_pid"; do
+  for pid in "$claimer" "$clearable_pid" "$replacement_pid" "$fixture_watch"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$tmp"
@@ -17,6 +18,7 @@ trap cleanup EXIT
 export HOME="$tmp/home" CLAUDE_CONFIG_DIR="$tmp/claude" CODEX_HOME="$tmp/codex"
 export ANDERTON_WORKTREES="$tmp/worktrees" ANDERTON_START_WAIT=1
 export FIXTURE_TMUX_LOG="$tmp/tmux.log"
+export FIXTURE_NOTICE_HOME="$tmp/notices"
 unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID TMUX HERDR_ENV
 export PATH="$tmp/bin:$PATH"
 mkdir -p "$HOME" "$tmp/bin" "$CLAUDE_CONFIG_DIR/sessions" "$CODEX_HOME/app-server-control" "$tmp/scripts" "$tmp/repo"
@@ -41,6 +43,16 @@ case $1 in
     ;;
   find) case " $* " in *" --token "*) echo "$FIXTURE_WORKER" ;; esac ;;
   state) echo '{"type":"idle"}' ;;
+  blocker-during-notice)
+    if [ -e "$FIXTURE_NOTICE_HOME/worker-blocked" ] && [ "$(jq -r .name "$2")" = delayed-fixture ]; then
+      printf '=== delayed-fixture (Codex fixture, waiting on approval)\t%s\n' "$(cat "$FIXTURE_NOTICE_HOME/worker-blocked")"
+    fi
+    ;;
+  notice)
+    cp "$3/message" "$FIXTURE_NOTICE_HOME/current"
+    [ -e "$FIXTURE_NOTICE_HOME/finish" ] || exit 1
+    if [ -s "$3/blocked" ]; then cp "$3/message" "$FIXTURE_NOTICE_HOME/second"; fi
+    ;;
   sweep) ;;
   *) exit 2 ;;
 esac
@@ -183,7 +195,7 @@ claude_role env ANDERTON_PROBE_STATE="$bookmarks" ANDERTON_PROBE_STAGE="$tmp/qui
 
 clearable="$claims/workers/clearable.json"
 clearable_dir=$(jq -r .dir "$inherited")
-jq '.name = "clearable" | .spawnerScope = null | del(.claudeSession)' "$inherited" > "$clearable"
+jq '.name = "clearable" | .spawnerScope = null | .claudeLaunchId = "before-clear" | del(.claudeSession)' "$inherited" > "$clearable"
 sleep 60 &
 clearable_pid=$!
 sleep 60 &
@@ -206,7 +218,34 @@ wait_for_binding() {
   done
   return 1
 }
+register_clearable "$replacement_pid" replacement-session
+clearable_stop "$replacement_pid" replacement-session
+jq -e '.claudeSession == null' "$clearable" >/dev/null
+mkdir "$tmp/plain"
+jq -nc --argjson pid "$replacement_pid" --arg dir "$tmp/plain" '
+  {pid:$pid, sessionId:"plain-legacy-id", name:"plain-legacy", cwd:$dir}' > "$CLAUDE_CONFIG_DIR/sessions/$replacement_pid.json"
+jq -nc --arg dir "$tmp/plain" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+  {name:"plain-legacy",root:$dir,dir:$dir,worktree:false,launcher:"tmux",spawner:"fixture-claude",startedAt:$at}
+' > "$claims/workers/plain-legacy.json"
+refused_claim env CLAUDE_PID="$replacement_pid" CLAUDE_CODE_SESSION_ID=plain-legacy-id "$script/claim.sh"
+grep -q "managed as worker 'plain-legacy'" "$tmp/refused"
+jq --arg dir "$tmp/plain" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" -nc '
+  {type:"user",sessionId:"plain-legacy-id",timestamp:$at,cwd:$dir,message:{
+    content:("Brief.\nYou are a worker the Anderton session \"fixture-claude\" started for the task above, in " + $dir + ".")
+  }}' > "$CLAUDE_CONFIG_DIR/projects/fixture/plain-legacy-id.jsonl"
+jq '.name = "renamed-plain-worker"' "$CLAUDE_CONFIG_DIR/sessions/$replacement_pid.json" > "$tmp/renamed-plain"
+mv "$tmp/renamed-plain" "$CLAUDE_CONFIG_DIR/sessions/$replacement_pid.json"
+refused_claim env CLAUDE_PID="$replacement_pid" CLAUDE_CODE_SESSION_ID=plain-legacy-id "$script/claim.sh" --project plain-renamed
+grep -q "managed as worker 'plain-legacy'" "$tmp/refused"
+rm "$claims/workers/plain-legacy.json"
+rm "$CLAUDE_CONFIG_DIR/sessions/$replacement_pid.json"
 register_clearable "$clearable_pid" before-clear
+registry="$CLAUDE_CONFIG_DIR/sessions/$clearable_pid.json"
+cp "$registry" "$tmp/registry-original"
+jq --arg dir "$tmp" '.name = "renamed-worker" | .cwd = $dir' "$tmp/registry-original" > "$registry"
+refused_claim env CLAUDE_PID="$clearable_pid" CLAUDE_CODE_SESSION_ID=before-clear "$script/claim.sh" --project renamed-worker
+grep -q "managed as worker 'clearable'" "$tmp/refused"
+mv "$tmp/registry-original" "$registry"
 mkdir "$clearable.lock"
 clearable_stop "$clearable_pid" before-clear > "$tmp/stale-worker-lock" 2>&1
 [ "$(grep -c 'A worker operation already holds' "$tmp/stale-worker-lock")" -eq 3 ]
@@ -303,5 +342,115 @@ jq -nc --arg dir "$PWD" '
   {name:"another-name",root:$dir,dir:$dir,adopted:true,sessionId:"fixture-claude"}' > "$claims/workers/another-name.json"
 refused_claim claude_role "$script/claim.sh" --project worker-scope
 grep -q "managed as worker 'another-name'" "$tmp/refused"
+
+cutoff=2030-01-02T00:00:00Z
+jq --arg cutoff "$cutoff" '.claudeReportSince = $cutoff |
+  .claudeReportPreviousHolder = {sessionId:"former-id",pid:984}' "$root_claim" > "$tmp/updated-claim"
+mv "$tmp/updated-claim" "$root_claim"
+legacy="$claims/workers/legacy-reporter.json"
+legacy_transcript="$CLAUDE_CONFIG_DIR/projects/fixture/legacy-native-report.jsonl"
+jq '.name = "legacy-reporter" | .spawner = "former-claude" | .spawnerScope = null | .spawnerSession = "former-id" |
+    .spawnerProvider = "claude" | .startedAt = "2030-01-01T01:00:01Z" |
+    del(.claudeLaunchId,.claudeSession,.reportTransport)' "$inherited" > "$legacy"
+rm "$CLAUDE_CONFIG_DIR/sessions/$replacement_pid.json"
+jq -nc --arg dir "$clearable_dir" '
+  def entry($id; $time): {sessionId:"legacy-native-report",uuid:$id,cwd:$dir,
+    timestamp:("2030-01-0" + $time + "T01:00:00Z")};
+  def user($id; $time; $text): entry($id; $time) + {type:"user",message:{content:$text}};
+  def send($id; $time; $to; $text): entry($id; $time) + {type:"assistant",
+    message:{stop_reason:"tool_use",content:[{type:"tool_use",name:"SendMessage",id:$id,input:{to:$to,message:$text}}]}};
+  def reply($id; $text): entry($id; "3") + {type:"assistant",
+    message:{stop_reason:"end_turn",content:[{type:"text",text:$text}]}};
+  def receipt($id; $tool; $success): entry($id; "1") + {type:"user",toolUseResult:{success:$success},
+    message:{content:[{type:"tool_result",tool_use_id:$tool}]}};
+  def before_takeover: .timestamp = "2030-01-01T02:00:00Z";
+  user("launch";"1";"Brief.\nYou are a worker the Anderton session \"former-claude\" started for the task above, in " + $dir + "."),
+  send("historical";"1";"former-claude";"RESULT: historical transport"),
+  ((user("sent-turn";"1";"Continue."), send("sent-old";"1";"uds:/run/claude/984.sock";"RESULT: old delivered echo"),
+    receipt("sent-result";"sent-old";true), reply("resent-old";"RESULT: old delivered echo")) | before_takeover),
+  ((user("failed-turn";"1";"Continue."), send("missed-old";"1";"former-claude";"RESULT: old unread final"),
+    receipt("missed-result";"missed-old";false), reply("unread-old";"RESULT: old unread final")) | before_takeover),
+  user("turn-one";"3";"Continue."),
+  send("outbound-one";"3";"former-claude";"RESULT: same milestone"),
+  send("different-recipient";"3";"another-claude";"RESULT: unrelated message"),
+  reply("duplicate-final";"RESULT: same milestone"),
+  user("turn-two";"3";"Report the next milestone."),
+  send("outbound-two";"3";"former-claude";"RESULT: same milestone"),
+  send("prior-socket";"3";"uds:/run/claude/984.sock";"RESULT: scoped socket milestone"),
+  send("wrong-socket";"3";"uds:/run/claude/985.sock";"RESULT: unrelated socket")
+' > "$legacy_transcript"
+TZ=UTC touch -t 203001030100 "$legacy_transcript"
+jq -nc --argjson pid "$replacement_pid" --arg dir "$clearable_dir" '
+  {pid:$pid,sessionId:"legacy-native-report",name:"legacy-reporter",cwd:$dir}' > "$CLAUDE_CONFIG_DIR/sessions/$replacement_pid.json"
+native_gate() {
+  local status=0
+  jq -nc --arg dir "$clearable_dir" --arg file "$legacy_transcript" --arg tool "$1" --arg to "$2" --arg report "$3" '
+    {session_id:"legacy-native-report", cwd:$dir, transcript_path:$file, tool_use_id:$tool,
+     hook_event_name:"PreToolUse",tool_input:{to:$to,message:$report}}' |
+    "$script/report-gate.sh" > "$tmp/native-gate" 2>&1 || status=$?
+  [ "$status" -eq 2 ]
+  grep -q 'will read this milestone' "$tmp/native-gate"
+}
+native_gate outbound-one former-claude 'RESULT: same milestone'
+native_gate outbound-two former-claude 'RESULT: same milestone'
+native_gate prior-socket 'uds:/run/claude/984.sock' 'RESULT: scoped socket milestone'
+rm "$CLAUDE_CONFIG_DIR/sessions/$replacement_pid.json"
+fallback="$claims/workers/fallback-fixture.json"
+fallback_transcript="$CLAUDE_CONFIG_DIR/projects/fixture/fallback-native-report.jsonl"
+jq --arg transcript "$fallback_transcript" '.name = "fallback-fixture" | .spawnerScope = "vacant-project" |
+  .claudeSession = {id:"fallback-native-report",transcript:$transcript}' "$legacy" > "$fallback"
+jq -c '.sessionId = "fallback-native-report" | select(.type == "assistant")
+  | if .message.stop_reason == "end_turn" then .message.content[0].text = "RESULT: fallback final" else . end' "$legacy_transcript" > "$fallback_transcript"
+mkdir "$tmp/native-state" "$tmp/native-stage"
+codex_role env ANDERTON_PROBE_STATE="$tmp/native-state" ANDERTON_PROBE_STAGE="$tmp/native-stage" "$script/worker.sh" sweep > "$tmp/native-output"
+[ "$(grep -c '^RESULT: same milestone$' "$tmp/native-output")" = 2 ]
+grep -qx 'RESULT: scoped socket milestone' "$tmp/native-output"
+grep -qx 'RESULT: fallback final' "$tmp/native-output"
+grep -qx 'RESULT: old unread final' "$tmp/native-output"
+if grep -Eq 'historical transport|old delivered echo|unrelated message|unrelated socket' "$tmp/native-output"; then exit 1; fi
+if codex_role "$script/worker.sh" message legacy-reporter 'Refuse legacy transcript-only identity.' > "$tmp/refused" 2>&1; then exit 1; fi
+mv "$tmp/native-stage/"*.json "$tmp/native-state/"
+codex_role env ANDERTON_PROBE_STATE="$tmp/native-state" ANDERTON_PROBE_STAGE="$tmp/native-stage" "$script/worker.sh" sweep > "$tmp/native-output"
+[ ! -s "$tmp/native-output" ]
+sed 's/started for the task/never started for the task/' "$legacy_transcript" > "$tmp/replacement-transcript"
+mv "$tmp/replacement-transcript" "$legacy_transcript"
+TZ=UTC touch -t 203001030100 "$legacy_transcript"
+rm "$tmp/native-state/claude-legacy-native-report.json"
+codex_role env ANDERTON_PROBE_STATE="$tmp/native-state" ANDERTON_PROBE_STAGE="$tmp/native-stage" "$script/worker.sh" sweep > "$tmp/native-output"
+[ ! -s "$tmp/native-output" ]
+
+mkdir "$FIXTURE_NOTICE_HOME"
+jq -nc --arg dir "$PWD" --arg home "$CODEX_HOME" '
+  {name:"delayed-fixture",root:$dir,dir:$dir,provider:"codex",codexHome:$home,
+   id:"019a0000-dddd-7222-8333-444455556666",spawnerScope:null}' > "$claims/workers/delayed-fixture.json"
+jq '.peerMessage = {id:"pending-first",from:"fixture",text:"DEPLOY: the first message"}' "$root_claim" > "$tmp/updated-claim"
+mv "$tmp/updated-claim" "$root_claim"
+codex_role env ANDERTON_WATCH_TICK=1 "$script/watch.sh" --codex "$root_claim" > "$tmp/delayed-watch" 2>&1 &
+fixture_watch=$!
+wait_for_file() {
+  local _
+  for _ in $(seq 1 100); do
+    if [ -s "$1" ]; then return; fi
+    sleep 0.2
+  done
+  return 1
+}
+wait_for_file "$FIXTURE_NOTICE_HOME/current"
+grep -q 'the first message' "$FIXTURE_NOTICE_HOME/current"
+printf 'first-item\n' > "$FIXTURE_NOTICE_HOME/worker-blocked"
+wait_for_file "${root_claim%.json}.$FIXTURE_THREAD.blocked"
+grep -q 'delayed-fixture.*waiting on approval' "${root_claim%.json}.$FIXTURE_THREAD.blocked"
+grep -q 'the first message' "$FIXTURE_NOTICE_HOME/current"
+printf 'second-item\n' > "$FIXTURE_NOTICE_HOME/worker-blocked"
+for _ in $(seq 1 100); do
+  if grep -q 'second-item' "${root_claim%.json}.$FIXTURE_THREAD.blocked"; then break; fi
+  sleep 0.2
+done
+grep -q 'second-item' "${root_claim%.json}.$FIXTURE_THREAD.blocked"
+rm "$FIXTURE_NOTICE_HOME/worker-blocked"
+touch "$FIXTURE_NOTICE_HOME/finish"
+wait_for_file "$FIXTURE_NOTICE_HOME/second"
+[ "$(grep -c 'delayed-fixture.*waiting on approval' "$FIXTURE_NOTICE_HOME/second")" = 2 ]
+if grep -q 'the first message' "$FIXTURE_NOTICE_HOME/second"; then exit 1; fi
 
 echo "coordinator: mixed claims, provider selection, adoption, handoff, and receipts passed"

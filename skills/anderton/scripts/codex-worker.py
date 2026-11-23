@@ -393,19 +393,64 @@ def deliver_notice(client, claim, notice):
     return False
 
 
+def worker_bookmark(worker):
+    thread = uuid.UUID(worker["id"])
+    adoption = worker.get("codexAdoptionId")
+    return f"codex-{thread}-{uuid.UUID(adoption)}.json" if adoption else f"codex-{thread}.json"
+
+
+def blocker_flags(info):
+    return sorted(set(info["status"].get("activeFlags", [])) & {"waitingOnApproval", "waitingOnUserInput"})
+
+
+def blocker_key(client, thread, running, flags):
+    # Successive approval requests can share a tool item ID in Codex.
+    items = client.call("thread/items/list", {
+        "threadId": thread, "turnId": running, "sortDirection": "desc", "limit": 1,
+    })["data"] if running else []
+    return [running, flags, items[0]["item"]["id"] if items else None]
+
+
+def blocker_reasons(flags):
+    return " and ".join("approval" if flag == "waitingOnApproval" else "user input" for flag in flags)
+
+
+def blocker_signal(worker, key):
+    label = f"=== {worker['name']} (Codex {worker['id']}, waiting on {blocker_reasons(key[1])})"
+    return label + "\t" + json.dumps(key, separators=(",", ":"))
+
+
+def blocker_during_notice(worker, pending_stage, bookmarks):
+    thread = str(uuid.UUID(worker["id"]))
+    with Codex(Path(worker["codexHome"])) as client:
+        flags = blocker_flags(read_thread(client, worker))
+        if not flags:
+            return
+        turns = client.call("thread/turns/list", {"threadId": thread, "limit": 1, "itemsView": "notLoaded"})["data"]
+        running = turns[0]["id"] if turns and turns[0]["status"] == "inProgress" else None
+        key = blocker_key(client, thread, running, flags)
+    for directory in (pending_stage, bookmarks):
+        bookmark = directory / worker_bookmark(worker)
+        if not bookmark.is_file():
+            continue
+        block = json.loads(bookmark.read_text()).get("block") or {}
+        if block.get("key") == key and time.time() - block["notifiedAt"] < BLOCK_REMINDER_SECONDS:
+            return
+    print(blocker_signal(worker, key))
+
+
 def sweep_worker(worker, state_dir, stage_dir):
     thread = str(uuid.UUID(worker["id"]))
     name = worker["name"]
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
         raise ValueError("Invalid worker name")
-    bookmark = f"codex-{thread}.json"
+    bookmark = worker_bookmark(worker)
     previous = state_dir / bookmark
     state = json.loads(previous.read_text()) if previous.exists() else {"turn": worker.get("codexBaselineTurn")}
     events = []
     with Codex(Path(worker["codexHome"])) as client:
         info = read_thread(client, worker)
-        flags = info["status"].get("activeFlags", [])
-        waiting = sorted(set(flags) & {"waitingOnApproval", "waitingOnUserInput"})
+        waiting = blocker_flags(info)
         completed = []
         running = None
         for turn in client.pages("thread/turns/list", threadId=thread, limit=20,
@@ -419,19 +464,17 @@ def sweep_worker(worker, state_dir, stage_dir):
                 completed.append(turn)
         block = None
         if waiting:
-            # Successive approval requests can share a tool item ID in Codex.
-            items = client.call("thread/items/list", {
-                "threadId": thread, "turnId": running, "sortDirection": "desc", "limit": 1,
-            })["data"] if running else []
-            key = [running, waiting, items[0]["item"]["id"] if items else None]
+            key = blocker_key(client, thread, running, waiting)
             previous_block = state.get("block")
             now = int(time.time())
             same_block = isinstance(previous_block, dict) and previous_block["key"] == key
             if not same_block or now - previous_block["notifiedAt"] >= BLOCK_REMINDER_SECONDS:
                 block = {"key": key, "notifiedAt": now}
-                reasons = ["approval" if flag == "waitingOnApproval" else "user input" for flag in waiting]
                 still = "still " if same_block else ""
-                events.append(f"{name} (Codex {thread}) is {still}waiting on {' and '.join(reasons)}. Open its worker tab.")
+                reported = os.environ.get("ANDERTON_REPORTED_BLOCKS")
+                already_reported = reported and blocker_signal(worker, key) in Path(reported).read_text().splitlines()
+                if same_block or not already_reported:
+                    events.append(f"{name} (Codex {thread}) is {still}waiting on {blocker_reasons(waiting)}. Open its worker tab.")
             else:
                 block = previous_block
         for turn in reversed(completed):
@@ -469,6 +512,10 @@ def main():
     notice = commands.add_parser("notice")
     notice.add_argument("claim", type=Path)
     notice.add_argument("notice", type=Path)
+    blocker = commands.add_parser("blocker-during-notice")
+    blocker.add_argument("record", type=Path)
+    blocker.add_argument("pending_stage", type=Path)
+    blocker.add_argument("bookmarks", type=Path)
     watch = commands.add_parser("start-watch")
     watch.add_argument("script", type=Path)
     watch.add_argument("claim", type=Path)
@@ -526,6 +573,8 @@ def main():
                 return 0 if deliver_notice(client, claim, args.notice) else 3
             read_thread(client, worker)
             print("live")
+    elif args.command == "blocker-during-notice":
+        blocker_during_notice(json.loads(args.record.read_text()), args.pending_stage, args.bookmarks)
     elif args.command in {"state", "inactive", "output", "message"}:
         worker = json.loads(args.record.read_text())
         with Codex(Path(worker["codexHome"])) as client:
