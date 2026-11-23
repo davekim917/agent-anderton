@@ -97,7 +97,8 @@ Anderton, not you. It answers what it can, brings you the decisions that are you
 PR, and deploys what passes.
 
 **Requirements:** Claude Code with `claude agents`, built and
-tested on 2.1.312; `git`, `jq` and `gh`; and herdr or tmux. It runs on Linux and on macOS,
+tested on 2.1.312, and support for `--session-id`; `git`, `jq`, `gh`, and `uuidgen` or Python 3;
+and herdr or tmux. It runs on Linux and on macOS,
 including macOS's stock bash 3.2.
 
 ### Open a Codex Anderton
@@ -240,15 +241,15 @@ thread still holds its role. If the daemon cannot answer, the claim is treated a
 unknown and blocks an ordinary takeover.
 An Anderton must release an adopted worker before that session can claim a role.
 A worker launched by Anderton must be retired before it can be replaced by a coordinator session.
+Changing the worker's Claude display name leaves that claim restriction in place.
 
 **`waiting.sh`** lists the live sessions in the caller's repository (`--all`: every repository) that
 wait on a person, leaving out every Anderton in the caller's repository, the repository's and each
 project's: each is a tab the user reads directly. Run by an Anderton, it lists only the sessions that
 role answers for: the workers it started or adopted, and, for the repository's, a project's workers
 once that project's Anderton is gone. A session nobody started is the user's own tab, which no
-Anderton hears about until the user asks one to adopt it. A worker is matched to the session name it was started
-from, so renaming a worker releases it like a tab the user opened, and renaming a project's Anderton
-hands its workers to the repository's. It lists a
+Anderton hears about until the user asks one to adopt it. Verified Claude workers keep their recorded
+worker name for Anderton commands after a display rename. It lists a
 session when:
 
 - the turn ended with Claude's text;
@@ -280,6 +281,8 @@ would keep. `--blocked` leaves this section out.
 starts a full Claude Code or Codex worker labelled `<name>` in a new git worktree at
 `$ANDERTON_WORKTREES/wt-<name>` (default: the folder that holds the repository). The base is
 `origin/HEAD`, else `origin/main`, `origin/master` or `HEAD`.
+New Claude workers launch interactively from herdr or tmux. A failed launch stops there, with
+startup details for the operator. Existing background sessions use `claude attach`.
 
 - Inside herdr (`HERDR_ENV=1`), the worker opens in a new tab of the caller's workspace, labelled
   `<name>`, or `<caller>/<name>` when the caller is a named project's Anderton, its name folded to
@@ -304,7 +307,15 @@ starts a full Claude Code or Codex worker labelled `<name>` in a new git worktre
   SendMessage. Other pairings report in final replies. The brief also sets the rules for sub-agents
   and external actions.
 - The worker is recorded in `~/.claude/anderton/workers/<name>.json`, with the herdr or tmux server
-  it was opened in.
+  it was opened in. For Claude the record reserves its session UUID before opening the worker.
+  The startup hook records its process identity. A `/clear` in the same process keeps the worker's
+  previous transcript available for unread reports. An older Codex-launched Claude worker can bind
+  on its next Stop when its original pane and launch brief still verify its identity. Direct other
+  unbound workers in their own panes or retire them and start fresh workers.
+- When a worker messages its former Claude Anderton, the SendMessage hook can hold the stale route
+  and let its current Codex Anderton read that milestone from the transcript. This applies when
+  the repository's Codex Anderton inherits a scoped worker. Recovery of native sends with an unknown
+  recipient requires the worker to report again in its final reply.
 
 **`retire.sh <name>`** stops that worker, then removes its worktree and record. A herdr tab or tmux
 window is closed only when it still carries the label it was opened with, in the server recorded at spawn, and
@@ -317,15 +328,18 @@ cannot read or compare with its base is kept too. Gitignored files don't count a
 **`adopt.sh <name>`** makes the calling Anderton answer for a live session the user opened in its
 repository, as for a worker it started: it writes a worker record naming the caller, so the session's
 messages to it are judged as a worker's and its blocks wake the caller. The record keeps the session's
-id, pid and start time, and the session counts as adopted only while its id matches (a resume and
-`/restart` keep it) or its pid and start time do (`/clear` keeps both), so a later session that reuses
-the name or the pid gains nothing; renaming it, or a `/clear` followed by a resume, releases it. It refuses a caller holding no
+id, pid and start time. It recognizes the same session on resume, restart or display rename, and the
+same process after `/clear`. It refuses a caller holding no
 role, another Anderton, and a session another Anderton already answers for. The Anderton then tells
 the session by SendMessage that it reports there. `retire.sh <name>` releases an adopted session
 without stopping it.
+Re-adopting a Codex thread starts reporting at the new adoption point. A change in Anderton for an
+existing adoption keeps its report bookmark.
 
-**`watch.sh`** is a background `Stop` hook. It runs in every session and exits
-at once, in about 50 ms, in any session that holds no Anderton role. In an Anderton, the
+**`watch.sh`** runs as Claude's background `Stop` hook and as the Codex coordinator's detached watcher.
+The Codex watcher keeps checking for blockers while a notice is pending. Consecutive requests can
+appear as one if the Codex daemon exposes the same turn, request kind and tool item for both.
+The Claude hook exits quickly in an ordinary session. In an Anderton, the
 repository's or a project's, it keeps running and checks `waiting.sh --blocked` every 30 seconds,
 about 0.8 seconds of work on a repository of a dozen sessions. When a session it answers for newly
 blocks on a permission prompt or `AskUserQuestion`,
@@ -373,21 +387,17 @@ other repositories pass untouched, and the repository is the one the session sta
 appends that footer: it prints no decision, so it can't approve a call, and it allows whenever it can't
 tell, a crash included.
 
-**`prompt.sh <name> [yes|no <fingerprint>]`** lets you answer a permission prompt from the Anderton
-session. It reads the prompt from the session's herdr tab or tmux pane and prints it with a
-fingerprint. On your answer it re-reads the screen, refuses unless the prompt is unchanged, presses
-Enter (`yes`, this one call) or Esc (`no`), and confirms from the screen that the prompt closed. It
-refuses a cursor not on a plain "1. Yes", so it can't pick "always allow". A dialog taller than its
-screen has lost its top, and neither herdr nor tmux can bring it back, so for a Bash command it reads
+**`prompt.sh <name>`** reads a Claude Code permission prompt from the session's herdr tab or tmux pane.
+Approve or deny the request directly in that pane. A dialog taller than its screen has lost its top,
+and neither herdr nor tmux can bring it back, so for a Bash command the script reads
 the full text from the transcripts of the session and its sub-agents and workflow agents. It does so
 only if exactly one waiting Bash call ends with the lines still on screen, and no call of another
 kind is waiting, since a clipped dialog hides its title. It shows the reason a permission rule or hook
 gave, from the screen. A hook that rewrites a command above those lines
-wouldn't show. Any other dialog taller than its screen is refused. Only a session holding an Anderton role in the target's repository can run it. That your
-word triggers it is an instruction to the Anderton, not something the script can prove, and a
-session running without permission checks can press keys by other means: this prevents mistakes
-and isn't a security boundary. It sees what the terminal draws, so what a terminal doesn't draw, such
-as a control character, it can't show you either. Background sessions have no tab, and `AskUserQuestion` isn't covered.
+wouldn't show. Any other dialog taller than its screen is refused. Only a session holding an Anderton
+role in the target's repository can inspect it. Codex Anderton can inspect its own Claude workers.
+The script only sees what the terminal draws. Use `claude attach` to handle an existing background
+session. Answer `AskUserQuestion` directly in its session.
 
 All six honour `CLAUDE_CONFIG_DIR` and need `jq`, `git` and a POSIX `ps`.
 

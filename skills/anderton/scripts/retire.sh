@@ -22,7 +22,8 @@ fi
 provider=$(jq -r '.provider // "claude"' "$record")
 mixed=""
 if [ "$(invoking_provider)" = codex ] || [ "$(jq -r '.spawnerProvider // "claude"' "$record")" = codex ]; then mixed=1; fi
-if [ "$provider" = codex ] || [ -n "$mixed" ]; then
+if [ "$provider" = codex ] || [ -n "$mixed" ] ||
+  jq -e '.claudeLaunchId != null' "$record" >/dev/null 2>&1; then
   take_repository_lock "$(invoking_root)"
   lock_worker "$record"
 fi
@@ -92,24 +93,12 @@ shows_thread() {
 }
 
 mixed_claude_pane() {
-  local registry sid pid listed pane_pid
+  local registry sid pid
   registry=$(live_claude_worker "$record")
   case $registry in '' | *$'\n'*) return 1 ;; esac
   sid=$(jq -r .sessionId "$registry")
   pid=$(jq -r .pid "$registry")
-  case $launcher in
-    herdr)
-      listed=$(HERDR_SOCKET_PATH="$socket" herdr agent list 2>/dev/null) || return 1
-      printf '%s' "$listed" | jq -e --arg sid "$sid" --arg pane "$pane" '
-        [.result.agents[]? | select(.agent_session.value == $sid) | .pane_id] == [$pane]' >/dev/null
-      ;;
-    tmux)
-      listed=$(tmux -S "$socket" list-panes -a -F '#{pid} #{pane_id} #{pane_pid}' 2>/dev/null) || return 1
-      pane_pid=$(printf '%s\n' "$listed" | awk -v p="$server" -v id="$pane" '$1 == p && $2 == id {print $3}')
-      [ -n "$pane_pid" ] && has_ancestor "$pid" "$pane_pid"
-      ;;
-    *) return 1 ;;
-  esac
+  claude_in_worker_pane "$record" "$sid" "$pid"
 }
 
 mixed_claude_gone() {
