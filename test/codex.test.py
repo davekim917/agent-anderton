@@ -23,6 +23,9 @@ class FakeCodex:
         self.threads = [self.info]
         self.latest = []
         self.queue = []
+        self.adds = []
+        self.starts = []
+        self.queue_paused = False
         self.checked_queue = False
         self.listings = []
         self.listed = []
@@ -36,17 +39,42 @@ class FakeCodex:
 
     def call(self, method, params, timeout=None):
         if method == "thread/turns/list":
-            return {"data": [{"id": params["threadId"]}]}
+            if params.get("sortDirection") == "asc":
+                return {"data": [{"id": params["threadId"]}]}
+            return {"data": self.turns[:params["limit"]]}
         if method == "thread/items/list":
             return {"data": self.latest}
         if method == "thread/queue/list":
             self.checked_queue = True
             return {"data": self.queue}
+        if method == "thread/queue/add":
+            entry = {"id": f"submission-{len(self.adds)}", **params}
+            self.adds.append(entry)
+            self.queue.append(entry)
+            if self.info["status"]["type"] == "idle" and not self.queue_paused:
+                self.info["status"] = {"type": "active"}
+            return {"queuedSubmission": entry}
+        if method == "thread/queue/start":
+            selected = params.get("queuedSubmissionId", self.queue[0]["id"])
+            entry = next(item for item in self.queue if item["id"] == selected)
+            self.starts.append(entry["id"])
+            self.start_direction(entry, "inProgress")
+            self.info["status"] = {"type": "active"}
+            return {"turn": self.turns[0]}
+        if method == "thread/resume":
+            self.info["status"] = {"type": "idle"}
+            return {"thread": self.info}
         assert method == "thread/read"
         if params["threadId"] in self.others:
             return {"thread": self.others[params["threadId"]]}
         assert params["threadId"] == self.info["id"]
         return {"thread": self.info}
+
+    def start_direction(self, entry, status):
+        self.queue.remove(entry)
+        self.turns.insert(0, {"id": entry["id"], "status": status})
+        self.items[entry["id"]] = [user_message("Direction")]
+        self.items[entry["id"]][0]["item"]["clientId"] = entry["clientUserMessageId"]
 
     def pages(self, method, timeout=None, **params):
         if method == "thread/list":
@@ -308,48 +336,219 @@ class WorkerTest(unittest.TestCase):
         self.client.turns[0]["status"] = "completed"
         self.assertTrue(worker_api.is_inactive(self.client, self.worker))
 
-    def test_clears_only_a_definitive_rejection(self):
+    def test_definitively_rejected_add_removes_only_its_entry(self):
+        first = self.send("Keep this direction")
         original = self.client.call
-        rejected = worker_api.RequestRejected("thread/queue/add", {"code": -32600, "message": "invalid request"})
 
-        for error in (rejected, TimeoutError("connection lost")):
-            def reject_add(method, params):
-                if method == "thread/queue/add":
-                    self.assertIn("codexDirection", json.loads(self.record.read_text()))
-                    raise error
-                return original(method, params)
-
-            with patch.object(self.client, "call", side_effect=reject_add), self.assertRaises(type(error)):
-                worker_api.queue_direction(self.client, self.record, self.worker, "Direction")
-            self.assertEqual(isinstance(error, TimeoutError), "codexDirection" in json.loads(self.record.read_text()))
-
-    def test_replaces_a_direction_that_never_reached_codex_once_its_send_is_over(self):
-        self.worker["codexDirection"] = {"id": "lost-id", "previousTurn": "previous", "sentAt": 1000}
-        self.client.turns = [{"id": "previous", "status": "completed"}]
-        self.client.items["previous"] = [user_message("Earlier work")]
-        original = self.client.call
-        added = []
-
-        def accept_add(method, params):
+        def reject_add(method, params):
             if method == "thread/queue/add":
-                added.append(params["clientUserMessageId"])
-                return {"queuedSubmission": {"id": "submission"}}
+                prior, attempt = self.saved_directions()
+                self.assertEqual(first, prior)
+                self.assertTrue(attempt["unconfirmed"])
+                self.assertEqual(params["clientUserMessageId"], attempt["clientUserMessageId"])
+                raise worker_api.RequestRejected(method, {"code": -32600, "message": "invalid request"})
             return original(method, params)
 
-        with patch.object(self.client, "call", side_effect=accept_add), patch.object(worker_api.time, "sleep"):
-            with patch.object(worker_api.time, "time", return_value=1005):
-                self.assertFalse(worker_api.is_inactive(self.client, self.worker))
-            later = 1000 + worker_api.DIRECTION_LOST_AFTER_SECONDS
-            with patch.object(worker_api.time, "time", return_value=later):
-                self.client.queue = [{"id": "submission", "clientUserMessageId": "lost-id"}]
-                with self.assertRaisesRegex(ValueError, "Wait for the preceding"):
-                    worker_api.queue_direction(self.client, self.record, self.worker, "Next")
-                self.client.queue = []
-                self.assertTrue(worker_api.is_inactive(self.client, self.worker))
-                worker_api.queue_direction(self.client, self.record, self.worker, "Next")
-        saved = json.loads(self.record.read_text())["codexDirection"]
-        self.assertEqual([saved["id"]], added)
-        self.assertNotEqual("lost-id", saved["id"])
+        with patch.object(self.client, "call", side_effect=reject_add), self.assertRaises(worker_api.RequestRejected):
+            self.message_command("Direction")
+        self.assertEqual([first], self.saved_directions())
+        self.assertEqual(self.client.adds, self.client.queue)
+
+    def saved_directions(self):
+        return json.loads(self.record.read_text())["codexDirections"]
+
+    def lose_add_reply(self, applied=True):
+        self.record.write_text(json.dumps(self.worker))
+        original = self.client.call
+
+        def drop(method, params):
+            if method == "thread/queue/add":
+                saved = self.saved_directions()[-1]
+                self.assertTrue(saved["unconfirmed"])
+                self.assertEqual(params["clientUserMessageId"], saved["clientUserMessageId"])
+                if applied:
+                    original(method, params)
+                raise TimeoutError("add reply unavailable")
+            return original(method, params)
+
+        with contextlib.redirect_stderr(io.StringIO()) as report, patch.object(self.client, "call", side_effect=drop):
+            self.assertEqual(4, self.message_command("Direction"))
+        first = self.saved_directions()[-1]
+        self.assertIn(f"Direction {first['id']} is unconfirmed", report.getvalue())
+        self.assertTrue(first["unconfirmed"])
+        self.worker = json.loads(self.record.read_text())
+        return first
+
+    def check_status_verdict(self, direction, verdict):
+        with contextlib.redirect_stderr(io.StringIO()) as report:
+            self.assertEqual(0, self.worker_command("state", "--prune"))
+        self.assertIn(f"Direction {direction['id']}: {verdict}.", report.getvalue())
+
+    def test_lost_add_reply_exits_four_and_status_reports_queued(self):
+        self.client.info["status"] = {"type": "notLoaded"}
+        first = self.lose_add_reply()
+        self.assertEqual(first["clientUserMessageId"], self.client.queue[0]["clientUserMessageId"])
+        self.check_status_verdict(first, "queued")
+        self.assertEqual("idle", self.client.info["status"]["type"])
+        saved, = self.saved_directions()
+        self.assertEqual(first["id"], saved["id"])
+        self.assertFalse(saved.get("unconfirmed"))
+        self.assertEqual(1, len(self.client.adds))
+
+    def test_lost_add_reply_remains_visible_to_status_after_a_later_send(self):
+        first = self.lose_add_reply()
+        self.client.start_direction(self.client.queue[0], "completed")
+        self.assertEqual(1, self.worker_command("inactive", "--prune"))
+        latest = self.send("Next direction")
+        self.assertEqual([first, latest], self.saved_directions())
+        self.check_status_verdict(first, "ran")
+        self.assertEqual([latest], self.saved_directions())
+
+    def test_status_reports_never_arrived_after_two_idle_looks_past_the_grace_period(self):
+        with patch.object(worker_api.time, "time", return_value=1000):
+            first = self.lose_add_reply(applied=False)
+            self.check_status_verdict(first, "still unconfirmed")
+        self.assertEqual([first], self.saved_directions())
+        with patch.object(worker_api.time, "time", return_value=1060), patch.object(worker_api.time, "sleep") as sleep:
+            self.check_status_verdict(first, "never arrived")
+            self.check_status_verdict(first, "never arrived")
+        sleep.assert_called_once_with(worker_api.DIRECTION_RECHECK_SECONDS)
+        self.assertEqual([first["id"]], [entry["id"] for entry in self.saved_directions()])
+        self.assertEqual([], self.client.adds)
+        self.assertEqual(0, self.worker_command("inactive", "--prune"))
+        self.assertEqual(0, self.worker_command("inactive", "--directions-only", "--prune"))
+        with contextlib.redirect_stderr(io.StringIO()) as report:
+            self.assertEqual(0, self.message_command("Next direction"))
+            self.assertEqual(0, self.worker_command("state", "--prune"))
+        self.assertNotIn(first["id"], report.getvalue())
+        self.assertNotIn(first["id"], [entry["id"] for entry in self.saved_directions()])
+
+    def test_confirmed_send_resumes_unloaded_worker_before_reconciling_earlier_directions(self):
+        self.send("Earlier direction")
+        self.client.info["status"] = {"type": "notLoaded"}
+        calls = []
+        original_call = self.client.call
+
+        def call(method, params):
+            calls.append(method)
+            return original_call(method, params)
+
+        def fail_queue_listing(method, **_):
+            calls.append(method)
+            self.assertEqual("thread/queue/list", method)
+            raise TimeoutError("queue list unavailable")
+
+        with patch.object(self.client, "call", side_effect=call), patch.object(self.client, "pages", fail_queue_listing):
+            second = self.send("Next direction")
+        add = calls.index("thread/queue/add")
+        self.assertEqual(["thread/resume", "thread/queue/list"], calls[add + 1:add + 3])
+        self.assertEqual("thread/queue/list", calls[-1])
+        self.assertFalse(second.get("unconfirmed"))
+
+    def test_acknowledged_add_starts_the_head_of_a_paused_queue(self):
+        self.client.queue_paused = True
+        self.client.queue = [{"id": "older-submission", "clientUserMessageId": "older-message"}]
+        new = self.send("Next direction")
+        self.assertEqual(["older-submission"], self.client.starts)
+        self.assertEqual([new["clientUserMessageId"]], [entry["clientUserMessageId"] for entry in self.client.queue])
+
+    def test_acknowledged_add_skips_start_when_new_entry_is_already_dispatched(self):
+        original = self.client.call
+
+        def dispatch(method, params):
+            result = original(method, params)
+            if method == "thread/queue/add":
+                self.client.start_direction(result["queuedSubmission"], "completed")
+                self.client.info["status"] = {"type": "idle"}
+            return result
+
+        with patch.object(self.client, "call", side_effect=dispatch):
+            self.send("Direction")
+        self.assertEqual([], self.client.starts)
+
+    def assert_dispatch_failure(self, status, target, diagnostic):
+        self.client.queue_paused = True
+        self.client.info["status"] = {"type": status}
+        self.record.write_text(json.dumps(self.worker))
+        original = self.client.call
+
+        def fail(method, params):
+            if method == target:
+                raise TimeoutError("dispatch reply unavailable")
+            return original(method, params)
+
+        with contextlib.redirect_stderr(io.StringIO()) as report, patch.object(self.client, "call", side_effect=fail):
+            self.assertEqual(1, self.message_command("Direction"))
+        self.assertIn(diagnostic, report.getvalue())
+        self.assertIn("Direction was queued", report.getvalue())
+        saved, = self.saved_directions()
+        self.assertFalse(saved.get("unconfirmed"))
+        self.assertEqual(saved["clientUserMessageId"], self.client.queue[-1]["clientUserMessageId"])
+
+    def test_acknowledged_send_exits_nonzero_when_resume_fails(self):
+        self.assert_dispatch_failure("notLoaded", "thread/resume", "Could not resume worker")
+
+    def test_acknowledged_send_exits_nonzero_when_start_fails(self):
+        self.assert_dispatch_failure("idle", "thread/queue/start", "Could not start worker queue")
+
+    def worker_command(self, command, *options):
+        with patch.object(worker_api.sys, "argv", ["codex-worker.py", command, str(self.record), *options]):
+            return worker_api.main()
+
+    def send(self, text):
+        if not self.record.exists():
+            self.record.write_text(json.dumps(self.worker))
+        self.assertEqual(0, self.message_command(text))
+        self.worker = json.loads(self.record.read_text())
+        return self.worker["codexDirections"][-1]
+
+    def message_command(self, text):
+        with patch.object(worker_api.sys, "argv", [
+            "codex-worker.py", "message", str(self.record), "--", text,
+        ]):
+            return worker_api.main()
+
+    def test_appends_three_directions_and_prunes_only_the_finished_one(self):
+        # Exercise the second and third sends even on an implementation that refuses them.
+        for text in ("First", "Second", "Third"):
+            with self.subTest(text=text):
+                self.send(text)
+        tracked = self.worker["codexDirections"]
+        self.assertEqual(3, len({entry["id"] for entry in tracked}))
+        self.assertTrue(all(isinstance(entry["sentAt"], int) for entry in tracked))
+        self.assertEqual([entry["clientUserMessageId"] for entry in self.client.queue],
+                         [entry["clientUserMessageId"] for entry in tracked])
+        self.assertEqual(["First", "Second", "Third"],
+                         [entry["input"][0]["text"].split("\n\n", 1)[1] for entry in self.client.queue])
+
+        self.client.start_direction(self.client.queue[0], "completed")
+        with patch.object(worker_api.sys, "argv", ["codex-worker.py", "inactive", str(self.record), "--prune"]):
+            self.assertEqual(1, worker_api.main())
+        self.assertEqual(tracked[1:], json.loads(self.record.read_text())["codexDirections"])
+
+    def test_lost_direction_does_not_block_or_discard_a_queued_direction(self):
+        self.worker["codexDirections"] = [
+            {"id": "attempt", "clientUserMessageId": "lost-id", "previousTurn": None, "sentAt": 1000},
+        ]
+        with patch.object(worker_api.time, "time", return_value=1005), patch.object(worker_api.time, "sleep"):
+            self.assertFalse(worker_api.is_inactive(self.client, self.worker))
+            queued = self.send("Still queued")
+            self.assertEqual(2, len(self.worker["codexDirections"]))
+        later = 1000 + worker_api.DIRECTION_LOST_AFTER_SECONDS
+        self.client.info["status"] = {"type": "idle"}
+        with patch.object(worker_api.time, "time", return_value=later), patch.object(worker_api.time, "sleep") as sleep:
+            self.assertEqual(0, self.worker_command("state", "--prune"))
+            latest = self.send("Next")
+        sleep.assert_called_once_with(worker_api.DIRECTION_RECHECK_SECONDS)
+        self.assertEqual([queued, latest], self.worker["codexDirections"])
+
+    def test_legacy_direction_is_migrated_when_appending(self):
+        self.worker["codexDirection"] = {"id": "legacy", "previousTurn": None, "sentAt": 1000}
+        self.client.queue = [{"id": "legacy-submission", "clientUserMessageId": "legacy"}]
+        new = self.send("Append")
+        self.assertNotIn("codexDirection", self.worker)
+        self.assertEqual([{"id": "legacy", "clientUserMessageId": "legacy", "previousTurn": None, "sentAt": 1000}, new],
+                         self.worker["codexDirections"])
 
     def test_a_direction_whose_turn_is_starting_is_not_lost(self):
         self.worker["codexDirection"] = {"id": "starting-id", "previousTurn": "previous", "sentAt": 1000}
@@ -364,14 +563,14 @@ class WorkerTest(unittest.TestCase):
 
         with patch.object(worker_api.time, "time", return_value=later), patch.object(worker_api.time, "sleep") as sleep:
             self.client.info["status"] = {"type": "active", "activeFlags": []}
-            self.assertEqual("pending", worker_api.direction_state(self.client, self.worker))
+            self.assertFalse(worker_api.is_inactive(self.client, self.worker))
             self.client.info["status"] = {"type": "idle"}
             self.client.turns.insert(0, {"id": "other", "status": "inProgress"})
             self.client.items["other"] = [user_message("Someone else's turn")]
-            self.assertEqual("pending", worker_api.direction_state(self.client, self.worker))
+            self.assertFalse(worker_api.is_inactive(self.client, self.worker))
             self.client.turns.pop(0)
             sleep.side_effect = turn_recorded
-            self.assertEqual("finished", worker_api.direction_state(self.client, self.worker))
+            self.assertTrue(worker_api.is_inactive(self.client, self.worker))
 
     def test_another_running_turn_does_not_hold_up_a_finished_direction(self):
         self.worker["codexDirection"] = {"id": "done-id", "previousTurn": "previous", "sentAt": 1000}
@@ -382,7 +581,8 @@ class WorkerTest(unittest.TestCase):
                              "directed": [user_message("Direction")], "previous": [user_message("Earlier work")]}
         self.client.items["directed"][0]["item"]["clientId"] = "done-id"
         self.client.info["status"] = {"type": "active", "activeFlags": []}
-        self.assertEqual("finished", worker_api.direction_state(self.client, self.worker))
+        worker_api.refresh_directions(self.client, self.worker)
+        self.assertEqual([], self.worker["codexDirections"])
 
     def test_reminds_when_pending_block_identity_stays_the_same(self):
         self.client.turns = [{"id": "first", "status": "inProgress"}]

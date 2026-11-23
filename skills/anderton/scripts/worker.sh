@@ -5,6 +5,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: worker.sh status|output <name> | message <name> <direction>" >&2
+  echo "Codex message exit 4 means submission is unconfirmed. Check status before resending." >&2
   exit 2
 }
 action=${1:-}

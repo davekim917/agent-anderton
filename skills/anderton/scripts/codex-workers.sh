@@ -6,6 +6,7 @@ scripts=$(cd "$(dirname "$0")" && pwd)
 . "$scripts/session-lib.sh"
 usage() {
   echo "usage: codex-workers.sh status|output|register <worker> | message <worker> <text>" >&2
+  echo "Message exit 4 means submission is unconfirmed. Check status before resending." >&2
   exit 2
 }
 action=${1:-}
@@ -37,7 +38,7 @@ if [ -z "$record" ]; then
   echo "No Codex worker '$2' owned by this Anderton." >&2
   exit 1
 fi
-if [ "$action" = register ] || [ "$action" = message ]; then
+if [ "$action" != output ]; then
   expected_thread=$(jq -r .id "$record")
   root=$(invoking_root)
   take_repository_lock "$root"
@@ -73,7 +74,8 @@ if ! jq -e '.id != ""' "$record" >/dev/null; then
   exit 1
 fi
 if [ "$action" = status ]; then
-  exec "$scripts/codex-worker.py" state "$record"
+  "$scripts/codex-worker.py" state "$record" --prune
+  exit
 fi
 if [ "$action" = output ]; then
   exec "$scripts/codex-worker.py" output "$record"

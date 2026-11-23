@@ -173,14 +173,21 @@ the brief was submitted, resolve the startup issue, have the user close its tab,
 retire the worker, and retry.
 
 Steer a Codex worker with `scripts/worker.sh message <name> "<instruction>"`.
-The script queues the message to its registered thread. Send the next direction
-after Codex finishes the preceding one. Read its status with
-`scripts/codex-workers.sh status <name>` and its recent assistant output with
+Directions and corrections append to the registered thread's queue and run in
+order. If `message` exits 4, check `scripts/worker.sh status <name>` for the
+direction ID printed by `message`. Status reports `queued`, `ran` (reached
+a turn), `never arrived`, or `still unconfirmed` on stderr. Resend only after status
+reports `never arrived` for that ID. That verdict remains visible until the next
+message to the worker or its retirement. For `still unconfirmed`, check status
+again before deciding. If `message` reports that it queued the direction but
+could not resume the worker or start the queue, inspect the worker before
+taking further action. Read recent assistant output with
 `scripts/codex-workers.sh output <name>`. Inspect the worker's diff directly
 when reviewing. Its final
 `RESULT:`, `QUESTION:`, `BLOCKED:`, and `ANSWER:` replies wake you through
 the watch. Send Codex permission and input requests to the user in the
-worker's tab. Retire it with `scripts/retire.sh <name>` after its active turn ends.
+worker's tab. Retire it with `scripts/retire.sh <name>` once its queue and active
+turn have cleared.
 It closes only the worker's own pane, and only while that pane still shows its
 thread; when it refuses because that pane shows another conversation, ask the
 user to close it once nothing in it needs keeping, then rerun it.
@@ -203,7 +210,8 @@ Stop hook. A legacy Codex-launched Claude worker can register on Stop when its
 original pane and launch brief verify its identity. Direct an unbound worker in
 its own pane or retire it and start a fresh worker. Keep using the worker name
 recorded at launch or adoption after it changes its Claude display name.
-`scripts/retire.sh <name>` releases it and leaves it running.
+`scripts/retire.sh <name>` releases it and leaves it running. For an adopted
+Codex session, wait until its Anderton directions have finished.
 
 **Choose the effort yourself for every worker.** `spawn.sh` refuses to start without
 it, and you are the one holding the user's actual words. A level the user named

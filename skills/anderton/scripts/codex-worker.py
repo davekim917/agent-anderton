@@ -25,8 +25,11 @@ LAUNCH_MARGIN_SECONDS = 300
 BLOCK_REMINDER_SECONDS = 300
 # Longer than any request a lost connection can leave in flight: Codex.call waits REQUEST_SECONDS for a send's answer.
 DIRECTION_LOST_AFTER_SECONDS = 60
-# Codex deletes a queue entry only once its turn has started; a second look this much later sees that turn.
+# After dispatch removes a submission, give the new turn time to become visible.
 DIRECTION_RECHECK_SECONDS = 3
+DIRECTION_UNCONFIRMED_EXIT = 4
+# Codex 0.171 caps the queue at 100 entries. Read them in one page to avoid shifts while it dispatches.
+QUEUE_PAGE_SIZE = 100
 # RFC 6455 requires the handshake GUID in uppercase ASCII.
 HANDSHAKE_GUID = str(uuid.UUID("258eafa5-e914-47da-95ca-c5ab0dc85b11")).upper().encode("ascii")
 REPORT = re.compile(r"^(RESULT|QUESTION|BLOCKED|ANSWER):[ \t]*\S")
@@ -255,56 +258,100 @@ def final_report(client, thread, turn):
     return None
 
 
-def is_inactive(client, worker):
-    if client.call("thread/queue/list", {"threadId": worker["id"], "limit": 1})["data"]:
+def is_inactive(client, worker, directions_only=False, reconcile=True):
+    if reconcile:
+        refresh_directions(client, worker)
+    if any(not entry.get("neverArrived") for entry in pending_directions(worker)):
         return False
-    if direction_state(client, worker) == "pending":
+    if directions_only:
+        return True
+    if client.call("thread/queue/list", {"threadId": worker["id"], "limit": 1})["data"]:
         return False
     return read_thread(client, worker)["status"]["type"] in {"idle", "notLoaded"}
 
 
-def direction_state(client, worker):
-    """The last direction's outcome: none, finished, pending, or lost when its send never reached Codex."""
-    pending = worker.get("codexDirection")
-    if not pending:
-        return "none"
-    for look in range(2):
-        if look:
-            time.sleep(DIRECTION_RECHECK_SECONDS)
-        state, _ = direction_seen(client, worker, pending)
-        if state == "queued":
-            return "pending"
-        if state != "unseen":
-            return state
-    # Neither queued nor in a turn since the one before it, twice, with no turn running. A connection that failed
-    # mid-send can leave the request in flight briefly; after that it never arrived. A marker from before sentAt was
-    # recorded is long past that.
-    if time.time() - pending.get("sentAt", 0) < DIRECTION_LOST_AFTER_SECONDS:
-        return "pending"
-    return "lost"
+def pending_directions(worker):
+    directions = worker.get("codexDirections", [])
+    legacy = worker.pop("codexDirection", None)
+    if legacy:
+        directions = [{**legacy, "clientUserMessageId": legacy["id"]}, *directions]
+        worker["codexDirections"] = directions
+    return directions
 
 
-def direction_seen(client, worker, pending):
-    """Locate the direction in the queue or history, or determine whether it may still be starting."""
+def directions_seen(client, worker, directions):
+    if not directions:
+        return {}
     thread = worker["id"]
-    # The queue first: an entry leaves it only once its turn has started, and that turn records the direction before it
-    # can end, so a direction gone from the queue shows in the turns, or the thread is busy with it, or a recheck sees it.
-    for entry in client.pages("thread/queue/list", threadId=thread, limit=20):
-        if entry.get("clientUserMessageId") == pending["id"]:
-            return "queued", entry
+    remaining = {entry.get("clientUserMessageId", entry["id"]): entry for entry in directions}
+    seen = {}
+    # Read the queue before the turns. A dispatch that removes an entry between the reads will be in the
+    # turns, leave the thread active, or be visible on a later look.
+    for entry in client.pages("thread/queue/list", threadId=thread, limit=QUEUE_PAGE_SIZE):
+        message = entry.get("clientUserMessageId")
+        if message in remaining:
+            seen[message] = ("queued", entry)
+            del remaining[message]
+            if not remaining:
+                return seen
+    missing = set(remaining)
     busy = False
-    for turn in client.pages("thread/turns/list", threadId=thread, limit=20, itemsView="notLoaded"):
+    for turn in client.pages("thread/turns/list", threadId=thread, sortDirection="desc",
+                             limit=20, itemsView="notLoaded"):
         busy = busy or turn["status"] == "inProgress"
         for entry in client.pages("thread/items/list", threadId=thread, turnId=turn["id"], limit=10):
             item = entry["item"]
-            if item["type"] == "userMessage" and item.get("clientId") == pending["id"]:
-                # A terminal turn with the user item is a durable receipt, even when its response was interrupted.
-                return ("finished" if turn["status"] in {"completed", "interrupted", "failed"} else "pending"), None
-        if turn["id"] == pending["previousTurn"]:
+            message = item.get("clientId")
+            if item["type"] == "userMessage" and message in remaining:
+                # A terminal turn with the user item is a receipt even if it was interrupted.
+                finished = turn["status"] in {"completed", "interrupted", "failed"}
+                seen[message] = ("finished" if finished else "running", None)
+                del remaining[message]
+        remaining = {message: entry for message, entry in remaining.items() if entry["previousTurn"] != turn["id"]}
+        if not remaining:
             break
-    if busy or read_thread(client, worker)["status"]["type"] == "active":
-        return "pending", None
-    return "unseen", None
+    missing.difference_update(seen)
+    if missing:
+        busy = busy or read_thread(client, worker)["status"]["type"] == "active"
+        seen.update((message, ("pending" if busy else "unseen", None)) for message in missing)
+    return seen
+
+
+def direction_seen(client, worker, pending):
+    return directions_seen(client, worker, [pending])[pending.get("clientUserMessageId", pending["id"])]
+
+
+def refresh_directions(client, worker, except_id=None, include_unconfirmed=False):
+    directions = pending_directions(worker)
+    # Only explicit status can settle an unconfirmed send and report its verdict to the caller.
+    observed = [entry for entry in directions if entry["id"] != except_id and not entry.get("neverArrived")
+                and (include_unconfirmed or not entry.get("unconfirmed"))]
+    seen = directions_seen(client, worker, observed)
+    now = time.time()
+    expired = [entry for entry in observed if seen[entry["clientUserMessageId"]][0] == "unseen"
+               and now - entry.get("sentAt", 0) >= DIRECTION_LOST_AFTER_SECONDS]
+    if expired:
+        time.sleep(DIRECTION_RECHECK_SECONDS)
+        for message, (state, submission) in directions_seen(client, worker, expired).items():
+            seen[message] = ("lost" if state == "unseen" else state), submission
+
+    pending = []
+    for entry in directions:
+        state, _ = seen.get(entry["clientUserMessageId"], (None, None))
+        if state == "finished":
+            continue
+        if state == "lost" and not entry.get("unconfirmed"):
+            print(f"Direction {entry['id']} is absent from the Codex queue and turn history.", file=sys.stderr)
+            continue
+        if state in {"queued", "running", "lost"} and entry.get("unconfirmed"):
+            entry = entry.copy()
+            del entry["unconfirmed"]
+            if state == "lost":
+                entry["neverArrived"] = True
+        pending.append(entry)
+    if pending != directions:
+        worker["codexDirections"] = pending
+    return seen
 
 
 def save_worker(path, worker):
@@ -319,39 +366,89 @@ def save_worker(path, worker):
             os.unlink(temporary)
 
 
+def reconcile_directions(client, record, worker, except_id=None, report_unconfirmed=False):
+    original = worker.copy()
+    seen = refresh_directions(client, worker, except_id, include_unconfirmed=report_unconfirmed)
+    if worker != original:
+        save_worker(record, worker)
+    if report_unconfirmed:
+        verdicts = {"queued": "queued", "running": "ran", "finished": "ran", "lost": "never arrived"}
+        for entry in original.get("codexDirections", []):
+            if entry.get("neverArrived"):
+                state = "lost"
+            elif entry.get("unconfirmed"):
+                state, _ = seen[entry["clientUserMessageId"]]
+            else:
+                continue
+            print(f"Direction {entry['id']}: {verdicts.get(state, 'still unconfirmed')}.", file=sys.stderr)
+    return seen
+
+
+def resume_worker(client, thread):
+    try:
+        client.call("thread/resume", {"threadId": thread, "excludeTurns": True})
+    except (OSError, ValueError, KeyError) as error:
+        print(f"Direction was queued. Could not resume worker: {error}", file=sys.stderr)
+        return False
+    return True
+
+
+def dispatch_queued_direction(client, worker, submission, status):
+    thread = worker["id"]
+    if status == "notLoaded" and not resume_worker(client, thread):
+        return False
+    try:
+        queued = client.call("thread/queue/list", {"threadId": thread, "limit": QUEUE_PAGE_SIZE})["data"]
+        if any(entry["id"] == submission for entry in queued):
+            current = read_thread(client, worker)["status"]["type"]
+            if current == "notLoaded":
+                return resume_worker(client, thread)
+            if current == "idle":
+                # With no submission ID, Codex starts the head of the queue under its dispatch lock.
+                client.call("thread/queue/start", {"threadId": thread})
+    except (OSError, ValueError, KeyError) as error:
+        print(f"Direction was queued. Could not start worker queue: {error}", file=sys.stderr)
+        return False
+    return True
+
+
 def queue_direction(client, record, worker, text):
     info = read_thread(client, worker)
-    state = direction_state(client, worker)
-    if state == "pending":
-        raise ValueError("Wait for the preceding Anderton direction to finish")
-    if state == "lost":
-        print("The preceding Anderton direction never reached Codex; it is replaced by this one.", file=sys.stderr)
+    directions = [entry for entry in pending_directions(worker) if not entry.get("neverArrived")]
     thread = worker["id"]
     turns = client.call("thread/turns/list", {
-        "threadId": thread, "limit": 1, "itemsView": "notLoaded",
+        "threadId": thread, "sortDirection": "desc", "limit": 1, "itemsView": "notLoaded",
     })["data"]
     token = str(uuid.uuid4())
-    worker["codexDirection"] = {"id": token, "previousTurn": turns[0]["id"] if turns else None,
-                                "sentAt": int(time.time())}
+    direction = {"id": token, "clientUserMessageId": token, "previousTurn": turns[0]["id"] if turns else None,
+                 "sentAt": int(time.time()), "unconfirmed": True}
+    directions.append(direction)
+    worker["codexDirections"] = directions
     save_worker(record, worker)
     try:
-        submitted = client.call("thread/queue/add", {
+        submission = client.call("thread/queue/add", {
             "threadId": thread, "clientUserMessageId": token,
             "input": [{"type": "text", "text_elements": [], "text":
                        "Direction from your Anderton. Follow the existing approval policy.\n\n" + text}],
-        })["queuedSubmission"]
-    except RequestRejected as error:
-        # Protocol and request validation errors are returned before the queue is written.
-        if error.code in {-32600, -32601, -32602}:
-            del worker["codexDirection"]
+        })["queuedSubmission"]["id"]
+    except (OSError, ValueError, KeyError) as error:
+        # These errors reject the request before Codex writes the queue.
+        if isinstance(error, RequestRejected) and error.code in {-32600, -32601, -32602}:
+            directions.pop()
             save_worker(record, worker)
-        raise
-    print(f"Queued message {submitted['id']} for thread {thread}.")
-    if info["status"]["type"] == "notLoaded":
-        try:
-            client.call("thread/resume", {"threadId": thread, "excludeTurns": True})
-        except (OSError, ValueError) as error:
-            print(f"Direction was queued. Could not resume worker: {error}", file=sys.stderr)
+            raise
+        print(f"Direction {token} is unconfirmed: {error}. Check worker status before resending.", file=sys.stderr)
+        return DIRECTION_UNCONFIRMED_EXIT
+    print(f"Queued message {submission} for thread {thread}.")
+    ready = dispatch_queued_direction(client, worker, submission, info["status"]["type"])
+    del direction["unconfirmed"]
+    try:
+        save_worker(record, worker)
+        if ready:
+            reconcile_directions(client, record, worker, except_id=token)
+    except (OSError, ValueError, KeyError) as error:
+        print(f"Direction was queued. Could not update direction tracking: {error}", file=sys.stderr)
+    return int(not ready)
 
 
 def deliver_notice(client, claim, notice):
@@ -373,7 +470,7 @@ def deliver_notice(client, claim, notice):
                     # A queue can remain stopped after an interruption or daemon restart.
                     client.call("thread/queue/start", {"threadId": thread, "queuedSubmissionId": submission["id"]})
                 return False
-            if state == "pending" or time.time() - receipt["sentAt"] < DIRECTION_LOST_AFTER_SECONDS:
+            if state in {"pending", "running"} or time.time() - receipt["sentAt"] < DIRECTION_LOST_AFTER_SECONDS:
                 return False
             if look == 0:
                 time.sleep(DIRECTION_RECHECK_SECONDS)
@@ -524,6 +621,10 @@ def main():
         action.add_argument("record", type=Path)
         if command == "message":
             action.add_argument("text")
+        if command == "inactive":
+            action.add_argument("--directions-only", action="store_true")
+        if command in {"state", "inactive"}:
+            action.add_argument("--prune", action="store_true", help="save reconciled directions under the worker lock")
     sweep = commands.add_parser("sweep")
     sweep.add_argument("records", nargs="+", type=Path)
     args = parser.parse_args()
@@ -579,8 +680,7 @@ def main():
         worker = json.loads(args.record.read_text())
         with Codex(Path(worker["codexHome"])) as client:
             if args.command == "message":
-                queue_direction(client, args.record, worker, args.text)
-                return 0
+                return queue_direction(client, args.record, worker, args.text)
             if args.command == "inactive" and not worker["id"]:
                 # retire.sh removes the worktree on this answer, so every thread in it is read, from the full listing:
                 # Codex can run a turn whose thread has no index row, and its order is not creation order (it sorts
@@ -595,9 +695,17 @@ def main():
                     if live["status"]["type"] not in quiet:
                         return 1
                 return 0
-            if args.command == "inactive":
-                return int(not is_inactive(client, worker))
             info = read_thread(client, worker)
+            if args.command == "inactive":
+                if args.prune:
+                    reconcile_directions(client, args.record, worker)
+                return int(not is_inactive(client, worker, directions_only=args.directions_only,
+                                           reconcile=not args.prune))
+            if args.command == "state" and args.prune:
+                seen = reconcile_directions(client, args.record, worker, report_unconfirmed=True)
+                if (info["status"]["type"] == "notLoaded" and any(state == "queued" for state, _ in seen.values())
+                        and not resume_worker(client, worker["id"])):
+                    return 1
             if args.command == "output":
                 thread = worker["id"]
                 turns = client.call("thread/turns/list", {
