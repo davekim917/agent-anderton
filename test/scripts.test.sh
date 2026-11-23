@@ -2597,7 +2597,7 @@ cat >"$codexdir/codex-worker.py" <<'FAKE'
 #!/usr/bin/env bash
 if [ "$1" = message ]; then
   printf '%s\n' "$@" >>"$FAKE_LOG.direction"
-  exit 0
+  exit "${FAKE_DIRECTION_EXIT:-0}"
 fi
 if [ "$1" = state ]; then
   [ -d "$2.lock" ] && [ "${3:-}" = --prune ] || exit 1
@@ -2646,11 +2646,10 @@ cx_retire cx-tab
 check "or one titled with a longer id that merely starts the same" eval '[ "$status" -eq 1 ] && contains "does not show thread" && [ ! -s "$FAKE_LOG.killed" ]'
 tmux_pane %21 "$cx_title"
 for entrypoint in worker.sh codex-workers.sh; do
-  (cd "$rho" && env CLAUDE_PID="$p_rl" CLAUDE_CODE_SESSION_ID=rl-1 "$codexdir/$entrypoint" \
-    message cx-tab --replace '--literal direction') >"$work/direction.out" 2>&1 && status=0 || status=$?
-  check "$entrypoint forwards replacement and preserves a direction starting with dashes" \
-    eval '[ "$status" -eq 0 ] && grep -qx -- --replace "$FAKE_LOG.direction" &&
-          grep -qx -- "--literal direction" "$FAKE_LOG.direction"'
+  (cd "$rho" && env CLAUDE_PID="$p_rl" CLAUDE_CODE_SESSION_ID=rl-1 FAKE_DIRECTION_EXIT=4 "$codexdir/$entrypoint" \
+    message cx-tab '--literal direction') >"$work/direction.out" 2>&1 && status=0 || status=$?
+  check "$entrypoint preserves directions starting with dashes and propagates exit 4" \
+    eval '[ "$status" -eq 4 ] && grep -qx -- "--literal direction" "$FAKE_LOG.direction"'
   rm -f "$FAKE_LOG.direction"
 done
 out=$(cd "$rho" && env CLAUDE_PID="$p_rl" CLAUDE_CODE_SESSION_ID=rl-1 "$codexdir/worker.sh" status cx-tab) &&

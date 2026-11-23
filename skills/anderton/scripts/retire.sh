@@ -50,7 +50,7 @@ if [ "$(jq -r '.adopted // false' "$record")" = true ]; then
     fi
     if jq -e '.codexDirection != null or ((.codexDirections // []) | length > 0)' "$record" >/dev/null &&
       ! "$anderton_scripts/codex-worker.py" inactive "$record" --directions-only --prune; then
-      echo "Codex worker '$name' may have an undelivered direction. Inspect its thread before retiring." >&2
+      echo "Codex worker '$name' may have an undelivered direction. Check its status before retiring." >&2
       exit 1
     fi
   fi
@@ -148,7 +148,7 @@ EOF
     exit 1
   fi
   if ! "$scripts/codex-worker.py" inactive "$record" --prune; then
-    echo "Codex worker '$name' may still be running or have an undelivered direction. Inspect its thread before retiring." >&2
+    echo "Codex worker '$name' may still be running or have an undelivered direction. Check its status before retiring." >&2
     exit 1
   fi
 elif ! command -v claude >/dev/null 2>&1; then

@@ -184,12 +184,12 @@ the brief was submitted, resolve the startup issue, have the user close its tab,
 retire the worker, and retry.
 
 Steer a Codex worker with `scripts/worker.sh message <name> "<instruction>"`.
-Directions append to the registered thread's queue and run in order. Use
-`scripts/worker.sh message <name> --replace "<instruction>"` to queue the new
-direction and then drop older Anderton directions that are still queued. A
-running turn is untouched. If submission is reported as unconfirmed, retry
-the same command to reconcile the original submission. Read its status with
-`scripts/codex-workers.sh status <name>` and its recent assistant output with
+Directions and corrections append to the registered thread's queue and run in
+order. If `message` exits 4, check `scripts/worker.sh status <name>` for the
+direction ID printed by `message`. Status reports `queued`, `ran` (reached
+a turn), `never arrived`, or `still unconfirmed` on stderr. Resend only after status
+reports `never arrived` for that ID. For `still unconfirmed`, check status
+again before deciding. Read recent assistant output with
 `scripts/codex-workers.sh output <name>`. Inspect the worker's diff directly
 when reviewing. Its final
 `RESULT:`, `QUESTION:`, `BLOCKED:`, and `ANSWER:` replies wake you through

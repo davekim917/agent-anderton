@@ -23,7 +23,6 @@ class FakeCodex:
         self.latest = []
         self.queue = []
         self.adds = []
-        self.deletes = []
         self.checked_queue = False
         self.listings = []
         self.listed = []
@@ -50,12 +49,9 @@ class FakeCodex:
             self.adds.append(entry)
             self.queue.append(entry)
             return {"queuedSubmission": entry}
-        if method == "thread/queue/delete":
-            self.deletes.append(params)
-            queued = next((entry for entry in self.queue if entry["id"] == params["queuedSubmissionId"]), None)
-            if queued:
-                self.queue.remove(queued)
-            return {"deleted": queued is not None}
+        if method == "thread/resume":
+            self.info["status"] = {"type": "idle"}
+            return {"thread": self.info}
         assert method == "thread/read"
         if params["threadId"] in self.others:
             return {"thread": self.others[params["threadId"]]}
@@ -279,111 +275,119 @@ class WorkerTest(unittest.TestCase):
         self.client.turns[0]["status"] = "completed"
         self.assertTrue(worker_api.is_inactive(self.client, self.worker))
 
-    def test_definitively_rejected_replacement_keeps_the_older_queue(self):
+    def test_definitively_rejected_add_removes_only_its_entry(self):
         first = self.send("Keep this direction")
         original = self.client.call
 
         def reject_add(method, params):
             if method == "thread/queue/add":
-                saved = self.saved_directions()
-                self.assertEqual(first, saved[0])
-                self.assertEqual(params["clientUserMessageId"], saved[1]["clientUserMessageId"])
-                self.assertTrue(saved[1]["unconfirmed"])
+                prior, attempt = self.saved_directions()
+                self.assertEqual(first, prior)
+                self.assertTrue(attempt["unconfirmed"])
+                self.assertEqual(params["clientUserMessageId"], attempt["clientUserMessageId"])
                 raise worker_api.RequestRejected(method, {"code": -32600, "message": "invalid request"})
             return original(method, params)
 
         with patch.object(self.client, "call", side_effect=reject_add), self.assertRaises(worker_api.RequestRejected):
-            self.message_command("Replacement", "--replace")
+            self.message_command("Direction")
         self.assertEqual([first], self.saved_directions())
-        self.assertEqual([], self.client.deletes)
         self.assertEqual(self.client.adds, self.client.queue)
 
     def saved_directions(self):
         return json.loads(self.record.read_text())["codexDirections"]
 
-    @contextlib.contextmanager
-    def drop_reply(self, target):
+    def lose_add_reply(self, applied=True):
+        self.record.write_text(json.dumps(self.worker))
         original = self.client.call
 
         def drop(method, params):
-            result = original(method, params)
-            if method == target:
-                raise TimeoutError("reply lost after applying request")
-            return result
-
-        with patch.object(self.client, "call", side_effect=drop):
-            yield
-
-    def test_retry_reconciles_the_applied_add_without_a_second_copy(self):
-        with contextlib.redirect_stderr(io.StringIO()) as report, self.drop_reply("thread/queue/add"):
-            first = self.send("Direction")
-        self.assertIn("unconfirmed", report.getvalue())
-        self.assertTrue(first["unconfirmed"])
-        self.assertEqual(first["clientUserMessageId"], self.client.queue[0]["clientUserMessageId"])
-        retried = self.send("Direction")
-        self.assertEqual(first["id"], retried["id"])
-        self.assertFalse(retried.get("unconfirmed"))
-        self.assertEqual(1, len(self.client.adds))
-
-    def test_retry_waits_for_the_grace_period_when_add_never_arrived(self):
-        original = self.client.call
-
-        def lose_request(method, params):
             if method == "thread/queue/add":
-                raise TimeoutError("request never arrived")
+                saved = self.saved_directions()[-1]
+                self.assertTrue(saved["unconfirmed"])
+                self.assertEqual(params["clientUserMessageId"], saved["clientUserMessageId"])
+                if applied:
+                    original(method, params)
+                raise TimeoutError("add reply unavailable")
             return original(method, params)
 
-        with patch.object(worker_api.time, "time", return_value=1000):
-            with patch.object(self.client, "call", side_effect=lose_request):
-                first = self.send("Direction")
-            self.assertEqual(first, self.send("Direction"))
-            self.assertEqual([], self.client.adds)
-        with patch.object(worker_api.time, "time", return_value=1060), patch.object(worker_api.time, "sleep") as sleep:
-            retried = self.send("Direction")
-        sleep.assert_called_once_with(worker_api.DIRECTION_RECHECK_SECONDS)
-        self.assertNotEqual(first["id"], retried["id"])
+        with contextlib.redirect_stderr(io.StringIO()) as report, patch.object(self.client, "call", side_effect=drop):
+            self.assertEqual(4, self.message_command("Direction"))
+        first = self.saved_directions()[-1]
+        self.assertIn(f"Direction {first['id']} is unconfirmed", report.getvalue())
+        self.assertTrue(first["unconfirmed"])
+        self.worker = json.loads(self.record.read_text())
+        return first
+
+    def check_status_verdict(self, direction, verdict):
+        with contextlib.redirect_stderr(io.StringIO()) as report:
+            self.assertEqual(0, self.worker_command("state", "--prune"))
+        self.assertIn(f"Direction {direction['id']}: {verdict}.", report.getvalue())
+
+    def test_lost_add_reply_exits_four_and_status_reports_queued(self):
+        self.client.info["status"] = {"type": "notLoaded"}
+        first = self.lose_add_reply()
+        self.assertEqual(first["clientUserMessageId"], self.client.queue[0]["clientUserMessageId"])
+        self.check_status_verdict(first, "queued")
+        self.assertEqual("idle", self.client.info["status"]["type"])
+        saved, = self.saved_directions()
+        self.assertEqual(first["id"], saved["id"])
+        self.assertFalse(saved.get("unconfirmed"))
         self.assertEqual(1, len(self.client.adds))
 
-    def test_retry_reconciles_a_completed_unconfirmed_add(self):
-        with self.drop_reply("thread/queue/add"):
-            self.send("Direction")
+    def test_lost_add_reply_remains_visible_to_status_after_a_later_send(self):
+        first = self.lose_add_reply()
         self.start_direction(self.client.queue[0], "completed")
-        self.assertEqual(0, self.message_command("Direction"))
-        self.assertEqual([], self.saved_directions())
-        self.assertEqual(1, len(self.client.adds))
-
-    def test_status_reconciles_an_unconfirmed_add_by_queue_id(self):
-        with self.drop_reply("thread/queue/add"):
-            first = self.send("Direction")
-        self.assertEqual(0, self.worker_command("state", "--prune"))
-        saved, = self.saved_directions()
-        self.assertEqual(first["id"], saved["id"])
-        self.assertFalse(saved.get("unconfirmed"))
-        self.assertEqual(1, len(self.client.adds))
-
-    def test_inactive_reconciles_an_unconfirmed_add_by_turn_item_id(self):
-        with self.drop_reply("thread/queue/add"):
-            first = self.send("Direction")
-        self.start_direction(self.client.queue[0], "inProgress")
         self.assertEqual(1, self.worker_command("inactive", "--prune"))
-        saved, = self.saved_directions()
-        self.assertEqual(first["id"], saved["id"])
-        self.assertFalse(saved.get("unconfirmed"))
+        latest = self.send("Next direction")
+        self.assertEqual([first, latest], self.saved_directions())
+        self.check_status_verdict(first, "ran")
+        self.assertEqual([latest], self.saved_directions())
+
+    def test_status_reports_never_arrived_after_two_idle_looks_past_the_grace_period(self):
+        with patch.object(worker_api.time, "time", return_value=1000):
+            first = self.lose_add_reply(applied=False)
+            self.check_status_verdict(first, "still unconfirmed")
+        self.assertEqual([first], self.saved_directions())
+        with patch.object(worker_api.time, "time", return_value=1060), patch.object(worker_api.time, "sleep") as sleep:
+            self.check_status_verdict(first, "never arrived")
+        sleep.assert_called_once_with(worker_api.DIRECTION_RECHECK_SECONDS)
+        self.assertEqual([], self.saved_directions())
+        self.assertEqual([], self.client.adds)
+
+    def test_confirmed_send_resumes_unloaded_worker_before_reconciling_earlier_directions(self):
+        self.send("Earlier direction")
+        self.client.info["status"] = {"type": "notLoaded"}
+        calls = []
+        original_call = self.client.call
+
+        def call(method, params):
+            calls.append(method)
+            return original_call(method, params)
+
+        def fail_queue_listing(method, **_):
+            calls.append(method)
+            self.assertEqual("thread/queue/list", method)
+            raise TimeoutError("queue list unavailable")
+
+        with patch.object(self.client, "call", side_effect=call), patch.object(self.client, "pages", fail_queue_listing):
+            second = self.send("Next direction")
+        self.assertEqual(["thread/queue/add", "thread/resume", "thread/queue/list"], calls[-3:])
+        self.assertFalse(second.get("unconfirmed"))
 
     def worker_command(self, command, *options):
         with patch.object(worker_api.sys, "argv", ["codex-worker.py", command, str(self.record), *options]):
             return worker_api.main()
 
-    def send(self, text, *options):
+    def send(self, text):
         if not self.record.exists():
             self.record.write_text(json.dumps(self.worker))
-        self.assertEqual(0, self.message_command(text, *options))
+        self.assertEqual(0, self.message_command(text))
         self.worker = json.loads(self.record.read_text())
         return self.worker["codexDirections"][-1]
 
-    def message_command(self, text, *options):
+    def message_command(self, text):
         with patch.object(worker_api.sys, "argv", [
-            "codex-worker.py", "message", *options, str(self.record), "--", text,
+            "codex-worker.py", "message", str(self.record), "--", text,
         ]):
             return worker_api.main()
 
@@ -432,71 +436,6 @@ class WorkerTest(unittest.TestCase):
         self.assertNotIn("codexDirection", self.worker)
         self.assertEqual([{"id": "legacy", "clientUserMessageId": "legacy", "previousTurn": None, "sentAt": 1000}, new],
                          self.worker["codexDirections"])
-
-    def test_replace_leaves_running_and_unrelated_entries_alone(self):
-        running = self.send("Running")
-        self.start_direction(self.client.queue[0], "inProgress")
-        self.client.info["status"] = {"type": "active"}
-        self.send("Queued first")
-        self.send("Queued second")
-        targets = [entry["id"] for entry in self.client.queue]
-        self.client.queue.insert(1, {"id": "operator", "clientUserMessageId": "operator"})
-        new = self.send("Replacement", "--replace")
-        self.assertEqual([running, new], self.worker["codexDirections"])
-        self.assertEqual(targets, [request["queuedSubmissionId"] for request in self.client.deletes])
-        self.assertTrue(all(request["threadId"] == self.worker["id"] for request in self.client.deletes))
-        self.assertEqual(["operator", new["clientUserMessageId"]],
-                         [entry["clientUserMessageId"] for entry in self.client.queue])
-
-    def test_replace_adds_first_and_reconciles_an_applied_delete_without_its_reply(self):
-        first = self.send("Older direction")
-        with self.drop_reply("thread/queue/delete"):
-            replacement = self.send("Replacement", "--replace")
-        self.assertEqual([first["id"], replacement["id"]], [entry["id"] for entry in self.saved_directions()])
-        self.assertEqual([replacement["clientUserMessageId"]],
-                         [entry["clientUserMessageId"] for entry in self.client.queue])
-        with patch.object(worker_api.time, "sleep"):
-            self.assertEqual(0, self.worker_command("state", "--prune"))
-        self.assertEqual([replacement["id"]], [entry["id"] for entry in self.saved_directions()])
-        self.assertEqual(2, len(self.client.adds))
-
-    def test_replace_waits_for_confirmation_of_an_add_whose_reply_was_lost(self):
-        first = self.send("Older direction")
-        with self.drop_reply("thread/queue/add"):
-            replacement = self.send("Replacement", "--replace")
-        self.assertTrue(replacement["unconfirmed"])
-        self.assertEqual([], self.client.deletes)
-        self.assertEqual(2, len(self.client.queue))
-
-        retried = self.send("Replacement", "--replace")
-        self.assertEqual(replacement["id"], retried["id"])
-        self.assertEqual([replacement["id"]], [entry["id"] for entry in self.saved_directions()])
-        self.assertEqual(first["clientUserMessageId"], self.client.adds[0]["clientUserMessageId"])
-        self.assertEqual(2, len(self.client.adds))
-        self.assertEqual(1, len(self.client.deletes))
-
-    def test_inactive_prunes_a_finished_replacement_with_a_lost_add_reply(self):
-        self.send("Older direction")
-        with self.drop_reply("thread/queue/add"):
-            self.send("Replacement", "--replace")
-        while self.client.queue:
-            self.start_direction(self.client.queue[0], "completed")
-        self.assertEqual(0, self.worker_command("inactive", "--prune"))
-        self.assertEqual([], self.saved_directions())
-
-    def test_replace_keeps_a_direction_that_starts_between_list_and_delete(self):
-        starting = self.send("About to start")
-        original = self.client.call
-
-        def start_before_delete(method, params):
-            if method == "thread/queue/delete":
-                self.start_direction(self.client.queue[0], "inProgress")
-                self.client.info["status"] = {"type": "active"}
-            return original(method, params)
-
-        with patch.object(self.client, "call", side_effect=start_before_delete):
-            new = self.send("Replacement", "--replace")
-        self.assertEqual([starting, new], self.worker["codexDirections"])
 
     def test_a_direction_whose_turn_is_starting_is_not_lost(self):
         self.worker["codexDirection"] = {"id": "starting-id", "previousTurn": "previous", "sentAt": 1000}
