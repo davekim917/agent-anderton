@@ -61,7 +61,7 @@ scope_files() {
 }
 
 inside() {
-  local wt common gitdir path options bun bun_version
+  local wt common gitdir path options guard bun bun_version deadline hook_timeout
   # The caller's PATH chose nothing so far; every tool below is named by its path.
   [ "$(/usr/bin/tr -d '\0' < /proc/1/comm 2>/dev/null)" = bwrap ] || die "--inside runs only as bwrap's child."
   case ,$(/usr/bin/findmnt -rn -o OPTIONS --mountpoint / | /usr/bin/head -n 1), in *,ro,*) ;; *) die "/ is not read-only here." ;; esac
@@ -74,6 +74,17 @@ inside() {
     die "$gemini/config/hooks.json is not the guard registration install-agy.sh wrote."
   [ "$(sha256 "$base/libexec/agy-guard-hook")" = "$(pinned hook_sha256)" ] ||
     die "$base/libexec/agy-guard-hook is not the hook install-agy.sh wrote."
+  # The hook can decide only with all of these; without one, the wrapper denies every call or agy never runs it.
+  guard=$(pinned guard)
+  for path in /bin/bash "$guard/.complete" "$guard/agy-guard.sh" "$guard/agy-guard.ts" "$guard/agy-supervisor.ts"; do
+    [ -f "$path" ] || die "$path is missing, so the guard hook cannot decide; rerun install-agy.sh."
+  done
+  # agy cuts the hook off at its registered timeout with no deny, so the supervisor's deadline must come first, with
+  # room to print its own. The registration's bytes were checked above.
+  deadline=$(/usr/bin/sed -n 's/^export const WATCHDOG_SECONDS = \([0-9][0-9]*\);$/\1/p' "$guard/agy-supervisor.ts" | /usr/bin/head -n 1)
+  hook_timeout=$(/usr/bin/sed -n 's/.*"timeout":\([0-9][0-9]*\).*/\1/p' "$gemini/config/hooks.json" | /usr/bin/head -n 1)
+  [ -n "$deadline" ] && [ -n "$hook_timeout" ] && [ "$deadline" -gt 3600 ] && [ "$deadline" -le $((hook_timeout - 10)) ] ||
+    die "the guard supervisor's deadline (${deadline:-none}) is not above the 3600-second approval wait and 10 seconds under the hook timeout (${hook_timeout:-none})."
   # The guard wrapper runs "bun" from the hook's PATH, whose first directory must hold only the pinned copy, where the
   # worker cannot replace it.
   bun="$base/hookbin/bun"
@@ -88,6 +99,8 @@ inside() {
     [ $(( 10#${BASH_REMATCH[1]} * 1000000 + 10#${BASH_REMATCH[2]} * 1000 + 10#${BASH_REMATCH[3]} )) -lt 1003003 ]; then
     die "the guard hook's bun (${bun_version:-missing}) is not a release at or above 1.3.3, so it would deny every call."
   fi
+  # Without a stored login agy starts its own sign-in, which only the owner may complete.
+  [ -s "$state/antigravity-oauth-token" ] || die "agy has no stored login ($state/antigravity-oauth-token); the owner signs in first."
   for path in "$gemini/hooks.json" "$state/hooks.json"; do
     case $(/usr/bin/tr -d '[:space:]' < "$path") in '' | '{}') ;; *) die "$path defines hooks; only $gemini/config/hooks.json may." ;; esac
   done
@@ -136,6 +149,15 @@ refuse_workspace_config() {
 if [ "${1:-}" = --inside ]; then
   shift
   inside "$@"
+fi
+
+# spawn.sh names a new file for this launcher to create with its pid, which exec keeps through to bwrap: with the pane's
+# process tree and bwrap's namespace, it proves to spawn.sh that this launcher, not some other agy on PATH, started.
+launch_file=""
+if [ "${1:-}" = --anderton-launch-file ]; then
+  [ $# -ge 2 ] || die "--anderton-launch-file needs a path."
+  launch_file=$2
+  shift 2
 fi
 
 [ "$(uname -s)" = Linux ] || die "Linux only."
@@ -373,6 +395,9 @@ if [ -n "$token_file" ] && [ -r "$token_file" ]; then
   env+=("GH_TOKEN=$(tr -d '[:space:]' < "$token_file")")
 fi
 
+if [ -n "$launch_file" ]; then
+  (set -C && printf '%s\n' "$$" > "$launch_file") 2>/dev/null || die "could not create $launch_file; it may belong to an earlier launch."
+fi
 # A directory descriptor inherited from outside would reach the host's writable view of a protected path, so every
 # descriptor above stderr is closed in the process that becomes bwrap. bash cannot do it itself: it keeps the script open.
 exec python3 -I -c 'import os, sys; os.closerange(3, 1 << 30); os.execvp(sys.argv[1], sys.argv[1:])' \

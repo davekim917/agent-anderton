@@ -40,6 +40,48 @@ fi
 if [ "$(record_provider "$record")" = codex ]; then
   exec "$anderton_scripts/codex-workers.sh" "$@"
 fi
+if [ "$(record_provider "$record")" = agy ]; then
+  pane=$(jq -r '.pane // empty' "$record")
+  socket=$(jq -r '.socket // empty' "$record")
+  case $action in
+    status)
+      agy_check "$record"
+      jq -n --arg pane "$pane" --arg state "$agy_state" --arg status "$agy_status" \
+        '{pane: $pane, worker: $state, status: (if $status == "" then null else $status end)}'
+      ;;
+    output)
+      agy_check "$record"
+      if [ "$agy_state" != running ]; then
+        echo "agy worker '$name' is not running in its pane $pane, so there is no screen to read." >&2
+        exit 1
+      fi
+      # agy keeps no transcript these scripts read yet, so its replies come from the terminal.
+      echo "Screen read of herdr pane $pane (recent output, not a transcript):"
+      HERDR_SOCKET_PATH="$socket" herdr agent read "$pane" --source recent --lines 200
+      ;;
+    message)
+      [ -n "$3" ] || usage
+      take_repository_lock "$root"
+      lock_worker "$record"
+      if ! caller_matches_claim "$role" || ! worker_belongs "$record" "$root" "$role"; then
+        echo "This Anderton no longer holds worker '$name'." >&2
+        exit 1
+      fi
+      agy_check "$record"
+      # The pane must show the agy instance spawn.sh verified, and its launcher must still be alive just before the send.
+      if [ "$agy_state" != running ] || ! agy_launcher_alive "$record"; then
+        echo "agy worker '$name' is not running in its pane $pane, so the direction was not sent." >&2
+        exit 1
+      fi
+      if ! out=$(HERDR_SOCKET_PATH="$socket" herdr agent prompt "$pane" "$3" 2>&1); then
+        echo "herdr did not take the direction for agy worker '$name': $out" >&2
+        exit 1
+      fi
+      echo "Sent the direction to agy worker '$name' in pane $pane."
+      ;;
+  esac
+  exit 0
+fi
 if [ "$action" = output ]; then
   exec "$anderton_scripts/claude-worker.py" output "$record"
 fi

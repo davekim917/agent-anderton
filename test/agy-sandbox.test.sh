@@ -65,6 +65,8 @@ install_root "$prefixroot/opt" >/dev/null || fail "the root stage failed with th
 chmod 0755 "$home"
 [ -z "$(ls -A "$home")" ] || fail "the root stage wrote in the home: $(ls -A "$home")"
 HOME="$home" "$scripts/register-agy.sh" --prefix "$prefixroot/opt" >/dev/null
+# The owner's login leaves this file; the launcher refuses to start agy without it.
+echo example-token > "$home/.gemini/antigravity-cli/antigravity-oauth-token"
 
 # The registration outlasts the supervisor's deadline and runs a hook that names the files that tighten the guard, which
 # the installed copy cannot find; the dev and lab scopes, which only exempt commands from approval, are set empty so
@@ -242,6 +244,25 @@ done
   fail "a write to the worker's ~/.cache reached the host's"
 ls "$home"/.cache/anderton-agy/*/cache/pre-commit-example >/dev/null 2>&1 || fail "the worker's private cache kept nothing"
 
+# The pid the launcher writes to the file spawn.sh names is its bwrap, with the sandbox in a child of it, started from
+# the pane herdr placed it in: what spawn.sh proves before it sends a brief.
+launch="$work/launch.pid"
+# shellcheck disable=SC2016 # expanded by the inner bash
+(cd "$work/wt-example" && env -i HOME="$home" PATH=/usr/bin:/bin HERDR_PANE_ID=w9:p5 HERDR_SOCKET_PATH="$work/herdr.sock" \
+  bash -c '"$0" --anderton-launch-file "$1" "sleep 30"; true' "$agy" "$launch") >/dev/null 2>&1 &
+launcher=$!
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [ -s "$launch" ] && [ -n "$(cat "/proc/$(cat "$launch")/task/"*/children 2>/dev/null)" ] && break
+  sleep 0.25
+done
+pinned_bwrap=$(sed -n 's/^bwrap=//p' "$prefixroot/opt/agy/etc/pin")
+# shellcheck disable=SC1091 # the script under test, sourced at run time
+proven() { (. "$scripts/session-lib.sh" && agy_sandbox_proven "$(cat "$launch")" "$pinned_bwrap" "$1" "$work/herdr.sock"); }
+proven w9:p5 || fail "the launcher's recorded pid is not proven to be its sandbox in its pane"
+if proven w9:p6; then fail "the launcher's sandbox was proven for a pane it did not start in"; fi
+kill "$launcher" 2>/dev/null || true
+wait "$launcher" 2>/dev/null || true
+
 # The checks inside the namespace refuse to start agy when the guard could be off.
 refuses() {
   local why=$1 want=$2 got
@@ -410,6 +431,18 @@ for old in 1.3.2 1.3.3-canary.1 v1.4.2; do
 done
 cp "$work/bun.saved" "$prefixroot/opt/agy/hookbin/bun"
 cp "$work/pin.saved" "$prefixroot/opt/agy/etc/pin"
+installed_guard=$(sed -n 's/^guard=//p' "$prefixroot/opt/agy/etc/pin")
+cp "$installed_guard/agy-supervisor.ts" "$work/supervisor.saved"
+rm "$installed_guard/agy-supervisor.ts"
+refuses "the installed guard lacks the supervisor its wrapper execs" "agy-supervisor.ts is missing"
+printf 'export const WATCHDOG_SECONDS = 3655;\n' > "$installed_guard/agy-supervisor.ts"
+refuses "the installed supervisor's deadline is too close to the hook timeout" "is not above the 3600-second approval wait"
+cp "$work/supervisor.saved" "$installed_guard/agy-supervisor.ts"
+mv "$home/.gemini/antigravity-cli/antigravity-oauth-token" "$work/token.saved"
+refuses "agy has no stored login" "no stored login"
+: > "$home/.gemini/antigravity-cli/antigravity-oauth-token"
+refuses "agy's stored login is empty" "no stored login"
+mv "$work/token.saved" "$home/.gemini/antigravity-cli/antigravity-oauth-token"
 run true >/dev/null 2>&1 || fail "the launcher did not start again once the hook config was restored"
 
 # A listening socket outside the usual places, standing in for a tmux or herdr server on a custom path.

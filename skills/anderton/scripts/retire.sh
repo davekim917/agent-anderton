@@ -22,7 +22,7 @@ fi
 provider=$(jq -r '.provider // "claude"' "$record")
 mixed=""
 if [ "$(invoking_provider)" = codex ] || [ "$(jq -r '.spawnerProvider // "claude"' "$record")" = codex ]; then mixed=1; fi
-if [ "$provider" = codex ] || [ -n "$mixed" ] ||
+if [ "$provider" = codex ] || [ "$provider" = agy ] || [ -n "$mixed" ] ||
   jq -e '.claudeLaunchId != null' "$record" >/dev/null 2>&1; then
   take_repository_lock "$(invoking_root)"
   lock_worker "$record"
@@ -39,7 +39,7 @@ server=$(jq -r '.server // empty' "$record")
 label=$(jq -r '.label // empty' "$record")
 label=${label:-$name}
 
-if [ -n "$mixed" ] && ! worker_belongs "$record" "$(invoking_root)" "$(caller_claim "$(invoking_root)")"; then
+if { [ -n "$mixed" ] || [ "$provider" = agy ]; } && ! worker_belongs "$record" "$(invoking_root)" "$(caller_claim "$(invoking_root)")"; then
   echo "This Anderton does not own worker '$name'." >&2
   exit 1
 fi
@@ -109,7 +109,7 @@ EOF
     echo "Codex worker '$name' may still be running or have an undelivered direction. Check its status before retiring." >&2
     exit 1
   fi
-elif ! command -v claude >/dev/null 2>&1; then
+elif [ "$provider" != agy ] && ! command -v claude >/dev/null 2>&1; then
   echo "retire.sh needs the claude CLI to stop '$name' first." >&2
   exit 1
 fi
@@ -154,6 +154,55 @@ if [ "$launcher" != bg ] && [ "$provider" = codex ]; then
   # The record names one home's daemon; the thread may have been opened on another account's since.
   if [ -n "$id" ] && held=$(codex_thread_home "$id") && [ "$held" != "$(cd "$(jq -r .codexHome "$record")" 2>/dev/null && pwd -P)" ]; then
     echo "'$name' (Codex $id) is open on $held's daemon, not the home its record names; kept its worktree and record." >&2
+    exit 1
+  fi
+elif [ "$provider" = agy ]; then
+  # Host git below reads a worktree the worker wrote: refuse one that no longer points at its repository, and run
+  # git with none of the helpers a repository can name.
+  if [ "$worktree" = true ] && [ -e "$dir" ] && ! agy_git_pointer_ok "$record"; then
+    echo "agy worker '$name': $dir/.git no longer points into the repository it was started from, so host git will not read it. Inspect it, then remove the worktree by hand." >&2
+    exit 1
+  fi
+  agy_git_safe
+  # Only the recorded pane is closed, only while the launcher spawn.sh verified runs the same agy instance there, and
+  # only after one more check of that launcher just before the close.
+  agy_check "$record"
+  case $agy_state in
+    running)
+      case $agy_status in
+        idle | done) ;;
+        *) echo "agy worker '$name' is not idle (herdr says: ${agy_status:-nothing}). Retire it once it is." >&2; exit 1 ;;
+      esac
+      agy_launcher_alive "$record" || { echo "agy worker '$name' stopped while retiring; rerun." >&2; exit 1; }
+      HERDR_SOCKET_PATH="$socket" herdr pane close "$pane" >/dev/null 2>&1 || true
+      ;;
+    stopped)
+      # Its launcher has exited; whatever the pane shows now is someone else's, and may be working in the worktree.
+      case $agy_cwd in
+        "$dir" | "$dir"/*)
+          echo "agy worker '$name' has stopped, but herdr pane $pane now runs ${agy_agent:-something} in $dir; kept its worktree and record." >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    elsewhere)
+      echo "agy worker '$name' still runs, but its herdr pane $pane does not show it as recorded (moved, or herdr cannot say). Close it yourself, then rerun." >&2
+      exit 1
+      ;;
+    *)
+      # A start that timed out leaves no launcher in the record. Once the pane is gone, nothing of it remains.
+      if ! agy_unlaunched_gone "$record"; then
+        echo "The record for agy worker '$name' names no launcher, and its pane ${pane:-(none recorded)} or a process in $dir is still there. Close the pane, then rerun." >&2
+        exit 1
+      fi
+      ;;
+  esac
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    agy_launcher_alive "$record" || break
+    sleep 0.5
+  done
+  if agy_launcher_alive "$record"; then
+    echo "Could not confirm agy worker '$name' stopped (herdr pane $pane); kept its worktree and record." >&2
     exit 1
   fi
 elif [ "$launcher" != bg ] && [ -n "$mixed" ] && [ -n "$pane" ]; then
@@ -212,13 +261,13 @@ if [ "$worktree" = true ] && [ -d "$dir" ]; then
     flagged) echo "Stopped '$name'. Kept $dir: git marks files in it assume-unchanged or skip-worktree (as a sparse checkout does), so status cannot show their edits. Remove it yourself once nothing in it needs keeping."; exit 3 ;;
     unreadable) echo "Stopped '$name'. Kept $dir: git could not read its status or compare it with its base and remotes."; exit 3 ;;
   esac
-  git -C "$root" worktree remove "$dir"
+  git_for_worktree -C "$root" worktree remove "$dir"
 fi
 if [ "$launcher" = bg ] && ! claude rm "$id" >/dev/null 2>&1; then
   echo "Stopped '$name' and removed its worktree, but claude rm $id failed; kept the record. Rerun to finish." >&2
   exit 1
 fi
-rm -f "$record"
+rm -f "$record" "${record%.json}.agy-launch"
 # Earlier versions kept a last-report file beside each worker record.
 find "$holders/workers" -maxdepth 1 -name '*.last-report' -exec rm -f {} + 2>/dev/null || true
 echo "Retired '$name'."

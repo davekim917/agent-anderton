@@ -706,6 +706,135 @@ place_state() {
   esac
 }
 
+# Where install-agy.sh put agy, its launcher and its pin.
+agy_root() {
+  printf '%s\n' "${ANDERTON_AGY_ROOT:-/opt/agy}"
+}
+
+# True when process $1 is agy's sandbox started in herdr pane $3 of server $4: it runs the bwrap install-agy.sh pinned
+# ($2), so does a child of it, in a mount namespace other than this one, and the nearest ancestor herdr placed in a
+# pane (the launcher's environment is cleared, so the search starts at the process itself) is in that pane.
+agy_sandbox_proven() { # agy_sandbox_proven <pid> <bwrap> <pane> <socket>
+  local pid=$1 own child children child_mnt found="" p environment _
+  [ -n "$2" ] && [ "$(readlink "/proc/$pid/exe" 2>/dev/null)" = "$2" ] || return 1
+  own=$(readlink /proc/self/ns/mnt) || return 1
+  children=$(cat "/proc/$pid"/task/*/children 2>/dev/null) || children=""
+  for child in $children; do
+    child_mnt=$(readlink "/proc/$child/ns/mnt" 2>/dev/null) || child_mnt=""
+    if [ "$(readlink "/proc/$child/exe" 2>/dev/null)" = "$2" ] && [ -n "$child_mnt" ] && [ "$child_mnt" != "$own" ]; then
+      found=1
+    fi
+  done
+  [ -n "$found" ] || return 1
+  p=$pid
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    environment=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null) || return 1
+    if printf '%s\n' "$environment" | grep -q '^HERDR_PANE_ID='; then
+      printf '%s\n' "$environment" | grep -qxF "HERDR_PANE_ID=$3" || return 1
+      ! printf '%s\n' "$environment" | grep -q '^HERDR_SOCKET_PATH=' ||
+        printf '%s\n' "$environment" | grep -qxF "HERDR_SOCKET_PATH=$4"
+      return
+    fi
+    p=$(sed 's/.*) //' "/proc/$p/stat" 2>/dev/null | cut -d' ' -f2) || return 1
+    case $p in '' | 0 | 1) return 1 ;; esac
+  done
+  return 1
+}
+
+# True while the launcher process agy worker record $1 names is the one spawn.sh verified: same pid, same start.
+agy_launcher_alive() {
+  local pid start
+  pid=$(jq -r '.agyPid // empty' "$1" 2>/dev/null) || pid=""
+  start=$(jq -r '.agyProcStart // empty' "$1" 2>/dev/null) || start=""
+  [ -n "$pid" ] && [ -n "$start" ] && process_start_matches "$pid" "$start"
+}
+
+# Where agy worker record $1 stands, read from its launcher process and one herdr snapshot of its pane. Sets:
+#   agy_state: running (that launcher is alive, and herdr shows the agy instance spawn.sh verified in the pane, in the
+#     worktree), stopped (the launcher has exited), elsewhere (it is alive, but the pane is gone or shows something else)
+#     or unknown (the record names no launcher);
+#   agy_status: herdr's status for the pane (idle, working, blocked, done), or nothing;
+#   agy_agent, agy_cwd: what that snapshot shows in the pane, or nothing.
+# shellcheck disable=SC2034 # the scripts that source this file read what it sets
+agy_check() {
+  local socket pane dir instance out got_instance got_pane
+  agy_state=unknown agy_status="" agy_agent="" agy_cwd=""
+  socket=$(jq -r '.socket // empty' "$1") pane=$(jq -r '.pane // empty' "$1") dir=$(jq -r '.dir // empty' "$1")
+  instance=$(jq -r '.agyInstance // empty' "$1")
+  if [ -n "$socket" ] && [ -n "$pane" ] && command -v herdr >/dev/null 2>&1 &&
+    out=$(HERDR_SOCKET_PATH="$socket" herdr agent get "$pane" 2>/dev/null); then
+    # A separator that is not whitespace, so an empty field stays a field.
+    IFS=$'\x1f' read -r agy_agent agy_status agy_cwd got_instance got_pane <<EOF
+$(printf '%s' "$out" | jq -r '(.result.agent // .result) | [.agent // "", .agent_status // "", .cwd // "", (.agent_session.value // "" | tostring), .pane_id // ""] | join("\u001f")' 2>/dev/null)
+EOF
+  else
+    got_instance="" got_pane=""
+  fi
+  if [ -z "$(jq -r '.agyPid // empty' "$1")" ]; then return 0; fi
+  if ! agy_launcher_alive "$1"; then
+    agy_state=stopped
+  elif [ "$got_pane" = "$pane" ] && [ "$agy_agent" = agy ] && { [ "$agy_cwd" = "$dir" ] || case $agy_cwd in "$dir"/*) true ;; *) false ;; esac; } &&
+    { [ -z "$instance" ] || [ "$got_instance" = "$instance" ]; }; then
+    agy_state=running
+  else
+    agy_state=elsewhere
+  fi
+}
+
+# True when agy worker record $1, which names no launcher, cannot still be running: herdr says its pane is gone, any
+# launcher the launch file names has exited, and no process of this user has a directory inside its worktree.
+agy_unlaunched_gone() {
+  local socket pane dir launched cwd proc out
+  socket=$(jq -r '.socket // empty' "$1") pane=$(jq -r '.pane // empty' "$1") dir=$(jq -r '.dir // empty' "$1")
+  [ -n "$socket" ] && [ -n "$pane" ] && [ -n "$dir" ] || return 1
+  # herdr exits non-zero for a missing pane, which pipefail would read as a failed check.
+  out=$(HERDR_SOCKET_PATH="$socket" herdr pane get "$pane" 2>&1) || true
+  printf '%s' "$out" | jq -e '.error.code == "pane_not_found"' >/dev/null 2>&1 || return 1
+  launched=$(cat "${1%.json}.agy-launch" 2>/dev/null) || launched=""
+  case $launched in '' | *[!0-9]*) ;; *) [ ! -e "/proc/$launched" ] || return 1 ;; esac
+  for proc in /proc/[0-9]*; do
+    cwd=$(readlink "$proc/cwd" 2>/dev/null) || continue
+    case $cwd in "$dir" | "$dir"/*) return 1 ;; esac
+  done
+  return 0
+}
+
+# Host git over a worktree an agy worker wrote runs none of the helpers a repository can name: no fsmonitor, no hooks,
+# no untracked cache read from the index it wrote. agy_git_safe turns that on for this shell; the git calls on such a
+# worktree go through git_for_worktree, so it reaches nothing else.
+agy_git_safe() {
+  agy_safe_git=1
+}
+git_for_worktree() {
+  if [ -n "${agy_safe_git:-}" ]; then
+    git -c core.fsmonitor= -c core.hooksPath=/dev/null -c core.untrackedCache=false "$@"
+  else
+    git "$@"
+  fi
+}
+
+# True when agy worker record $1's worktree still belongs to the repository spawn.sh recorded: its .git is a plain file
+# naming a git directory under that repository's worktrees, whose commondir leads back to the repository. The sandbox
+# keeps both read-only; this check is for anything that changed them outside it.
+agy_git_pointer_ok() {
+  local dir common line gitdir back root
+  dir=$(jq -r '.dir // empty' "$1") common=$(jq -r '.agyCommon // empty' "$1") root=$(jq -r '.root // empty' "$1")
+  # A record from before agyCommon was kept: the repository it was started from says where its common directory is.
+  if [ -z "$common" ] && [ -n "$root" ]; then
+    common=$(cd "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P) || common=""
+  fi
+  [ -n "$dir" ] && [ -n "$common" ] && [ -f "$dir/.git" ] && [ ! -L "$dir/.git" ] || return 1
+  IFS= read -r line < "$dir/.git" || return 1
+  case $line in 'gitdir: '?*) gitdir=${line#gitdir: } ;; *) return 1 ;; esac
+  case $gitdir in /*) ;; *) gitdir="$dir/$gitdir" ;; esac
+  gitdir=$(cd "$gitdir" 2>/dev/null && pwd -P) || return 1
+  case $gitdir in "$common"/worktrees/?*) ;; *) return 1 ;; esac
+  [ -f "$gitdir/commondir" ] && [ ! -L "$gitdir/commondir" ] || return 1
+  IFS= read -r back < "$gitdir/commondir" || return 1
+  case $back in /*) ;; *) back="$gitdir/$back" ;; esac
+  [ "$(cd "$back" 2>/dev/null && pwd -P)" = "$common" ]
+}
+
 # True once worker $4's tab or window ($1 herdr|tmux, socket $2, id $3, tmux server pid $5) is absent from its
 # server, waiting up to 5 seconds, and no session named $4 is listed. A worker held at a startup prompt never
 # registers, so the session list alone would call it gone while its tab or window still runs.
@@ -728,7 +857,7 @@ worker_record() {
   fi
   f="$holders/workers/$1.json"
   if [ -n "$1" ] && [ -f "$f" ]; then
-    if [ "$(record_provider "$f")" = codex ]; then return 0; fi
+    case $(record_provider "$f") in codex | agy) return 0 ;; esac
     dir=$(jq -r '.dir // empty' "$f" 2>/dev/null || true)
     case $2 in
       "$dir" | "$dir"/*)
@@ -753,13 +882,13 @@ is_worker() {
 # command that fails is never read as "nothing to keep".
 worktree_work() {
   local out
-  out=$(git -C "$1" status --porcelain --untracked-files=normal 2>/dev/null) || { echo unreadable; return; }
+  out=$(git_for_worktree -C "$1" status --porcelain --untracked-files=normal 2>/dev/null) || { echo unreadable; return; }
   if [ -n "$out" ]; then echo uncommitted; return; fi
   # Status hides edits to a file tagged assume-unchanged (lower case in ls-files -v) or skip-worktree (S), and removal
   # deletes them. Only the tags are read, never the paths, and every reader takes its whole input.
-  out=$(set -o pipefail; git -C "$1" ls-files -v 2>/dev/null | cut -c1 | LC_ALL=C sort -u) || { echo unreadable; return; }
+  out=$(set -o pipefail; git_for_worktree -C "$1" ls-files -v 2>/dev/null | cut -c1 | LC_ALL=C sort -u) || { echo unreadable; return; }
   case $out in *[abcdefghijklmnopqrstuvwxyzS]*) echo flagged; return ;; esac
-  out=$(git -C "$1" rev-list -1 HEAD --not --remotes "$2" 2>/dev/null) || { echo unreadable; return; }
+  out=$(git_for_worktree -C "$1" rev-list -1 HEAD --not --remotes "$2" 2>/dev/null) || { echo unreadable; return; }
   if [ -n "$out" ]; then echo unpushed; fi
 }
 
