@@ -91,7 +91,7 @@ if [ "$action" = status ]; then
   jq '{sessionId, status, waitingFor, cwd}' "$reg"
   exit 0
 fi
-if [ "$(invoking_provider)" != codex ]; then
+if [ "$(invoking_provider)" = claude ]; then
   echo "Use Claude Code SendMessage to the verified Claude session in this registry entry: $reg" >&2
   exit 2
 fi

@@ -187,7 +187,7 @@ load_session
 root=$(invoking_root)
 caller_holds_role "$root" || refuse "Only the session holding an Anderton role in this project may inspect a prompt."
 [ "$(project_root "${cwd:-/}")" = "$root" ] || refuse "$name is in another project."
-if [ "$(invoking_provider)" = codex ]; then
+if [ "$(invoking_provider)" != claude ]; then
   worker="$holders/workers/$name.json"
   case $name in '' | -* | *[!a-z0-9-]*) refuse "Expected an owned worker name." ;; esac
   if [ ! -f "$worker" ] || [ "$(live_claude_worker "$worker")" != "$reg" ] ||

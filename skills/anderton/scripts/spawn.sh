@@ -149,7 +149,7 @@ if [ -n "$role" ]; then
   role_scope=$(jq -r '.scope // empty' "$role")
   role_claim=$(jq -r '.claimId // empty' "$role")
 fi
-if [ "$caller_provider" = codex ]; then
+if [ "$caller_provider" != claude ]; then
   me=$(claim_name "${role:-/dev/null}")
 else
   me=$(jq -r '.name // empty' "$sessions/$pid.json" 2>/dev/null || true)
@@ -159,14 +159,14 @@ if [ -z "$me" ]; then
   exit 1
 fi
 
-if [ -z "$role" ] && { [ "$provider" != claude ] || [ "$caller_provider" = codex ]; }; then
+if [ -z "$role" ] && { [ "$provider" != claude ] || [ "$caller_provider" != claude ]; }; then
   echo "Only the Anderton holding this repository or project can start this worker." >&2
   exit 1
 fi
 
 # A peer in another permission mode holds this session's messages for its user's approval, so the worker
 # runs in this session's mode, which its transcript records on each prompt.
-if [ "$provider" = claude ] && [ -z "$mode" ] && [ "$caller_provider" = codex ]; then
+if [ "$provider" = claude ] && [ -z "$mode" ] && [ "$caller_provider" != claude ]; then
   mode=default
 elif [ "$provider" = claude ] && [ -z "$mode" ]; then
   for t in "$home"/projects/*/"$sid".jsonl; do
@@ -175,10 +175,10 @@ elif [ "$provider" = claude ] && [ -z "$mode" ]; then
     break
   done
 fi
-if [ "$provider" = claude ] && [ "$caller_provider" = codex ]; then
+if [ "$provider" = claude ] && [ "$caller_provider" != claude ]; then
   case $mode in
     default | acceptEdits | plan) ;;
-    *) echo "Claude workers under Codex use default, acceptEdits, or plan permission mode." >&2; exit 2 ;;
+    *) echo "Claude workers under a $caller_provider Anderton use default, acceptEdits, or plan permission mode." >&2; exit 2 ;;
   esac
 fi
 if [ "$provider" = claude ] && [ -z "$mode" ]; then
@@ -229,7 +229,7 @@ fi
 
 report_instructions="- Message \"$me\" by SendMessage"
 report_footer="  Never send acknowledgements, \"still waiting\" or \"holding\", restated instructions, or FYIs that change nothing: each message wakes \"$me\" and re-reads its whole context. A hook holds any message to \"$me\" without one of those four kinds, or one that repeats your last. Nobody reads this session, so a question left only in your reply is never answered."
-if [ "$provider" != claude ] || [ "$caller_provider" = codex ]; then
+if [ "$provider" != claude ] || [ "$caller_provider" != claude ]; then
   report_instructions="- Put each milestone in your final reply. Anderton reads those replies"
   report_footer="  Skip acknowledgements, \"still waiting\" or \"holding\", restated instructions, and repeated reports. Each report wakes \"$me\"."
 fi
@@ -268,7 +268,7 @@ write_launch_record() {
       + if $role != "" then {spawnerProvider: $spawner_provider, spawnerScope: (if $spawner_scope == "" then null else $spawner_scope end)}
           + (if $spawner_claim != "" then {spawnerClaimId: $spawner_claim} else {} end) else {} end
       + if $provider == "claude" then {claudeLaunchId: $claude_launch} else {} end
-      + if $provider == "claude" and $spawner_provider == "codex" then {reportTransport: "transcript"} else {} end
+      + if $provider == "claude" and $spawner_provider != "claude" then {reportTransport: "transcript"} else {} end
       + if $provider == "codex" then {provider: $provider, codexHome: $codex, codexLaunchedAt: ($launched | tonumber), codexLaunchToken: $token} else {} end
       + if $provider == "agy" then {provider: $provider} + if $agy_instance != "" then {agyInstance: $agy_instance} else {} end
         else {} end' > "$updated" || return 1
@@ -336,7 +336,7 @@ elif [ "$provider" = agy ]; then
 agy would run unguarded, so no agy worker was started."
 else
   set -- -n "$name" --permission-mode "$mode" --effort "$effort" --model "${model:-opus}" --session-id "$claude_launch"
-  if [ "$caller_provider" = codex ]; then
+  if [ "$caller_provider" != claude ]; then
     set -- "$@" --plugin-dir "$(cd "$anderton_scripts/../../.." && pwd)"
   fi
 fi

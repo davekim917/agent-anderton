@@ -18,7 +18,7 @@ set -euo pipefail
 require_tools claim.sh
 
 sid=$(invoking_session)
-[ -n "$sid" ] || { echo "Run claim.sh from the designated Claude Code or Codex session." >&2; exit 1; }
+[ -n "$sid" ] || { echo "Run claim.sh from the designated Claude Code, Codex or agy session." >&2; exit 1; }
 usage="usage: claim.sh [--project <name>] [--take-over | --rebind] [--probe <command> [--probe-every <seconds>] | --no-probe]"
 force="" scope="" rebind="" probe="" every="" probe_set=""
 while [ $# -gt 0 ]; do
@@ -51,9 +51,16 @@ fi
 
 provider=$(invoking_provider)
 pid=$(invoking_pid)
-codex_home="" codex_dir="" name=""
+codex_home="" codex_dir="" name="" agy_pane="" agy_socket=""
 root=$(invoking_root)
-if [ "$provider" = codex ]; then
+if [ "$provider" = agy ]; then
+  name=${ANDERTON_AGY_NAME:-}
+  agy_pane=${HERDR_PANE_ID:-} agy_socket=${HERDR_SOCKET_PATH:-}
+  if [ -z "$name" ] || [ -z "$agy_pane" ] || [ -z "$agy_socket" ]; then
+    echo "An agy Anderton claims only from a session agy-anderton.sh started inside herdr." >&2
+    exit 1
+  fi
+elif [ "$provider" = codex ]; then
   codex_home=$(invoking_codex_home) || { echo "Could not resolve the Codex home." >&2; exit 1; }
   identity=$("$anderton_scripts/codex-worker.py" identity "$codex_home" "$sid") || exit 1
   codex_dir=$(printf '%s' "$identity" | jq -r .dir)
@@ -123,7 +130,7 @@ if [ -n "$record" ] && [ -z "$force" ] && ! caller_matches_claim "$record"; then
       echo "$role is held by live session '${hname:-unknown}' (pid $hpid, session ${hsid:-unknown})."
     else
       hsid=$(jq -r '.sessionId // empty' "$record" 2>/dev/null || true)
-      echo "$role is held by Codex thread ${hsid:-unknown} (${hname:-unknown}, liveness: $health)."
+      echo "$role is held by $(record_provider "$record") session ${hsid:-unknown} (${hname:-unknown}, liveness: $health)."
     fi
     echo "Rerun with --take-over only if the user says so."
     exit 3
@@ -169,11 +176,13 @@ claim_id=${claim_id:-$(new_claim_id)} || { echo "Could not make a claim id." >&2
 jq -nc --arg root "$root" --arg scope "$scope" --arg pid "$pid" --arg started "$started" --arg sid "$sid" \
   --arg provider "$provider" --arg codex_home "$codex_home" --arg codex_dir "$codex_dir" --arg name "$name" \
   --arg claude_report_since "$claude_report_since" --argjson previous_claude "$previous_claude" \
+  --arg agy_pane "$agy_pane" --arg agy_socket "$agy_socket" \
   --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson probe "${kept:-null}" --argjson peer "$peer" --arg claim_id "$claim_id" \
   '{root: $root, scope: (if $scope == "" then null else $scope end), provider: $provider,
     sessionId: $sid, claimId: $claim_id, claimedAt: $at}
    + (if $provider == "codex" then {codexHome: $codex_home, dir: $codex_dir, name: $name, claudeReportSince: $claude_report_since,
                                     claudeReportPreviousHolder: $previous_claude}
+      elif $provider == "agy" then {dir: $root, name: $name, pane: $agy_pane, socket: $agy_socket}
       else {pid: ($pid | tonumber), startedAt: ($started | tonumber? // null)} end)
    + (if $probe == null then {} else {probe: $probe} end)
    + (if $peer == null then {} else {peerMessage: $peer} end)' > "$state.tmp"
@@ -185,6 +194,13 @@ if [ -z "$rebind" ]; then emit_event "$claim_id" "$scope" start; fi
 if [ "$provider" = codex ]; then
   "$anderton_scripts/codex-worker.py" start-watch "$anderton_scripts/watch.sh" "$state"
   echo "$role claimed by Codex thread $sid."
+elif [ "$provider" = agy ]; then
+  # What agy loads hooks and agents from for this checkout, as the role is claimed: waiting.sh reports changes from it.
+  agy_config_state "$root" > "${state%.json}.agy-config"
+  # agy ends a tool's processes when its command returns, so the watch runs in a session of its own.
+  python3 -c 'import subprocess, sys; subprocess.Popen(sys.argv[1:], start_new_session=True, stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' "$anderton_scripts/watch.sh" --agy "$state"
+  echo "$role claimed by agy session $sid ($name, herdr pane $agy_pane)."
 else
   echo "$role claimed by session $sid (pid $pid)."
 fi

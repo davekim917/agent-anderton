@@ -141,6 +141,33 @@ only when status reports `never arrived` for the direction ID.
 Anderton Stop hook. A Claude session you adopt must already have this plugin
 loaded and end a turn to receive those directions.
 
+### Open an agy Anderton
+
+Prepare agy as for agy workers (below), then, from a herdr pane in the repository:
+
+```sh
+skills/anderton/scripts/agy-anderton.sh --name <name>
+```
+
+It runs the `agy` on your PATH after the same `agy-hooks.sh check` an agy worker gets, against the repository's own
+workspace roots. It runs with no permission prompts unless you pass `--mode`, and other options go to agy. Its tool
+shells get `ANDERTON_AGY_SESSION` and `ANDERTON_AGY_NAME`, which these scripts read as the agy Anderton's identity,
+and none of a Claude Code or Codex session's variables. Unless you give `-i`, agy opens on a prompt that points it at
+this skill's `SKILL.md`. It claims with `claim.sh`, or `claim.sh --project <name>` for a named project, as any
+Anderton does. The claim records its herdr pane. The role is live while herdr shows agy in that pane, in the
+repository, and free once the pane is gone or shows anything else.
+
+agy has no Stop hook, so `claim.sh` starts the role's watch in the background. The watch runs as long as the role and
+tells the Anderton what Claude's watch would: blocked sessions, probe news, peer messages and worker reports, the same
+ways a Codex Anderton hears them. It types each message into the Anderton's pane once agy there is idle. The claim also
+records what agy loads hooks, plugins and agents from for the repository, and the watch tells the Anderton once when any
+of it changes.
+
+Workers start from it with `spawn.sh` as from any Anderton. Its default provider is agy, as a repository Anderton's
+provider is the default for its workers. A Claude worker under it runs in Claude's default permission mode and reports
+in its final replies, as under a Codex Anderton. A "workgroup" Anderton is the same thing in a workgroup's own
+repository: the role is per repository, and per named project with `--project`.
+
 ### Prepare agy workers
 
 `spawn.sh --provider agy` starts an agy (Antigravity CLI) worker in its own worktree, in a herdr tab, the way Claude and
