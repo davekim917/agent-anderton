@@ -74,14 +74,23 @@ scope_files() {
 }
 
 inside() {
-  local wt common gitdir path options guard bun bun_version deadline hook_timeout
+  local wt common gitdir path options guard bun bun_version deadline hook_timeout overflow
   # The caller's PATH chose nothing so far; every tool below is named by its path.
   [ "$(/usr/bin/tr -d '\0' < /proc/1/comm 2>/dev/null)" = bwrap ] || die "--inside runs only as bwrap's child."
   case ,$(/usr/bin/findmnt -rn -o OPTIONS --mountpoint / | /usr/bin/head -n 1), in *,ro,*) ;; *) die "/ is not read-only here." ;; esac
   wt=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || die "not inside a git worktree."
   common=$(cd "$(/usr/bin/git rev-parse --git-common-dir)" && pwd -P)
   gitdir=$(cd "$(/usr/bin/git rev-parse --absolute-git-dir)" && pwd -P)
-  [ "$(owner_of "$base")" = 0 ] || [ -e "$base/etc/user-owned-test-install" ] || die "$base is not root-owned."
+  # In this user namespace only the worker's uid is mapped, so a root-owned install shows as the overflow uid (0 only
+  # under a setuid bwrap, which makes none). The launcher proved the real owner before bwrap started; here the install
+  # must still not be the worker's own, apart from a test install.
+  overflow=$(/usr/bin/cat /proc/sys/kernel/overflowuid 2>/dev/null) || overflow=""
+  case $(owner_of "$base") in
+    0) ;;
+    "$(/usr/bin/id -u)") [ -e "$base/etc/user-owned-test-install" ] || die "$base is not root-owned." ;;
+    "$overflow") ;;
+    *) die "$base is not root-owned." ;;
+  esac
   [ "$(sha256 "$agy")" = "$(pinned binary_sha256)" ] || die "$agy does not match its pinned digest."
   [ "$(sha256 "$gemini/config/hooks.json")" = "$(pinned hooks_sha256)" ] ||
     die "$gemini/config/hooks.json is not the guard registration install-agy.sh wrote."
@@ -216,7 +225,7 @@ if [ "${1:-}" = --anderton-launch-file ]; then
   shift 2
 fi
 
-writable=()
+writable=() restored_links=()
 add_rw() { # add_rw <path> [<source>]: <path> writable, backed by <source> when one is given
   local path=$1 source=${2:-$1}
   [ -e "$source" ] || return 0
@@ -228,6 +237,38 @@ add_rw() { # add_rw <path> [<source>]: <path> writable, backed by <source> when 
   case $HOME/ in "$path"/*) die "$path would make $HOME writable; refusing." ;; esac
   args+=(--bind "$source" "$path")
   writable+=("$path")
+}
+# add_cache <path> <private dir>: <path> writable, backed by the private dir. bwrap cannot make a mount point inside the
+# read-only view, so a missing <path> is made first, but only in a directory this user owns and can write. Below one it
+# cannot write (a ~/.bun root installed bun into), the missing part is made in a tmpfs over the deepest directory that
+# exists, with that directory's own entries bound back read-only and the tmpfs read-only too.
+add_cache() {
+  local path=$1 top=$1 entry
+  while [ ! -e "$top" ] && [ ! -L "$top" ]; do top=$(dirname "$top"); done
+  if [ "$top" != "$path" ]; then
+    [ -d "$top" ] && [ "$(readlink -f "$top")" = "$top" ] ||
+      die "$top is not a directory, or is or passes through a symbolic link, so $path cannot be made there."
+    if [ -O "$top" ] && [ -w "$top" ]; then
+      mkdir -p "$path"
+    else
+      case $top in "$HOME"/?*) ;; *) die "$top is not yours to write, so the worker's cache $path cannot be made." ;; esac
+      [ -r "$top" ] && [ -x "$top" ] ||
+        die "$top cannot be listed, so a tmpfs over it would hide what it holds; make it readable, or create $path."
+      args+=(--tmpfs "$top")
+      while IFS= read -r -d '' entry; do
+        if [ -L "$entry" ]; then
+          args+=(--symlink "$(readlink "$entry")" "$entry")
+          restored_links+=("$entry")
+        else
+          args+=(--ro-bind "$entry" "$entry")
+        fi
+      done < <(find "$top" -mindepth 1 -maxdepth 1 -print0)
+      add_rw "$path" "$2"
+      args+=(--remount-ro "$top")
+      return 0
+    fi
+  fi
+  add_rw "$path" "$2"
 }
 inside_writable() { # inside_writable <path>: true when <path> lies in a writable root
   local root
@@ -337,28 +378,32 @@ add_rw "$state"                      # agy's conversations, logs and caches
 # Tool caches are this worktree's own, never the host's: host tools run what they cache (pre-commit's hook
 # environments, packages pnpm hard-links into node_modules), so a shared cache would run worker code outside.
 private="$HOME/.cache/anderton-agy/$(printf '%s' "$wt" | sha256sum | cut -c1-16)"
-for name in cache pnpm bun npm; do mkdir -p "$private/$name"; done
-# bwrap cannot make a mount point inside the read-only view, so each target exists first.
-mkdir -p "$HOME/.cache" "$HOME/.local/share/pnpm" "$HOME/.bun/install/cache" "$HOME/.npm"
-add_rw "$HOME/.cache" "$private/cache"
-add_rw "$HOME/.local/share/pnpm" "$private/pnpm"
-add_rw "$HOME/.bun/install/cache" "$private/bun"
-add_rw "$HOME/.npm" "$private/npm"
+for name in cache pnpm bun npm; do mkdir -p "$private/$name" || die "could not create the worker's private cache $private/$name."; done
+add_cache "$HOME/.cache" "$private/cache"
+add_cache "$HOME/.local/share/pnpm" "$private/pnpm"
+add_cache "$HOME/.bun/install/cache" "$private/bun"
+add_cache "$HOME/.npm" "$private/npm"
 if [ -f "$conf" ]; then
   while read -r kind path _; do
     path=${path/#\~/$HOME}
     case $kind in rw) add_rw "$path" ;; esac
   done < "$conf"
 fi
+# A link add_cache bound back that resolves into a writable root would put a directory the worker writes where the host
+# has none, on PATH for ~/.bun/bin.
+for path in ${restored_links[@]+"${restored_links[@]}"}; do
+  ! inside_writable "$(readlink -m "$path")" || die "$path links into a directory agy can write; remove the link, or create $(readlink -m "$path")."
+done
 # Outside those parts, the repository's git directory must not be writable at all.
 ! inside_writable "$common" || die "$common, the repository's git directory, is inside a directory agy can write."
 
-# What the hook runs must stay as installed while agy runs: every directory above the hook, the guard and the bun is
+# What agy and its hook run must stay as installed while agy runs: the release, the hook, the guard, the bun and every
+# directory above each is
 # root's (the installing user's, for a test install), and none is writable by anyone else or inside a writable root.
 owner_ok() {
   case $(stat -c %u "$1") in 0) return 0 ;; "$(id -u)") [ -e "$base/etc/user-owned-test-install" ] ;; *) return 1 ;; esac
 }
-for path in "$base/libexec/agy-guard-hook" "$(pinned guard)/agy-guard.sh" "$base/hookbin/bun"; do
+for path in "$agy" "$base/libexec/agy-guard-hook" "$(pinned guard)/agy-guard.sh" "$base/hookbin/bun"; do
   [ -e "$path" ] || die "$path is missing; rerun install-agy.sh."
   check=$path
   while :; do

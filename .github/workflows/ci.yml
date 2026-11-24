@@ -36,7 +36,8 @@ jobs:
         run: python3 -B test/codex.test.py
       - name: agy sandbox
         if: runner.os == 'Linux'
-        run: /bin/bash test/agy-sandbox.test.sh
+        # The runner's passwordless sudo lets the test install root-owned, as a real install is.
+        run: AGY_SANDBOX_SUDO=1 /bin/bash test/agy-sandbox.test.sh
       - name: agy guard commit
         if: runner.os == 'Linux'
         id: agy-guard
