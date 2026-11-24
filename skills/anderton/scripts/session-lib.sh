@@ -120,7 +120,8 @@ codex_socket() {
 codex_start_home() {
   local helper start from=$1
   shift
-  if helper=$(codex_accounts) && start=$(CODEX_HOME=$from "$helper" --start-home -- "$@" </dev/null 2>/dev/null) &&
+  # --same-store: a session started here may later move or resume, so only a home on $1's conversation store is named.
+  if helper=$(codex_accounts) && start=$(CODEX_HOME=$from "$helper" --start-home --same-store -- "$@" </dev/null 2>/dev/null) &&
     start=$(cd "$start" 2>/dev/null && pwd -P); then
     printf '%s\n' "$start"
   else

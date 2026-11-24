@@ -2753,7 +2753,7 @@ out=$(cd "$rho" && printf 'Task.\n' | env CLAUDE_CODE_SESSION_ID=rl-1 CLAUDE_PID
 status=$?
 set -e
 check "spawn.sh starts a Codex worker on the home the account helper names" eval \
-  '[ "$status" -eq 0 ] && [ "$(cat "$FAKE_LOG.accounts")" = "$cxhome --start-home --" ] &&
+  '[ "$status" -eq 0 ] && [ "$(cat "$FAKE_LOG.accounts")" = "$cxhome --start-home --same-store --" ] &&
    [ "$(jq -r .codexHome "$CLAUDE_CONFIG_DIR/anderton/workers/cx-moved.json")" = "$cxnext" ] &&
    grep -qxF "unix://$cxnext/app-server-control/app-server-control.sock" "$FAKE_LOG.window"'
 rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/cx-moved.json" "$work/bin/codex"

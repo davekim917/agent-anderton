@@ -77,7 +77,8 @@ import socket
 import sys
 socket.socket(socket.AF_UNIX).bind(sys.argv[1])
 PY
-sleep 60 &
+# Outlives every check that needs the fixture Claude session; cleanup ends it.
+sleep 600 &
 claimer=$!
 jq -nc --argjson pid "$claimer" --arg cwd "$PWD" '{pid:$pid, sessionId:"fixture-claude", name:"fixture-claude", cwd:$cwd}' > "$CLAUDE_CONFIG_DIR/sessions/$claimer.json"
 
@@ -147,7 +148,7 @@ cat > "$tmp/accounts" <<STUB
 echo "\$CODEX_HOME \$*" >> "$tmp/accounts.log"
 case \$1 in
   --move-thread) echo "$moved_home" ;;
-  --locate-thread) echo "$moved_home" ;;
+  --locate-thread) cat "$tmp/locate" 2>/dev/null || echo "$moved_home" ;;
   --start-home) echo "\$CODEX_HOME" ;;
 esac
 STUB
@@ -208,6 +209,28 @@ for _ in $(seq 1 50); do [ -e "$tmp/lock-held" ] && break; sleep 0.1; done
 handed_over "$moved_home" 600
 wait "$lock_holder" 2> /dev/null || true
 grep -q 'the repository lock is held; try 1 of 10' "${root_claim%.json}.handover.log"
+# A thread that moves back while the hand-over waits on the lock keeps its claim and watch where it now runs.
+jq --arg home "$CODEX_HOME" '.codexHome = $home' "$root_claim" > "$root_claim.tmp" && mv "$root_claim.tmp" "$root_claim"
+rm -f "${root_claim%.json}.handover.log" "$tmp/lock-held" "$tmp/loaded-gate"
+watch_lines=$(wc -l < "$tmp/watch-starts")
+codex_role env ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" ANDERTON_HANDOVER_RETRY=1 FIXTURE_LOADED_GATE="$tmp/loaded-gate" \
+  "$script/codex-anderton.sh" --move "$FIXTURE_THREAD"
+if command -v flock > /dev/null 2>&1; then
+  flock "$root_claim.lock.flock" bash "$tmp/hold-lock.sh" &
+else
+  ( mkdir "$root_claim.lock" && echo $$ > "$root_claim.lock/pid" && bash "$tmp/hold-lock.sh"; rm -rf "$root_claim.lock" ) &
+fi
+lock_holder=$!
+for _ in $(seq 1 50); do [ -e "$tmp/lock-held" ] && break; sleep 0.1; done
+: > "$tmp/loaded-gate"
+for _ in $(seq 1 300); do grep -q 'try 1 of 10' "${root_claim%.json}.handover.log" 2> /dev/null && break; sleep 0.1; done
+echo "$CODEX_HOME" > "$tmp/locate"
+for _ in $(seq 1 600); do grep -q 'dropped' "${root_claim%.json}.handover.log" 2> /dev/null && break; sleep 0.1; done
+wait "$lock_holder" 2> /dev/null || true
+grep -q "dropped: its daemon no longer has the thread open; the claim stays on $CODEX_HOME" "${root_claim%.json}.handover.log"
+jq -e --arg home "$CODEX_HOME" '.codexHome == $home' "$root_claim" > /dev/null
+[ "$(wc -l < "$tmp/watch-starts")" -eq "$watch_lines" ]
+rm -f "$tmp/locate"
 # A claim a hand-over never reached follows its thread to the home that last ran it when that session claims.
 jq --arg home "$CODEX_HOME" '.codexHome = $home' "$root_claim" > "$root_claim.tmp" && mv "$root_claim.tmp" "$root_claim"
 codex_role env CODEX_HOME="$moved_home" ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" "$script/claim.sh"
