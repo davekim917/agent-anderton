@@ -6,6 +6,20 @@
 # for it, and nothing here can answer a prompt. When the role's claim names a probe (claim.sh --probe), it also runs
 # that probe on its interval and wakes the holder with whatever it prints, or after ANDERTON_PROBE_FAILURES (default
 # 3) failed runs in a row with "probe failing". Anywhere else, and on any failure, it exits 0 and prints nothing.
+# UserPromptSubmit: the turn starts. Every prompt waits on this hook, so with no event command it returns before
+# reading anything, and with one it hands the payload to a detached job. It prints nothing: what it prints joins the
+# prompt.
+if [ "${1:-}" = --turn-start ]; then
+  [ -n "${ANDERTON_EVENT_COMMAND:-}" ] || exit 0
+  turn=$(cat)
+  (
+    # shellcheck source=SCRIPTDIR/session-lib.sh
+    . "$(dirname "$0")/session-lib.sh" || exit 0
+    emit_turn working "$(jq -r '.session_id // empty' <<< "$turn" 2>/dev/null)" \
+      "$(jq -r '.cwd // empty' <<< "$turn" 2>/dev/null)"
+  ) </dev/null >/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
+  exit 0
+fi
 # shellcheck source=SCRIPTDIR/session-lib.sh
 . "$(dirname "$0")/session-lib.sh"
 
@@ -39,13 +53,6 @@ register_claude_launch() {
 
 if [ "${1:-}" = --claude-start ]; then
   register_claude_launch "$(cat)" >/dev/null 2>&1
-  exit 0
-fi
-# UserPromptSubmit: the turn starts. Prints nothing, since what this hook prints joins the prompt.
-if [ "${1:-}" = --turn-start ]; then
-  turn=$(cat)
-  emit_turn working "$(jq -r '.session_id // empty' <<< "$turn" 2>/dev/null)" \
-    "$(jq -r '.cwd // empty' <<< "$turn" 2>/dev/null)" >/dev/null 2>&1
   exit 0
 fi
 

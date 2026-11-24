@@ -666,7 +666,11 @@ Each claim has a `claimId`, kept by the same session through a re-claim, rebind 
 session, so whatever trusts one claim does not trust the next holder of the same scope. A worker's record names
 its claim as `spawnerClaimId`. The command never holds a script up or fails it: it runs detached, holds none of
 the caller's descriptors, is ended after `ANDERTON_EVENT_TIMEOUT` seconds (3), and its output and exit status are
-ignored. Unset, nothing runs. A Codex holder or worker reports no status, since it has no registry entry.
+ignored, and it runs in its own process group, which the timeout ends with `TERM` and then `KILL`. Unset, the prompt
+hook returns before reading anything; set, it hands the lookup to a detached job. A scope is passed on only when it
+is `workgroup:` and plain ids, and a link only as a PR or issue URL rebuilt from its parts. A Codex holder or worker
+reports no status, since it has no registry entry. Known limit: a take-over while `spawn.sh` waits for its brief can
+record the new holder's claim on a worker the old holder started, so that worker's events show under the new claim.
 
 **`report-gate.sh`** is a hook on `SendMessage`, run before and after each send. It judges two kinds of
 message: a worker's to the session `spawn.sh` started it from, and any session's to its repository's Anderton,

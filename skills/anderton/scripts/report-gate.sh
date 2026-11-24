@@ -150,10 +150,13 @@ EOF
     exit 10
   fi
   local milestone=""
-  if [ -n "$worker" ] && [ "$kind" != DIRECTION ]; then
-    milestone=$(jq -c -n --slurpfile w "$wrec" --arg kind "$kind" --arg msg "$(printf '%s' "$input" | jq -r '.tool_input.message // ""' 2>/dev/null)" \
-      '$w[0] | {claim: (.spawnerClaimId // ""), scope: (.spawnerScope // ""), worker: (.name // ""), kind: $kind,
-        links: ([$msg | scan("https://github\\.com/[A-Za-z0-9._/-]+")] | .[0:10])}' 2>/dev/null) || milestone=""
+  # A milestone carries its kind and the PR and issue links in it, each rebuilt from its parts; nothing else of the text.
+  if [ -n "${ANDERTON_EVENT_COMMAND:-}" ] && [ -n "$worker" ] && [ "$kind" != DIRECTION ]; then
+    milestone=$(printf '%s' "$input" | jq -c --slurpfile w "$wrec" --arg kind "$kind" '
+      (.tool_input.message // "" | tostring) as $msg
+      | $w[0] | {claim: (.spawnerClaimId // ""), scope: (.spawnerScope // ""), worker: (.name // ""), kind: $kind,
+        links: ([$msg | scan("https://github\\.com/([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100})/(pull|issues)/([0-9]{1,9})(?![0-9A-Za-z_])")
+          | "https://github.com/\(.[0])/\(.[1])/\(.[2])/\(.[3])"] | unique | .[0:10])}' 2>/dev/null) || milestone=""
   fi
   [ -z "$id" ] || printf '%s\n%s\n%s\n' "$state" "$hash" "$milestone" >| "$pending/$id" 2>/dev/null
   exit 0

@@ -1019,28 +1019,43 @@ take_repository_lock() {
 # ANDERTON_EVENT_TIMEOUT seconds (default 3), and its output and exit status are ignored. Unset, nothing runs.
 # emit_event <claim id> <scope> <kind> [field=value ...], fields being status, milestoneKind and worker, plus
 # link=<url> repeated. Nothing is sent without a claim id or for a scope other than workgroup:<id>[/<project>].
+event_scope_re='^workgroup:[a-z][a-z0-9-]{0,62}(/[a-z0-9][a-z0-9.-]{0,63})?$'
+event_link_re='^https://github\.com/[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}/(pull|issues)/[0-9]{1,9}$'
 emit_event() {
   local claim=$1 scope=$2 kind=$3 json field cmd=${ANDERTON_EVENT_COMMAND:-} timeout=${ANDERTON_EVENT_TIMEOUT:-3}
   shift 3
   [ -n "$cmd" ] && [ -n "$claim" ] || return 0
-  # Only a role claimed for a workgroup (--project workgroup:<id>[/<project>]) has anywhere on the host to show.
-  case $scope in workgroup:?*) ;; *) return 0 ;; esac
+  # Only a role claimed for a workgroup has anywhere on the host to show, and only a scope of plain ids is passed on.
+  [[ $scope =~ $event_scope_re ]] || return 0
   case $timeout in '' | *[!0-9]*) timeout=3 ;; esac
   json=$(jq -nc --arg claim "$claim" --arg scope "$scope" --arg kind "$kind" '{claimId: $claim, scope: $scope, kind: $kind}') || return 0
   for field in "$@"; do
     case $field in
-      link=*) json=$(printf '%s' "$json" | jq -c --arg v "${field#link=}" '.links = ((.links // []) + [$v])') || return 0 ;;
+      link=*)
+        [[ ${field#link=} =~ $event_link_re ]] || continue
+        json=$(printf '%s' "$json" | jq -c --arg v "${field#link=}" '.links = ((.links // []) + [$v])') || return 0
+        ;;
       status=* | milestoneKind=* | worker=*)
         json=$(printf '%s' "$json" | jq -c --arg k "${field%%=*}" --arg v "${field#*=}" '.[$k] = $v') || return 0 ;;
     esac
   done
   (
-    printf '%s' "$json" | bash -c "$cmd" >/dev/null 2>&1 &
+    # Its own process group, so the timeout ends whatever the command started too.
+    set -m
+    bash -c "$cmd" <<< "$json" >/dev/null 2>&1 &
     p=$!
-    (sleep "$timeout"; kill "$p" 2>/dev/null) >/dev/null 2>&1 &
-    w=$!
+    set +m
+    i=0
+    while kill -0 -- "-$p" 2>/dev/null && [ "$i" -lt "$((timeout * 10))" ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    if kill -0 -- "-$p" 2>/dev/null; then
+      kill -TERM -- "-$p" 2>/dev/null
+      sleep 1
+      kill -KILL -- "-$p" 2>/dev/null
+    fi
     wait "$p" 2>/dev/null
-    kill "$w" 2>/dev/null
     # The caller's descriptors, such as the repository lock on fd 9, stay with the caller: a slow command holds none.
   ) </dev/null >/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
   return 0
@@ -1083,9 +1098,4 @@ new_claim_id() {
   local id
   id=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null) || return 1
   printf '%s\n' "$id" | tr '[:upper:]' '[:lower:]'
-}
-
-# Up to ten GitHub URLs in a message, for a milestone event; the host keeps only its own repositories' links.
-github_links() {
-  printf '%s' "$1" | grep -oE 'https://github\.com/[A-Za-z0-9._/-]+' 2>/dev/null | head -n 10 || true
 }
