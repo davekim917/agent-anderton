@@ -151,6 +151,9 @@ esac
 STUB
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s"\n' "$tmp/codex.args" > "$tmp/bin/codex"
 chmod +x "$tmp/accounts" "$tmp/bin/codex"
+# One thread holds one role whichever account's home it runs on.
+refused_claim codex_role env CODEX_HOME="$moved_home" "$script/claim.sh" --project tools
+grep -q 'already holds the repository role' "$tmp/refused"
 handed_over() { # handed_over <home>: waits for the background hand-over to settle the claim on <home>
   for _ in $(seq 1 50); do
     if jq -e --arg home "$1" '.codexHome == $home' "$root_claim" >/dev/null; then return 0; fi
@@ -165,7 +168,7 @@ for _ in $(seq 1 50); do [ -s "$tmp/loaded-checks" ] && break; sleep 0.1; done
 sleep 0.5
 grep -qxF "$moved_home $FIXTURE_THREAD" "$tmp/loaded-checks"
 jq -e --arg home "$CODEX_HOME" '.codexHome == $home' "$root_claim" > /dev/null
-[ ! -e "$tmp/watch-starts" ] || ! grep -q "$moved_home" "$tmp/watch-starts"
+if [ -e "$tmp/watch-starts" ] && grep -q "$moved_home" "$tmp/watch-starts"; then exit 1; fi
 : > "$tmp/accounts.log"
 # The old home's watch is stopped before the claim moves: a watch for the same thread would leave on finding it held.
 watcher="$(dirname "$root_claim")/$(basename "$root_claim" .json).watch"
@@ -180,7 +183,7 @@ grep -qxF "$CODEX_HOME --move-thread $FIXTURE_THREAD -- -c tui.terminal_title=[\
 grep -qxF "unix://$moved_home/app-server-control/app-server-control.sock" "$tmp/codex.args"
 for _ in $(seq 1 50); do [ -s "$tmp/watch-starts" ] && break; sleep 0.1; done
 tail -n 1 "$tmp/watch-starts" | grep -qxF "$FIXTURE_THREAD $moved_home $root_claim"
-! kill -0 "$old_watch" 2>/dev/null
+if kill -0 "$old_watch" 2>/dev/null; then exit 1; fi
 [ ! -e "$watcher" ]
 refused_claim codex_role "$script/claim.sh"
 codex_role env CODEX_HOME="$moved_home" "$script/claim.sh"

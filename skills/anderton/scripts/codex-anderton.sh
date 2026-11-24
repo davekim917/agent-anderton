@@ -17,6 +17,15 @@ adopt_moved_claim() {
   take_repository_lock "$root"
   jq -e --arg id "$thread" --arg from "$from" '.provider == "codex" and .sessionId == $id and .codexHome == $from' \
     "$claim" >/dev/null 2>&1 || return 0
+  # One thread holds one role: one it claimed on the new home meanwhile keeps the thread, and this claim is left.
+  while IFS= read -r r; do
+    if [ -n "$r" ] && [ "$r" != "$claim" ] &&
+      jq -e --arg id "$thread" '.provider == "codex" and .sessionId == $id' "$r" >/dev/null 2>&1; then
+      return 0
+    fi
+  done <<EOF
+$(project_holders "$root")
+EOF
   stop_codex_watch "$claim"
   set_codex_home "$claim" "$to" || return 0
   release_repository_lock

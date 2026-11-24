@@ -2765,7 +2765,7 @@ case $1 in
     printf 'turn-9\nYou%sve hit your usage limit. Try again at 9:00 PM.\n' "'" ;;
   unloaded) echo unloaded >>"$FAKE_LOG.order"; [ -z "${FAKE_STILL_LOADED:-}" ] ;;
   resume-on) echo resume-on >>"$FAKE_LOG.order"; echo "$2 $3" >>"$FAKE_LOG.move" ;;
-  message) [ -z "${FAKE_MESSAGE_FAIL:-}" ] || exit 4; printf '%s\n' "$4" >>"$FAKE_LOG.direction" ;;
+  message) [ -z "${FAKE_MESSAGE_FAIL:-}" ] || exit "$FAKE_MESSAGE_FAIL"; printf '%s\n' "$4" >>"$FAKE_LOG.direction" ;;
 esac
 FAKE
 chmod +x "$fodir/waiting.sh" "$fodir/codex-worker.py"
@@ -2803,8 +2803,10 @@ check "the first sweep only stops the pane's client of a worker at its usage lim
    [ "$(cx_record ".codexFailover | \"\\(.stage) \\(.paneStopped)\"")" = "stopped true" ] && ! contains "continues"'
 : >"$FAKE_LOG.order"
 cx_sweep
-check "a later sweep moves it to the account the helper names and continues it there" eval \
-  '[ "$status" -eq 0 ] && contains "continues on $cxnext. Its pane shows it there." && [ "$(cx_record .codexHome)" = "$cxnext" ]'
+check "a later sweep moves it to the account the helper names" eval \
+  '[ "$status" -eq 0 ] && [ "$(cx_record .codexHome)" = "$cxnext" ] && [ "$(grep -c . "$FAKE_LOG.respawns")" -eq 1 ] && [ ! -e "$FAKE_LOG.direction" ]'
+cx_sweep
+check "and the next one continues it there" eval '[ "$status" -eq 0 ] && contains "continues on $cxnext. Its pane shows it there."'
 check "the helper marking the account it ran on, with the limit message, and naming the next" \
   [ "$(cat "$FAKE_LOG.accounts")" = "$cxhome --move-thread $cx_thread --message You've hit your usage limit. Try again at 9:00 PM." ]
 check "once the old daemon had let go of it, then resumed on the new home, before its pane reopened" \
@@ -2828,14 +2830,37 @@ jq --arg home "$cxnext" --arg from "$cxhome" '.codexHome = $home | .codexFailove
   "$CLAUDE_CONFIG_DIR/anderton/workers/cx-fail.json" >"$work/cx.tmp"
 mv "$work/cx.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/cx-fail.json"
 cx_sweep FAKE_MESSAGE_FAIL=1
-check "an owed reopen runs on the new home, and an unconfirmed direction stays owed" eval \
+check "an owed reopen runs on the new home, and a direction that failed stays owed" eval \
   '[ ! -e "$FAKE_LOG.move" ] && grep -q -- "-e CODEX_HOME=$cxnext codex resume $cx_thread" "$FAKE_LOG.respawns" &&
-   contains "the direction to continue is unconfirmed" && [ "$(cx_record ".codexFailover | \"\\(.reopen) \\(.continue)\"")" = "false true" ]'
+   contains "is retried next sweep" && [ "$(cx_record ".codexFailover | \"\\(.reopen) \\(.continue)\"")" = "false true" ]'
 rm -f "$FAKE_LOG.respawns"
 cx_sweep
 check "and the next sweep sends it, without reopening the pane again" eval \
   'contains "continues on $cxnext." && [ ! -e "$FAKE_LOG.respawns" ] && grep -q "Check the current state before repeating" "$FAKE_LOG.direction" &&
    [ "$(cx_record .codexFailover.continue)" = false ]'
+cx_teardown
+
+cx_setup cx-fail '{"turn": "turn-9", "at": 0, "moved": true, "marked": true, "paneStopped": true, "reopen": false, "continue": true}'
+cx_sweep FAKE_MESSAGE_FAIL=4
+check "a direction whose submission is unconfirmed is not sent again: the watch says to check first" eval \
+  'contains "unconfirmed: check its status before resending" && [ "$(cx_record .codexFailover.continue)" = false ]'
+cx_sweep
+check "and no later sweep sends it" eval '[ ! -e "$FAKE_LOG.direction" ] && ! contains "continue"'
+cx_teardown
+
+cx_setup cx-fail '{"turn": "turn-9", "at": 0, "moved": true, "marked": true, "paneStopped": true, "reopen": true, "continue": false}'
+tmux_pane %31 "019a0000-9999-7222-8333-44445..."
+cx_sweep
+check "an owed reopen leaves a pane that now shows something else, and says how to open the thread" eval \
+  '[ ! -e "$FAKE_LOG.respawn" ] && contains "now shows something else, so it was left alone" && [ "$(cx_record .codexFailover.reopen)" = false ]'
+cx_teardown
+
+# A sweep cut short after the new home's daemon took the thread: the next one records the move instead of making it again.
+cx_setup cx-fail "{\"turn\": \"turn-9\", \"at\": 0, \"moved\": false, \"marked\": true, \"stage\": \"stopped\", \"paneStopped\": true, \"stoppedAt\": $(date +%s)}"
+cx_sweep FAKE_ACCOUNTS_LOCATE="$cxnext"
+check "a thread already open on another home's daemon is recorded there, with no second move" eval \
+  '[ "$(cx_record .codexHome)" = "$cxnext" ] && [ ! -e "$FAKE_LOG.move" ] && ! grep -q -- --move-thread "$FAKE_LOG.accounts" 2>/dev/null &&
+   [ "$(cx_record ".codexFailover | \"\\(.moved) \\(.reopen) \\(.continue)\"")" = "true true true" ]'
 cx_teardown
 
 prior='{"turn": "turn-9", "at": 0, "moved": false, "marked": true}'
@@ -2844,6 +2869,7 @@ cx_sweep FAKE_ACCOUNTS_START="$cxhome"
 check "a retry while its home is still limited and the helper names no other leaves the pane alone and wakes no one" eval \
   '[ "$status" -eq 0 ] && [ ! -e "$FAKE_LOG.respawn" ] && [ ! -e "$FAKE_LOG.move" ] && ! contains "stays" && ! contains "continues" &&
    [ "$(tr "\n" " " <"$FAKE_LOG.accounts")" = "$cxhome --is-limited $cxhome --start-home " ]'
+cx_sweep
 cx_sweep
 cx_sweep
 check "and moves once the helper names another home again" eval '[ -s "$FAKE_LOG.move" ] && contains "continues on $cxnext"'
@@ -2877,6 +2903,7 @@ cx_teardown
 
 cx_setup
 tmux_pane %31 "019a0000-9999-7222-8333-44445..."
+cx_sweep
 cx_sweep
 cx_sweep
 check "a moved worker whose pane shows another conversation keeps that pane, and says how to open it" eval \

@@ -38,7 +38,9 @@ EOF
   case $launcher in
     tmux)
       tmux -S "$socket" respawn-pane -k -t "$pane" sh -c 'echo "Moving this Codex conversation to another account."; while :; do sleep 3600; done' \
-        >/dev/null 2>&1
+        >/dev/null 2>&1 || return 1
+      # reopen_pane reopens only a pane that still shows this placeholder or the thread.
+      tmux -S "$socket" select-pane -t "$pane" -T "$(moving_title "$id")" >/dev/null 2>&1 || true
       ;;
     herdr)
       while [ "$tries" -gt 0 ] && shows_thread "$(codex_pane "$launcher" "$socket" "$pane" "$server")" "$id"; do
@@ -52,15 +54,38 @@ EOF
   esac
 }
 
+moving_title() {
+  printf 'anderton-moving %s\n' "$1"
+}
+
 # Opens the worker's thread in the pane stop_pane cleared, on the daemon of home $2. A remote resume takes no
 # permission overrides: the thread keeps the sandbox and approvals it was started with. Prints a note when Codex waits
-# at a prompt there.
+# at a prompt there. Returns 2, touching nothing, when the pane is gone or shows something else: a tmux pane anything
+# but stop_pane's placeholder or the thread, a herdr pane another Codex conversation.
 reopen_pane() {
-  local record=$1 to=$2 launcher socket pane server id name out tries=3
+  local record=$1 to=$2 launcher socket pane server id name out view tries=1
   IFS=$'\t' read -r launcher socket pane server <<EOF
 $(pane_of "$record")
 EOF
   id=$(jq -r .id "$record") name=$(jq -r .name "$record")
+  view=$(codex_pane "$launcher" "$socket" "$pane" "$server")
+  case $view in
+    "present $(moving_title "$id")") ;;
+    present*)
+      if ! shows_thread "$view" "$id"; then
+        case $launcher in
+          tmux) echo "Its $launcher pane $pane now shows something else, so it was left alone."; return 2 ;;
+          *)
+            if printf '%s\n' "$view" | grep -qE '[0-9a-f]{8}-[0-9a-f-]{20}\.\.\.$'; then
+              echo "Its $launcher pane $pane now shows another Codex conversation, so it was left alone."
+              return 2
+            fi
+            ;;
+        esac
+      fi
+      ;;
+    *) echo "Its $launcher pane $pane is gone."; return 2 ;;
+  esac
   set -- resume "$id" --remote "unix://$(codex_socket "$to")" -c 'tui.terminal_title=["thread-id"]'
   case $launcher in
     tmux) tmux -S "$socket" respawn-pane -k -t "$pane" -e "CODEX_HOME=$to" codex "$@" >/dev/null 2>&1 && return 0 ;;
@@ -130,7 +155,7 @@ moved_to() {
   if jq --arg turn "$2" --arg from "$3" --arg to "$4" --arg pane "$5" --argjson at "$(date +%s)" '
       .codexHome = $to
       | .codexFailover = {turn: $turn, at: $at, from: $from, moved: true, resumed: false, marked: true,
-          paneStopped: ($pane == "true"), reopen: ($pane == "true"), continue: true}' "$1" >"$updated" &&
+          paneStopped: ($pane == "true"), reopen: ($pane == "true"), continue: true, tries: 0}' "$1" >"$updated" &&
     mv -f "$updated" "$1"; then
     return 0
   fi
@@ -138,54 +163,76 @@ moved_to() {
   return 1
 }
 
-# Clears failover step $3 of worker record $1, still on thread $2, under the locks a record change needs.
-step_done() {
-  local updated
-  (
-    lock_owned_worker "$1" "$2" || exit 1
-    updated=$(mktemp "$1.XXXXXX") || exit 1
-    if jq --arg step "$3" '.codexFailover[$step] = false' "$1" >"$updated" && mv -f "$updated" "$1"; then exit 0; fi
-    rm -f "$updated"
-    exit 1
-  )
+# Sets field $2 of worker record $1's failover to JSON $3 under the repository lock; the caller holds the worker lock.
+set_failover() {
+  local updated status=1
+  take_repository_lock "$(invoking_root)"
+  if updated=$(mktemp "$1.XXXXXX"); then
+    if jq --arg key "$2" --argjson value "$3" '.codexFailover[$key] = $value' "$1" >"$updated" && mv -f "$updated" "$1"; then
+      status=0
+    else
+      rm -f "$updated"
+    fi
+  fi
+  release_repository_lock
+  return "$status"
 }
 
-# Runs the steps a move of worker record $1 still owes, on later sweeps too: reopens its pane on the new home and tells
-# it to continue. Returns 10 when it ran one.
+# Runs the steps a move of worker record $1 still owes, under its worker lock and on later sweeps too: reopens its
+# pane on the new home and tells it to continue. A step that fails is tried on three sweeps at most. A direction to
+# continue whose submission is unconfirmed is not sent again: the watch says to check the worker first. Returns 10
+# when it ran a step.
 finish_failover() {
-  local record=$1 id name home from reopen cont note=""
-  IFS=$'\x1f' read -r id name home from reopen cont <<EOF
+  local record=$1 id name home from reopen cont tries note="" status
+  IFS=$'\x1f' read -r id name home from reopen cont tries <<EOF
 $(jq -r '[.id, .name, .codexHome, (.codexFailover.from // ""), (.codexFailover.reopen // false),
-  (.codexFailover.continue // false)] | map(tostring) | join([31] | implode)' "$record")
+  (.codexFailover.continue // false), (.codexFailover.tries // 0)] | map(tostring) | join([31] | implode)' "$record")
 EOF
   [ "$reopen" = true ] || [ "$cont" = true ] || return 0
+  lock_owned_worker "$record" "$id" || return 0
+  release_repository_lock
+  tries=$((tries + 1))
+  set_failover "$record" tries "$tries" || return 0
+  from=${from:-its old account}
   if [ "$reopen" = true ]; then
-    if note=$(reopen_pane "$record" "$home"); then
+    status=0
+    note=$(reopen_pane "$record" "$home") || status=$?
+    if [ "$status" -eq 0 ]; then
       note=${note:-Its pane shows it there.}
     else
       note="$note Open it with: CODEX_HOME=$home codex resume $id --remote unix://$(codex_socket "$home")"
     fi
-    step_done "$record" "$id" reopen || true
+    if [ "$status" -ne 1 ] || [ "$tries" -ge 3 ]; then set_failover "$record" reopen false || true; fi
   elif [ "$(jq -r '.codexFailover.paneStopped // empty' "$record")" != true ]; then
     note="Its pane did not show thread $id, so it was left alone. Open the thread with: CODEX_HOME=$home codex resume $id --remote unix://$(codex_socket "$home")"
   fi
   if [ "$cont" = true ]; then
-    if "$scripts/codex-worker.py" message "$record" -- "$continue_text" >/dev/null 2>&1; then
-      step_done "$record" "$id" continue || true
+    status=0
+    "$scripts/codex-worker.py" message "$record" -- "$continue_text" >/dev/null 2>&1 || status=$?
+    if [ "$status" -eq 0 ]; then
+      set_failover "$record" continue false || true
+    elif [ "$status" -eq 4 ]; then
+      set_failover "$record" continue false || true
+      once "$record" "$name (Codex $id) moved from $from to $home, but the direction to continue is unconfirmed: check its status before resending. $note"
+      return 10
+    elif [ "$tries" -ge 3 ]; then
+      set_failover "$record" continue false || true
+      once "$record" "$name (Codex $id) moved from $from to $home, but could not be told to continue. Tell it yourself. $note"
+      return 10
     else
-      once "$record" "$name (Codex $id) moved from ${from:-its old account} to $home, but the direction to continue is unconfirmed; it is retried next sweep. $note"
+      once "$record" "$name (Codex $id) moved from $from to $home; telling it to continue failed and is retried next sweep. $note"
       return 10
     fi
   fi
-  echo "$name (Codex $id) hit the usage limit of ${from:-its old account} and continues on $home. $note"
+  echo "$name (Codex $id) hit the usage limit of $from and continues on $home. $note"
   return 10
 }
 
 # Moves Codex worker record $1, still on thread $2, whose latest turn failed at its account's usage limit, to the next
 # account the account helper names, across sweeps so no sweep waits: the first stops the pane's client, a later one
 # waits until the old daemon has let go of the thread (about a minute after its last client leaves), resumes it on the
-# new home's daemon (both homes read one conversation store, so nothing is copied), points the record there and runs
-# the steps finish_failover owes. The repository lock is held only for the record's writes. A move that could not run is retried: on the same home once its limit has reset, else once the
+# new home's daemon (both homes read one conversation store, so nothing is copied) and points the record there; the
+# next sweep runs the steps finish_failover owes. The repository lock is held only for the record's writes. A move that could not run is retried: on the same home once its limit has reset, else once the
 # helper names another home. Prints the outcome for the watch to report. Returns 10 when it changed something, so the
 # sweep moves at most one worker.
 failover() {
@@ -218,10 +265,10 @@ failover() {
         return 0
       fi
     fi
-    # No client may start a turn on the old account while the thread moves.
-    pane=0
-    if stop_pane "$record"; then pane=1; fi
-    note_failover "$record" "$turn" stopped "$pane"
+    # No client may start a turn on the old account while the thread moves. The stop is recorded first, so a sweep
+    # cut short after it still reopens the pane.
+    note_failover "$record" "$turn" stopped 1
+    if ! stop_pane "$record"; then note_failover "$record" "$turn" stopped 0; fi
     return 10
   fi
   pane=$(jq -r '.codexFailover.paneStopped // false' "$record")
@@ -233,6 +280,13 @@ failover() {
     [ "$pane" != true ] || reopen_pane "$record" "$from" >/dev/null || true
     note_failover "$record" "$turn" failed
     echo "$name (Codex $id) stays at the usage limit of $from: another Codex client still has thread $id open. Close it to let the move run."
+    return 10
+  fi
+  # A sweep cut short after the new daemon took the thread left it open there: that move is recorded, not repeated.
+  if to=$(codex_thread_home "$id") && [ "$to" != "$(cd "$from" 2>/dev/null && pwd -P)" ]; then
+    lock_owned_worker "$record" "$id" || return 10
+    moved_to "$record" "$turn" "$from" "$to" "$pane" || return 10
+    release_repository_lock
     return 10
   fi
   if ! out=$(CODEX_HOME=$from "$helper" --move-thread "$id" --message "$message" </dev/null 2>&1) ||
@@ -252,7 +306,6 @@ failover() {
   lock_owned_worker "$record" "$id" || return 10
   moved_to "$record" "$turn" "$from" "$to" "$pane" || return 10
   release_repository_lock
-  finish_failover "$record" || true
   return 10
 }
 

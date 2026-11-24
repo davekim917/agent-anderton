@@ -76,10 +76,12 @@ if [ -n "$worker" ]; then
 fi
 
 record=$(holder_record "$root" "$scope")
-# One session holding two roles is the one control session doing two jobs again.
+# One session holding two roles is the one control session doing two jobs again. A Codex thread is one session on
+# whichever account's home it runs.
 while IFS= read -r other; do
   if [ -n "$other" ] && [ "$other" != "$state" ] && [ "$other" != "$record" ] &&
-    caller_matches_claim "$other"; then
+    { caller_matches_claim "$other" || { [ "$provider" = codex ] && [ "$(record_provider "$other")" = codex ] &&
+      [ "$(jq -r '.sessionId // empty' "$other")" = "$sid" ]; }; }; then
     held=$(jq -r 'if .scope then "project \(.scope)" else "the repository role" end' "$other" 2>/dev/null || true)
     echo "This session already holds ${held:-another role} in $root. One session holds one role."
     exit 3
@@ -92,6 +94,8 @@ EOF
 if [ "$provider" = codex ] && [ -n "$record" ] && [ "$(record_provider "$record")" = codex ] &&
   [ "$(jq -r '.sessionId // empty' "$record")" = "$sid" ] && [ "$(jq -r '.codexHome // empty' "$record")" != "$codex_home" ] &&
   [ "$(codex_thread_home "$sid" || true)" = "$codex_home" ]; then
+  # The old home's watch would keep the job this claim's new watch needs.
+  stop_codex_watch "$record"
   set_codex_home "$record" "$codex_home" || exit 1
 fi
 
