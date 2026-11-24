@@ -195,15 +195,17 @@ rm -f "${root_claim%.json}.handover.log"
 # The new daemon reports the thread loaded only once the lock is held here, after the launcher has let go of it.
 codex_role env ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" ANDERTON_HANDOVER_RETRY=1 FIXTURE_LOADED_GATE="$tmp/loaded-gate" \
   "$script/codex-anderton.sh" --move "$FIXTURE_THREAD"
+# Held past one take's wait, which runs longer than ten seconds where the lock is a directory (macOS).
+printf ': > %q\nsleep 25\n' "$tmp/lock-held" > "$tmp/hold-lock.sh"
 if command -v flock > /dev/null 2>&1; then
-  flock "$root_claim.lock.flock" sh -c ': > "$0"; sleep 13' "$tmp/lock-held" &
+  flock "$root_claim.lock.flock" bash "$tmp/hold-lock.sh" &
 else
-  ( mkdir "$root_claim.lock" && echo $$ > "$root_claim.lock/pid" && : > "$tmp/lock-held" && sleep 13; rm -rf "$root_claim.lock" ) &
+  ( mkdir "$root_claim.lock" && echo $$ > "$root_claim.lock/pid" && bash "$tmp/hold-lock.sh"; rm -rf "$root_claim.lock" ) &
 fi
 lock_holder=$!
 for _ in $(seq 1 50); do [ -e "$tmp/lock-held" ] && break; sleep 0.1; done
 : > "$tmp/loaded-gate"
-handed_over "$moved_home" 300
+handed_over "$moved_home" 600
 wait "$lock_holder" 2> /dev/null || true
 grep -q 'the repository lock is held; try 1 of 10' "${root_claim%.json}.handover.log"
 # A claim a hand-over never reached follows its thread to the home that last ran it when that session claims.
