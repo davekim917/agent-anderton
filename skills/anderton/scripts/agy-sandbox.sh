@@ -200,9 +200,10 @@ owner_of() {
 # guard off; a plugin can carry hooks and agents; a custom agent with inheritCustomizations: false, or inheritScopes none
 # or repo_and_org, runs its subagent with no hooks at all; skills.json and plugins.json can name customizations
 # anywhere. So a root may hold only real rules, skills and workflows directories, with no link and no hooks.json in
-# them. agy also loads custom agents from ~/.gemini/config/agents and from each plugin there when it starts.
+# them. agy also loads custom agents from ~/.gemini/config/agents and from each plugin there when it starts, and loads
+# every plugin ~/.gemini/config/plugins.json registers, from anywhere; its entries and inherits are both optional.
 refuse_workspace_config() {
-  local root entry name found plugin agent_why="a custom agent there can run its subagent with no hooks, so the guard would not see it."
+  local root entry name found plugin manifest="$gemini/config/plugins.json" agent_why="a custom agent there can run its subagent with no hooks, so the guard would not see it."
   for root in "$wt/.agents" "$wt/.agent" "$wt/_agents" "$wt/_agent"; do
     [ ! -L "$root" ] || die "$root is a symbolic link, whose target could stay writable; agy reads it as a workspace customization root."
     [ -e "$root" ] || continue
@@ -229,6 +230,14 @@ refuse_workspace_config() {
     done
   done
   refuse_nonempty "$gemini/config/agents" "$agent_why"
+  [ ! -L "$manifest" ] || die "$manifest is a symbolic link, whose target could stay writable; a plugin it registers can carry hooks and custom agents."
+  if [ -e "$manifest" ]; then
+    [ -f "$manifest" ] && [ -r "$manifest" ] || die "$manifest is not a file agy-sandbox can read; a plugin it registers can carry hooks and custom agents."
+    case $(/usr/bin/tr -d '[:space:]' < "$manifest") in
+      '' | '{}') ;;
+      *) die "$manifest registers plugins; a plugin it registers, from anywhere, can carry hooks and custom agents, so it may only be empty or {}." ;;
+    esac
+  fi
   if [ -d "$gemini/config/plugins" ]; then
     for plugin in "$gemini/config/plugins"/* "$gemini/config/plugins"/.[!.]* "$gemini/config/plugins"/..?*; do
       if [ -L "$plugin" ]; then
@@ -545,8 +554,12 @@ done
 for entry in agents plugins rules skills workflows secplugins; do mkdir -p "$state/$entry"; done
 # agy unpacks its built-ins there on a run outside the sandbox, and rewrites them only when their checksum changes. Read
 # only here, an empty stand-in would leave agy without them.
-[ -d "$state/builtin" ] && [ ! -L "$state/builtin" ] ||
-  die "$state/builtin is missing; run agy once outside the sandbox ($agy, as the owner signs in) to seed it, then start the worker."
+seed="run agy once outside the sandbox ($agy, as the owner signs in) to seed it, then start the worker."
+[ -d "$state/builtin" ] && [ ! -L "$state/builtin" ] || die "$state/builtin is missing; $seed"
+# A seeded directory holds both; one without either is empty or partly unpacked, and would leave agy short of built-ins.
+for name in .manifest .checksum; do
+  [ -f "$state/builtin/$name" ] && [ ! -L "$state/builtin/$name" ] || die "$state/builtin has no $name, so agy has not seeded it; $seed"
+done
 while IFS= read -r path; do add_ro "$path"; done <<EOF
 $(read_only_paths "$wt" "$gitdir")
 EOF

@@ -228,8 +228,8 @@ such copy exists today.
 
 **Known limit, agy versions:** agy unpacks its built-in plugins and skills into `~/.gemini/antigravity-cli/builtin` on a
 run, and rewrites them only when their checksum changes. The launcher keeps that directory read-only and refuses to
-start without it, so after any change of agy version, run agy once unsandboxed, as the worker user (the login command
-above), to reseed it before any worker starts.
+start without it, or with one that lacks its `.manifest` or `.checksum`, so after any change of agy version, run agy
+once unsandboxed, as the worker user (the login command above), to reseed it before any worker starts.
 
 `test/agy-guard-install.test.sh` installs from the bootstrap commit in `test/agy-guard.commit` and checks the installed
 hook's replies, run both by a shell and as split words. CI runs it.
@@ -270,13 +270,16 @@ Just before agy starts, it refuses to run unless all of these hold, checked insi
   else there is refused by name: `hooks.json`, `plugins/`, `agents/`, `skills.json` or any other file, and links;
 - `~/.gemini/config/agents`, and the `agents` directory of every plugin in `~/.gemini/config/plugins/`, is missing or
   an empty directory, never a link, and no plugin there is a link;
+- `~/.gemini/config/plugins.json`, which can register a plugin from anywhere, is missing, empty or `{}`, never a link
+  (both of its fields, `entries` and `inherits`, are optional, so `{}` registers nothing). These workspace and user
+  checks also run before `bwrap` starts;
 - every protected path is mounted read-only;
 - the guard's policy files are not writable.
 
 Before that it also refuses:
 - a policy file inside a writable root;
-- a missing `~/.gemini/antigravity-cli/builtin` (agy's built-in plugins and skills); it never stands an empty, read-only
-  directory in for them;
+- a missing or unseeded `~/.gemini/antigravity-cli/builtin` (agy's built-in plugins and skills): it must hold
+  `.manifest` and `.checksum` as regular files. It never stands an empty, read-only directory in for them;
 - a second hard link to any protected file;
 - a git configuration include (plain or conditional, from the system, global or repository config, followed
   recursively) of a file inside a writable root, and any git configuration file with a second hard link;
@@ -306,6 +309,14 @@ clean.
 definitions after that. The protected directories are read-only only to the worker: a process on the host that writes
 one in that window (a checkout into the worktree, say) gets its definition loaded, and the read-only bind keeps it
 there. Nothing on the host should write a worker's worktree or `~/.gemini/config` while the worker starts.
+
+**Known limit, branch switches:** `rules/`, `skills/` and `workflows/` in a workspace root pass the launcher's checks
+but are read-only for the whole session, so a checkout inside the sandbox that would change, add or remove a file under
+them (switching to a branch with different rules, say) fails. Switch branches before the worker starts, or in a new one.
+
+**Known limit, unwritable worktrees:** the launcher creates any missing workspace root (`.agents`, `.agent`, `_agents`,
+`_agent`) at the worktree's top level before it binds it read-only. If that top level is not writable by the worker user
+and one of them is missing, the launcher cannot create it and exits with `mkdir`'s error before agy starts.
 
 `/opt/agy/etc/sandbox.conf` starts with masks for the credential stores and, with `--nanoclaw`, that install's `data/` and
 `.env`. Add lines, owned by root. A leading `~/` is the home; every other character, brackets and `*` and `?` included,
