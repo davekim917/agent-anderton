@@ -41,6 +41,13 @@ if [ "${1:-}" = --claude-start ]; then
   register_claude_launch "$(cat)" >/dev/null 2>&1
   exit 0
 fi
+# UserPromptSubmit: the turn starts. Prints nothing, since what this hook prints joins the prompt.
+if [ "${1:-}" = --turn-start ]; then
+  turn=$(cat)
+  emit_turn working "$(jq -r '.session_id // empty' <<< "$turn" 2>/dev/null)" \
+    "$(jq -r '.cwd // empty' <<< "$turn" 2>/dev/null)" >/dev/null 2>&1
+  exit 0
+fi
 
 claude_direction_unreceived() {
   local status=0
@@ -185,6 +192,7 @@ EOF
 $(project_holders "$(project_root "$cwd")")
 EOF
   fi
+  emit_turn idle "$sid" "$cwd" >/dev/null 2>&1
   if [ -z "$record" ]; then
     watch_claude_worker
     exit $?
@@ -494,8 +502,9 @@ deliver_pending() {
   rm -rf "$pending"
 }
 
-# The role's and its Claude workers' registry statuses, to ANDERTON_EVENT_COMMAND when one changes (see emit_event in
-# session-lib.sh). A Codex session has no registry status, so it reports none.
+# A worker of this role blocking on a person mid-turn, and going back to work, to ANDERTON_EVENT_COMMAND (see emit_event
+# in session-lib.sh): no hook fires inside a turn, and this watch runs while the holder is idle. Turn hooks own working
+# and idle otherwise. A Codex worker has no registry status, so it reports none.
 status_seen="$holders/$key.statuses"
 registry_status() {
   [ -n "$1" ] || return 0
@@ -506,32 +515,28 @@ registry_status() {
   esac
 }
 emit_statuses() {
-  local claim scope w name wsid now_s="" who st
+  local claim scope w name wsid st last now_s=""
   [ -n "${ANDERTON_EVENT_COMMAND:-}" ] || return 0
   claim=$(jq -r '.claimId // empty' "$record" 2>/dev/null)
   scope=$(jq -r '.scope // empty' "$record" 2>/dev/null)
   [ -n "$claim" ] && [ -n "$scope" ] || return 0
-  if [ "$runtime" = claude ]; then now_s="role $(registry_status "$pid")"; fi
   for w in "$holders"/workers/*.json; do
     [ -f "$w" ] || continue
     [ "$(jq -r '.spawnerClaimId // empty' "$w" 2>/dev/null)" = "$claim" ] || continue
     name=$(jq -r '.name // empty' "$w")
     wsid=$(jq -r '.claudeSession.id // .claudeLaunchId // empty' "$w")
     [ -n "$name" ] && [ -n "$wsid" ] || continue
-    now_s="$now_s
-worker:$name $(registry_status "$(session_pid "$wsid")")"
+    st=$(registry_status "$(session_pid "$wsid")")
+    last=$(awk -v n="$name" '$1 == n { print $2 }' "$status_seen" 2>/dev/null)
+    if [ "$st" = waiting ] && [ "$last" != waiting ]; then
+      emit_event "$claim" "$scope" status "status=waiting" "worker=$name"
+    elif [ "$last" = waiting ] && [ "$st" = working ]; then
+      emit_event "$claim" "$scope" status "status=working" "worker=$name"
+    fi
+    now_s="$now_s$name ${st:-none}
+"
   done
-  while read -r who st; do
-    [ -n "$who" ] && [ -n "${st:-}" ] || continue
-    if grep -qxF "$who $st" "$status_seen" 2>/dev/null; then continue; fi
-    case $who in
-      role) emit_event "$claim" "$scope" status "status=$st" ;;
-      worker:*) emit_event "$claim" "$scope" status "status=$st" "worker=${who#worker:}" ;;
-    esac
-  done <<EOF
-$now_s
-EOF
-  printf '%s\n' "$now_s" > "$status_seen.tmp" 2>/dev/null && mv -f "$status_seen.tmp" "$status_seen"
+  printf '%s' "$now_s" > "$status_seen.tmp" 2>/dev/null && mv -f "$status_seen.tmp" "$status_seen"
 }
 
 while still_holds_role; do

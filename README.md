@@ -655,8 +655,9 @@ A machine can also be told what its Anderton roles are doing, with no text from 
 background with one JSON object on stdin: `{claimId, scope, kind, status?, milestoneKind?, links?, worker?}`.
 Only a role claimed with `--project workgroup:<id>[/<project>]` emits, and its events are:
 - `start`, from the claim (not a rebind) and from each `spawn.sh`, with `worker`;
-- `status` (`working`, `idle` or `waiting`), from the watch each time a Claude holder's or worker's registry
-  status changes;
+- `status`: `working` when a Claude holder's or worker's turn starts (a `UserPromptSubmit` hook, which prints
+  nothing) and `idle` when it ends (the `Stop` hook), so a long turn shows working throughout; the holder's watch adds
+  `waiting` when a worker blocks on a person mid-turn, and `working` when it goes back to work;
 - `milestone`, after a worker's `RESULT:`, `QUESTION:` or `BLOCKED:` was sent: its kind and up to ten GitHub
   URLs from the message, never the message itself;
 - `done`, from `retire.sh`, with `worker`.

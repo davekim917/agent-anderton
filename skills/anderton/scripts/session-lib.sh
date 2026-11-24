@@ -1048,8 +1048,33 @@ emit_event() {
 
 # The host's last event about a worker leaving its Anderton: retired, or released and no longer reporting.
 emit_worker_done() {
-  emit_event "$(jq -r '.spawnerClaimId // empty' "$1" 2>/dev/null)" "$(jq -r '.spawnerScope // empty' "$1" 2>/dev/null)" done \
+  emit_event "$(jq -r '.spawnerClaimId // empty' "$1" 2>/dev/null)" "$(jq -r '.spawnerScope // empty' "$1" 2>/dev/null)" "done" \
     "worker=$(jq -r '.name // empty' "$1" 2>/dev/null)"
+}
+
+# A session's turn starting (working) or ending (idle), to ANDERTON_EVENT_COMMAND: as the role it holds in its
+# repository, or as the worker a role started. Turn boundaries, not the watch, own these two: no watch runs mid-turn.
+emit_turn() {
+  local status=$1 sid=$2 cwd=$3 r w
+  [ -n "${ANDERTON_EVENT_COMMAND:-}" ] && [ -n "$sid" ] || return 0
+  if [ -n "$cwd" ]; then
+    while IFS= read -r r; do
+      [ -n "$r" ] || continue
+      if [ "$(jq -r '.sessionId // empty' "$r" 2>/dev/null)" = "$sid" ]; then
+        emit_event "$(jq -r '.claimId // empty' "$r")" "$(jq -r '.scope // empty' "$r")" status "status=$status"
+        return 0
+      fi
+    done <<EOF
+$(project_holders "$(project_root "$cwd")")
+EOF
+  fi
+  for w in "$holders"/workers/*.json; do
+    [ -f "$w" ] || continue
+    [ "$(jq -r '.claudeSession.id // .claudeLaunchId // empty' "$w" 2>/dev/null)" = "$sid" ] || continue
+    emit_event "$(jq -r '.spawnerClaimId // empty' "$w")" "$(jq -r '.spawnerScope // empty' "$w")" status \
+      "status=$status" "worker=$(jq -r '.name // empty' "$w")"
+    return 0
+  done
 }
 
 # A fresh id for a new claim: the host binds a claim, not a scope, so a later session claiming the same scope is not
@@ -1057,7 +1082,7 @@ emit_worker_done() {
 new_claim_id() {
   local id
   id=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null) || return 1
-  printf '%s\n' "$id" | tr 'A-Z' 'a-z'
+  printf '%s\n' "$id" | tr '[:upper:]' '[:lower:]'
 }
 
 # Up to ten GitHub URLs in a message, for a milestone event; the host keeps only its own repositories' links.

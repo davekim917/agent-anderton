@@ -1113,24 +1113,43 @@ gate "$ev_sid" "$work/wt-ev-worker" lead-session '"Got it, starting now."'
 GATE_RESPONSE='{"success":false}' send "$ev_sid" "$work/wt-ev-worker" lead-session '"BLOCKED: no access."'
 check "a held message, or a send that failed, emits nothing" eval 'sleep 0.5; [ "$(grep -c . "$events")" -eq 3 ]'
 
+turn() { # turn <session id> <cwd>: what UserPromptSubmit runs; sets $out
+  out=$(printf '{"session_id":"%s","cwd":"%s","hook_event_name":"UserPromptSubmit"}' "$1" "$2" |
+    "$scripts/watch.sh" --turn-start 2>&1)
+}
+ev_status() { # ev_status <status> [worker]: the status event's JSON
+  if [ -n "${2:-}" ]; then
+    printf '{"claimId":"%s","scope":"workgroup:acme/ci","kind":"status","status":"%s","worker":"%s"}' "$ev_claim" "$1" "$2"
+  else
+    printf '{"claimId":"%s","scope":"workgroup:acme/ci","kind":"status","status":"%s"}' "$ev_claim" "$1"
+  fi
+}
+turn "$ev_sid" "$work/wt-ev-worker"
+check "a worker's prompt starts its turn as working, and the hook prints nothing" eval '[ -z "$out" ] && wait_events 4 &&
+  [ "$(event 4)" = "$(ev_status working ev-worker)" ]'
+turn lead-1 "$alpha"
+check "so does the role holder's" eval '[ -z "$out" ] && wait_events 5 && [ "$(event 5)" = "$(ev_status working)" ]'
 registry "$p_lead" idle
+check "a long turn shows working throughout: nothing but its end says otherwise" eval 'sleep 1; [ "$(grep -c . "$events")" -eq 5 ]'
 registry "$p_ev" waiting
 printf '{"session_id":"lead-1","cwd":"%s","hook_event_name":"Stop"}' "$alpha" |
   env CLAUDE_PID="$p_lead" ANDERTON_WATCH_TICK=0.05 "$scripts/watch.sh" >/dev/null 2>&1 &
 ev_watch=$!
 sleepers="$sleepers $ev_watch"
-check "the watch emits the holder's and each worker's registry status" eval 'wait_events 5 &&
-  grep -qxF "{\"claimId\":\"$ev_claim\",\"scope\":\"workgroup:acme/ci\",\"kind\":\"status\",\"status\":\"idle\"}" "$events" &&
-  grep -qxF "{\"claimId\":\"$ev_claim\",\"scope\":\"workgroup:acme/ci\",\"kind\":\"status\",\"status\":\"waiting\",\"worker\":\"ev-worker\"}" "$events"'
-check "once per change" eval 'sleep 0.5; [ "$(grep -c "\"kind\":\"status\"" "$events")" -eq 2 ]'
+check "the turn's end says idle" eval 'wait_events 6 && grep -qxF "$(ev_status idle)" "$events"'
+check "and the watch says when a worker blocks on a person mid-turn" eval 'wait_events 7 &&
+  grep -qxF "$(ev_status waiting ev-worker)" "$events"'
+registry "$p_ev" busy
+check "and when it goes back to work" eval 'wait_events 8 && [ "$(event 8)" = "$(ev_status working ev-worker)" ]'
+check "once per change" eval 'sleep 0.5; [ "$(grep -c . "$events")" -eq 8 ]'
 kill "$ev_watch" 2>/dev/null || true
 wait "$ev_watch" 2>/dev/null || true
 
 agents_before=$(cat "$FAKE_AGENTS")
 echo '[]' > "$FAKE_AGENTS"
 run "$scripts/retire.sh" ev-worker
-check "retiring the worker emits its done" eval 'wait_events 6 &&
-  [ "$(event 6)" = "{\"claimId\":\"$ev_claim\",\"scope\":\"workgroup:acme/ci\",\"kind\":\"done\",\"worker\":\"ev-worker\"}" ]'
+check "retiring the worker emits its done" eval 'wait_events 9 &&
+  [ "$(event 9)" = "{\"claimId\":\"$ev_claim\",\"scope\":\"workgroup:acme/ci\",\"kind\":\"done\",\"worker\":\"ev-worker\"}" ]'
 printf '%s\n' "$agents_before" > "$FAKE_AGENTS"
 
 started_at=$(date +%s)
@@ -1143,6 +1162,7 @@ set +e
 status=$?
 set -e
 check "a command that fails never fails the script" [ "$status" -eq 0 ]
+# shellcheck disable=SC2034 # read by the check below
 count=$(grep -c . "$events")
 (cd "$alpha" && env -u ANDERTON_EVENT_COMMAND CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project workgroup:acme/ci >/dev/null)
 rm -f "$ev_record"
@@ -1151,6 +1171,7 @@ check "unset, or for a scope that is not a workgroup's, nothing is emitted" eval
 rm -f "$(holder_path "$(project_root "$alpha")" tabs)"
 spawn; p_other_lead=$pid; session "$p_other_lead" other-lead-1 "$alpha" other-lead
 (cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project workgroup:acme/ci >/dev/null)
+# shellcheck disable=SC2034 # read by the check below
 first_claim=$(jq -r .claimId "$ev_record")
 (cd "$alpha" && env CLAUDE_PID="$p_other_lead" CLAUDE_CODE_SESSION_ID=other-lead-1 "$scripts/claim.sh" --project workgroup:acme/ci --take-over >/dev/null)
 check "another session claiming the same scope gets a new claim id" eval '[ -n "$first_claim" ] &&

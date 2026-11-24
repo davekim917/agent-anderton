@@ -42,9 +42,13 @@ grep -qx '  allow_implicit_invocation: false' "$root/skills/anderton/agents/open
 # A background hook cannot return a decision, and the reporting gate only blocks, so the plugin can never answer a
 # permission prompt.
 hooks="$root/hooks/hooks.json"
-[ "$(jq -c '.hooks | keys' "$hooks")" = '["PostToolUse","PreToolUse","SessionStart","Stop"]' ] ||
-  fail "hooks.json must hook only SessionStart, Stop, PreToolUse and PostToolUse"
-[ "$(jq '[.hooks[][].hooks[]] | length' "$hooks")" = 4 ] || fail "hooks.json must have four handlers"
+[ "$(jq -c '.hooks | keys' "$hooks")" = '["PostToolUse","PreToolUse","SessionStart","Stop","UserPromptSubmit"]' ] ||
+  fail "hooks.json must hook only SessionStart, UserPromptSubmit, Stop, PreToolUse and PostToolUse"
+[ "$(jq '[.hooks[][].hooks[]] | length' "$hooks")" = 5 ] || fail "hooks.json must have five handlers"
+# What a UserPromptSubmit hook prints joins the prompt, so it runs only the turn-start branch, which prints nothing.
+jq -e '.hooks.UserPromptSubmit | length == 1 and (.[0].hooks[0] | .type == "command" and (.asyncRewake | not)
+  and (.command | endswith("/skills/anderton/scripts/watch.sh\" --turn-start")))' "$hooks" >/dev/null ||
+  fail "the UserPromptSubmit hook must run watch.sh --turn-start"
 jq -e '.hooks.SessionStart[0] | .matcher == "startup" and
   (.hooks[0].command | endswith("/skills/anderton/scripts/watch.sh\" --claude-start"))' "$hooks" >/dev/null ||
   fail "the startup hook must register the Claude launch"
