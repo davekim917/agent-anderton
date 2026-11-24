@@ -3341,6 +3341,36 @@ WRITES
   run "$scripts/retire.sh" agy-worker
   check "and retires it once nothing has its directory there" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-worker" ]'
 
+  # waiting.sh reads an agy worktree's refs only inside the sandbox: a git first on PATH that logs where it runs is never
+  # run in or on the worktree, and the ready list still finds the worker's landed commit.
+  agy_agent agy idle "$work/wt-agy-landed"
+  agy_spawn "${agy_env[@]}" -- --provider agy --effort high agy-landed
+  check "an agy worker starts, to land a commit" [ "$status" -eq 0 ]
+  git -C "$alpha" config --unset filter.example-fmt.clean
+  git init -q --bare "$work/alpha-origin.git"
+  git -C "$alpha" remote add origin "$work/alpha-origin.git"
+  git -C "$work/wt-agy-landed" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "example change"
+  git -C "$work/wt-agy-landed" push -q origin HEAD:refs/heads/main 2>/dev/null
+  git -C "$alpha" fetch -q origin
+  mkdir -p "$work/logging-git"
+  printf '#!/bin/sh\nprintf "%%s %%s\\n" "$PWD" "$*" >> "%s"\nexec %s "$@"\n' "$work/host-git.log" "$(command -v git)" \
+    > "$work/logging-git/git"
+  chmod +x "$work/logging-git/git"
+  run env PATH="$work/logging-git:$PATH" "$scripts/waiting.sh"
+  check "waiting.sh lists the agy worker's landed commit" contains "- agy-landed: branch merged into origin/main"
+  check "running host git neither in nor on its worktree" eval '[ -s "$work/host-git.log" ] &&
+    ! grep -qF "$work/wt-agy-landed" "$work/host-git.log"'
+  # A launcher start that fails once, as one does when a socket it listed to mask closes before bwrap mounts over it.
+  mv "$agyroot/bin/agy" "$agyroot/bin/agy.real"
+  printf '#!/bin/sh\nif [ ! -e "%s" ]; then : > "%s"; exit 1; fi\nexec "%s" "$@"\n' "$work/agy-failed-once" "$work/agy-failed-once" \
+    "$agyroot/bin/agy.real" > "$agyroot/bin/agy"
+  chmod +x "$agyroot/bin/agy"
+  run "$scripts/retire.sh" agy-landed
+  check "and retire.sh retires it, trying again a sandbox start that failed" eval '[ "$status" -eq 0 ] &&
+    [ ! -e "$work/wt-agy-landed" ] && [ -e "$work/agy-failed-once" ]'
+  mv "$agyroot/bin/agy.real" "$agyroot/bin/agy"
+  git -C "$alpha" remote remove origin
+
   # A start that timed out, whose pane would not close: the record has no launcher. Once the pane is gone it retires.
   awk '$2 != "w9:p5"' "$FAKE_LOG.herdr-panes" > "$FAKE_LOG.herdr-panes.tmp"
   mv "$FAKE_LOG.herdr-panes.tmp" "$FAKE_LOG.herdr-panes"

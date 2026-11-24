@@ -817,30 +817,49 @@ agy_unlaunched_gone() {
   worktree_unused "$dir"
 }
 
-# Host git reading an agy worker's refs and objects (waiting.sh's finished) starts none of the helpers a repository can
-# name: no fsmonitor, no hooks, no untracked cache, no signature check. agy_git_safe turns that on for this shell; only
-# those calls go through git_for_worktree. Status, which can run a clean filter, never runs on the host for them.
-agy_git_safe() {
-  agy_safe_git=1
-}
-git_for_worktree() {
-  if [ -n "${agy_safe_git:-}" ]; then
-    git -c core.fsmonitor= -c core.hooksPath=/dev/null -c core.untrackedCache=false -c log.showSignature=false "$@"
-  else
-    git "$@"
-  fi
+# The launcher's --anderton-worktree-<$1> answer for agy worker record $2's worktree. A start is tried three times: one
+# fails when a socket the launcher listed to mask closes before bwrap mounts over it. One that runs out its two minutes
+# is not retried.
+agy_inspect() {
+  local dir base out status _
+  dir=$(jq -r '.dir // empty' "$2") base=$(jq -r '.base // empty' "$2")
+  for _ in 1 2 3; do
+    if out=$(cd "$dir" 2>/dev/null && timeout -s KILL 120 "$(agy_root)/bin/agy" "--anderton-worktree-$1" "$base" 2>/dev/null); then
+      printf '%s\n' "$out"
+      return 0
+    else
+      status=$?
+    fi
+    [ "$status" -ne 137 ] || return 1
+  done
+  return 1
 }
 
 # What worktree_work says of agy worker record $1's worktree, worked out by the launcher inside its sandbox, as the
 # worker, read-only and with no network: host git never reads a worktree the worker wrote, so a filter, fsmonitor or
-# hook it names runs only there. Anything the sandbox cannot answer within two minutes is unreadable, which keeps the
-# worktree.
+# hook it names runs only there. Anything the sandbox cannot answer is unreadable, which keeps the worktree.
 agy_worktree_work() {
-  local dir base out
-  dir=$(jq -r '.dir // empty' "$1") base=$(jq -r '.base // empty' "$1")
-  out=$(cd "$dir" 2>/dev/null && timeout -s KILL 120 "$(agy_root)/bin/agy" --anderton-worktree-work "$base" 2>/dev/null) ||
-    out=unreadable
+  local out
+  out=$(agy_inspect work "$1") || out=unreadable
   case $out in '' | uncommitted | flagged | unpushed | unreadable) printf '%s\n' "$out" ;; *) echo unreadable ;; esac
+}
+
+# What waiting.sh's finished reads from agy worker record $1's worktree, worked out the same way inside the sandbox.
+# Sets agy_head, agy_ref, agy_branch, agy_landed (1 or nothing) and agy_landed_at; status 1 when the sandbox gives no
+# answer these scripts can use, a ref or branch that could pass for an option included.
+agy_worktree_refs() {
+  local out
+  agy_head="" agy_ref="" agy_branch="" agy_landed="" agy_landed_at=""
+  out=$(agy_inspect refs "$1") || return 1
+  IFS=$'\x1f' read -r agy_head agy_ref agy_branch agy_landed agy_landed_at <<EOF
+$out
+EOF
+  case $agy_head in '' | *[!0-9a-f]*) return 1 ;; esac
+  case $agy_ref$agy_branch in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  case $agy_ref in -*) return 1 ;; esac
+  case $agy_branch in -*) return 1 ;; esac
+  case $agy_landed in '' | 1) ;; *) return 1 ;; esac
+  case $agy_landed_at in *[!0-9]*) return 1 ;; esac
 }
 
 # True when agy worker record $1's worktree still belongs to the repository spawn.sh recorded: its .git is a plain file

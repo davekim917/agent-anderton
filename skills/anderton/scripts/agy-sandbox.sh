@@ -29,15 +29,18 @@ sha256() {
 [ -f "$pin" ] || die "no $pin; run install-agy.sh first."
 # --anderton-worktree-work <base commit>: tell what in this worktree retiring it would lose (worktree_work's answer),
 # by running git inside a read-only sandbox with no network, so nothing the worker wrote runs outside one.
+# --anderton-worktree-refs <base commit>: the same, for what waiting.sh's finished reads (worktree_refs's answer).
 inspect="" inspect_base=""
-if [ "${1:-}" = --anderton-worktree-work ]; then
-  [ $# -ge 2 ] || die "--anderton-worktree-work needs the worktree's base commit."
-  inspect=1 inspect_base=$2
-fi
+case ${1:-} in
+  --anderton-worktree-work | --anderton-worktree-refs)
+    [ $# -ge 2 ] || die "$1 needs the worktree's base commit."
+    inspect=${1#--anderton-worktree-} inspect_base=$2
+    ;;
+esac
 version=$(pinned version)
 agy="$base/$version/antigravity"
 case ${1:-} in
-  --anderton-worktree-work | --inspect-inside) ;;
+  --anderton-worktree-work | --anderton-worktree-refs | --inspect-inside) ;;
   *) [ -n "$version" ] && [ -x "$agy" ] || die "the pinned agy $version is not installed under $base." ;;
 esac
 [ -n "${HOME:-}" ] && [ -d "$HOME" ] || die "HOME is not set."
@@ -144,13 +147,37 @@ inspect_inside() {
   local out git
   [ "$(/usr/bin/tr -d '\0' < /proc/1/comm 2>/dev/null)" = bwrap ] || die "--inspect-inside runs only as bwrap's child."
   case ,$(/usr/bin/findmnt -rn -o OPTIONS --mountpoint / | /usr/bin/head -n 1), in *,ro,*) ;; *) die "/ is not read-only here." ;; esac
-  git=(/usr/bin/git --no-optional-locks -c core.fsmonitor= -c core.hooksPath=/dev/null -c core.untrackedCache=false)
+  git=(/usr/bin/git --no-optional-locks -c core.fsmonitor= -c core.hooksPath=/dev/null -c core.untrackedCache=false
+    -c log.showSignature=false)
+  if [ "$1" = refs ]; then refs_inside "$2"; fi
+  shift
   out=$("${git[@]}" status --porcelain --untracked-files=normal 2>/dev/null) || { echo unreadable; exit 0; }
   if [ -n "$out" ]; then echo uncommitted; exit 0; fi
   out=$(set -o pipefail; "${git[@]}" ls-files -v 2>/dev/null | /usr/bin/cut -c1 | LC_ALL=C /usr/bin/sort -u) || { echo unreadable; exit 0; }
   case $out in *[abcdefghijklmnopqrstuvwxyzS]*) echo flagged; exit 0 ;; esac
   out=$("${git[@]}" rev-list -1 HEAD --not --remotes "$1" 2>/dev/null) || { echo unreadable; exit 0; }
   if [ -n "$out" ]; then echo unpushed; fi
+  exit 0
+}
+
+# waiting.sh's finished inside the inspecting sandbox, with inspect_inside's git: HEAD, the remote branch work lands on,
+# the checked-out branch, 1 when HEAD (moved off base $1) is in that remote branch, and when it landed there (epoch),
+# separated by 0x1f, since any of the last four may be empty.
+refs_inside() {
+  local head ref branch land landed="" at=""
+  head=$("${git[@]}" rev-parse -q --verify HEAD 2>/dev/null) || exit 1
+  for ref in "$("${git[@]}" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)" origin/main origin/master; do
+    if [ -n "$ref" ] && "${git[@]}" rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1; then break; fi
+    ref=""
+  done
+  branch=$("${git[@]}" symbolic-ref -q --short HEAD 2>/dev/null || true)
+  if [ -n "$ref" ] && [ "$head" != "$1" ] && "${git[@]}" merge-base --is-ancestor "$head" "$ref" 2>/dev/null; then
+    landed=1
+    land=$("${git[@]}" rev-list --first-parent --ancestry-path "$head..$ref" 2>/dev/null | /usr/bin/tail -n 1)
+    if [ -z "$land" ] || [ "$("${git[@]}" rev-parse -q --verify "$land^1" 2>/dev/null)" = "$head" ]; then land=$head; fi
+    at=$("${git[@]}" log -1 --format=%ct "$land" 2>/dev/null || true)
+  fi
+  printf '%s\037%s\037%s\037%s\037%s\n' "$head" "$ref" "$branch" "$landed" "$at"
   exit 0
 }
 
@@ -177,7 +204,7 @@ if [ "${1:-}" = --inside ]; then
   inside "$@"
 fi
 if [ "${1:-}" = --inspect-inside ]; then
-  inspect_inside "$2"
+  inspect_inside "$2" "$3"
 fi
 
 # spawn.sh names a new file for this launcher to create with its pid, which exec keeps through to bwrap: with the pane's
@@ -268,7 +295,7 @@ if [ -n "$inspect" ]; then
   args=(--ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-net --die-with-parent)
   add_credential_masks
   exec python3 -I -c 'import os, sys; os.closerange(3, 1 << 30); os.execvp(sys.argv[1], sys.argv[1:])' \
-    env -i HOME="$HOME" PATH=/usr/bin:/bin "$bwrap" "${args[@]}" --chdir "$(pwd -P)" -- "$self" --inspect-inside "$inspect_base"
+    env -i HOME="$HOME" PATH=/usr/bin:/bin "$bwrap" "${args[@]}" --chdir "$(pwd -P)" -- "$self" --inspect-inside "$inspect" "$inspect_base"
 fi
 wt=$(git rev-parse --show-toplevel 2>/dev/null) || die "run it from the worker's git worktree."
 wt=$(cd "$wt" && pwd -P)

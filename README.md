@@ -161,10 +161,11 @@ workers.
 
 `retire.sh` closes that pane only once herdr reports the worker idle. It removes the worktree only on positive evidence
 that nothing uses it: the launcher has exited (or, for a record with no launcher, herdr reports the pane gone), and no
-process has its directory there, a plain shell included. Host git never reads an agy worktree's status: the launcher
-works out what retiring would lose (`--anderton-worktree-work`) inside a read-only sandbox with no network, so a clean
-filter or other helper the worktree names runs only there, and `git worktree remove --force` then deletes it without
-reading it again. All of this happens only while the worktree's `.git` and `commondir` still lead to the repository it
+process has its directory there, a plain shell included. Host git never runs on an agy worktree: the launcher works out
+what retiring would lose (`--anderton-worktree-work`) and what `waiting.sh` reads of its commits
+(`--anderton-worktree-refs`) inside a read-only sandbox with no network, so a clean filter or other helper the worktree
+names runs only there. `gh` starts in the repository's checkout instead, and `git worktree remove --force`, run on the
+repository, deletes the worktree without reading it. All of this happens only while the worktree's `.git` and `commondir` still lead to the repository it
 started from; the same holds when a failed spawn cleans up. `ANDERTON_AGY_ROOT` names another install root.
 
 Installing takes two steps, so root never writes inside a user's home.

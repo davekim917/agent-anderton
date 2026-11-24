@@ -210,37 +210,52 @@ EOF
     and (.name == $n or ($id != "" and .id == $id) or ((.cwd // "") as $c | $c == $d or ($c | startswith($d + "/")))))' >/dev/null 2>&1
 }
 finished() { # finished <record>: prints why the worker's work is finished, "open" when a PR for it is open, or nothing
-  local dir base head ref land at branch prs
+  local dir base head ref land at branch prs gh_dir agy=""
   dir=$(jq -r '.dir // empty' "$1")
   [ -n "$dir" ] || return 0
   if [ ! -d "$dir" ]; then
     echo "worktree gone"
     return
   fi
-  head=$(git_for_worktree -C "$dir" rev-parse -q --verify HEAD 2>/dev/null) || return 0
   base=$(jq -r '.base // empty' "$1")
-  for ref in "$(git_for_worktree -C "$dir" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)" origin/main origin/master; do
-    if [ -n "$ref" ] && git_for_worktree -C "$dir" rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1; then break; fi
-    ref=""
-  done
+  # An agy worker's worktree is read only inside its sandbox, and gh, which runs git where it starts, starts in the
+  # repository's own checkout instead.
+  if [ "$(jq -r '.provider // "claude"' "$1")" = agy ]; then
+    agy_worktree_refs "$1" || return 0
+    agy=1 head=$agy_head ref=$agy_ref branch=$agy_branch
+    gh_dir=$(jq -r '.root // empty' "$1")
+    [ -n "$gh_dir" ] || branch=""
+  else
+    head=$(git -C "$dir" rev-parse -q --verify HEAD 2>/dev/null) || return 0
+    for ref in "$(git -C "$dir" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)" origin/main origin/master; do
+      if [ -n "$ref" ] && git -C "$dir" rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1; then break; fi
+      ref=""
+    done
+    branch=$(git -C "$dir" symbolic-ref -q --short HEAD 2>/dev/null || true)
+    gh_dir=$dir
+  fi
   # Any open PR for its branch, whatever it targets, means the work is not finished; only a PR whose head is the
   # worktree's HEAD settles it otherwise, since a branch reused after its PR merged holds newer work.
-  branch=$(git_for_worktree -C "$dir" symbolic-ref -q --short HEAD 2>/dev/null || true)
   prs=""
   if [ -n "$branch" ] && command -v gh >/dev/null 2>&1; then
-    prs=$(cd "$dir" && gh pr list --head "$branch" --state all --limit 20 --json number,state,mergedAt,closedAt,headRefOid 2>/dev/null) || prs=""
+    prs=$(cd "$gh_dir" && gh pr list --head "$branch" --state all --limit 20 --json number,state,mergedAt,closedAt,headRefOid 2>/dev/null) || prs=""
     if printf '%s' "$prs" | jq -e 'any(.[]?; .state == "OPEN")' >/dev/null 2>&1; then
       echo open
       return 0
     fi
   fi
   # A worker still at the commit it started from has landed nothing.
-  if [ -n "$ref" ] && [ "$head" != "$base" ] && git_for_worktree -C "$dir" merge-base --is-ancestor "$head" "$ref" 2>/dev/null; then
+  if [ -n "$agy" ]; then
+    if [ -n "$agy_landed" ]; then
+      echo "branch merged into $ref${agy_landed_at:+ $(ago "$agy_landed_at")}"
+      return
+    fi
+  elif [ -n "$ref" ] && [ "$head" != "$base" ] && git -C "$dir" merge-base --is-ancestor "$head" "$ref" 2>/dev/null; then
     # It landed in the oldest commit on the branch's first-parent line that contains it: a merge commit, or itself
     # when it was fast-forwarded or rebased in, and then the commit after it has it as first parent.
-    land=$(git_for_worktree -C "$dir" rev-list --first-parent --ancestry-path "$head..$ref" 2>/dev/null | tail -n 1)
-    if [ -z "$land" ] || [ "$(git_for_worktree -C "$dir" rev-parse -q --verify "$land^1" 2>/dev/null)" = "$head" ]; then land=$head; fi
-    at=$(git_for_worktree -C "$dir" log -1 --format=%ct "$land" 2>/dev/null || true)
+    land=$(git -C "$dir" rev-list --first-parent --ancestry-path "$head..$ref" 2>/dev/null | tail -n 1)
+    if [ -z "$land" ] || [ "$(git -C "$dir" rev-parse -q --verify "$land^1" 2>/dev/null)" = "$head" ]; then land=$head; fi
+    at=$(git -C "$dir" log -1 --format=%ct "$land" 2>/dev/null || true)
     echo "branch merged into $ref${at:+ $(ago "$at")}"
     return
   fi
@@ -304,7 +319,6 @@ EOF
     if [ -z "$all" ] && [ "$(jq -r '.root // empty' "$r")" != "$root" ]; then continue; fi
     [ -z "$mine" ] || worker_belongs "$r" "$root" "$mine" || continue
     provider=$(jq -r '.provider // "claude"' "$r")
-    agy_safe_git=""
     if [ "$provider" = codex ]; then
       "$(dirname "$0")/codex-worker.py" inactive "$r" || continue
     elif [ "$provider" = agy ]; then
@@ -314,13 +328,12 @@ EOF
         stopped:* | running:idle | running:done) ;;
         *) continue ;;
       esac
-      # Host git reads its worktree below: only one still pointing into its repository, and with no helpers.
+      # Its worktree is read below, inside the sandbox: only one still pointing into its repository.
       if [ -d "$dir" ] && ! agy_git_pointer_ok "$r"; then
         lines="$lines- $name: its .git no longer points into its repository; inspect it before retiring
 "
         continue
       fi
-      agy_git_safe
     elif [ -z "$claude_ready" ] || worker_busy "$r"; then
       continue
     fi
@@ -346,7 +359,6 @@ EOF
     lines="$lines- $name: $why
 "
   done
-  agy_safe_git=""
   if [ -n "$lines" ]; then printf '=== Ready to retire (run retire.sh <name>)\n%s' "$lines"; fi
 }
 [ -n "$blocked" ] || ready_to_retire
