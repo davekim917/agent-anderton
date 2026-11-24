@@ -171,6 +171,11 @@ sudo skills/anderton/scripts/install-agy.sh --user <worker user> --guard <bootst
 /opt/agy/libexec/register-agy   # as the worker user
 ```
 
+**Known limit, upgrades:** the installer refuses any symbolic link under the prefix. A guard copy that an installer older
+than this one left there can still hold bun's `node_modules/.cache` links, and then the upgrade stops at the scan and
+names the link. Remove that copy, `<prefix>/agy-guard/<digest>`, and rerun. Nothing is installed in `/opt` yet, so no
+such copy exists today.
+
 `test/agy-guard-install.test.sh` installs from the bootstrap commit in `test/agy-guard.commit` and checks the installed
 hook's replies, run both by a shell and as split words. CI runs it.
 
