@@ -204,10 +204,10 @@ if [ "$launcher" != bg ] && [ "$provider" = codex ]; then
   elif now=$(codex_pane "$launcher" "$socket" "$pane" "$server") && [ "$now" != gone ]; then
     shows_thread "$now" "$id" ||
       refuse_pane "its $launcher pane $pane does not show thread ${id:-(none registered)} (another conversation was opened there, Codex left it, or $launcher cannot say)"
-    # The check above took time: a direction or a turn that started since stops the close.
-    "$scripts/codex-worker.py" inactive "$record" || refuse_pane "thread $id became active while retiring"
     # A turn typed and finished since the first read leaves the thread inactive again: its conversation is read again.
     conversation_gate
+    # Those checks took time: a direction or a turn that started since, even during that read, stops the close.
+    "$scripts/codex-worker.py" inactive "$record" || refuse_pane "thread $id became active while retiring"
     # The last read before the close, after the slow daemon call: only a change made after it goes unseen.
     now=$(codex_pane "$launcher" "$socket" "$pane" "$server")
     if [ "$now" != gone ]; then

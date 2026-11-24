@@ -524,7 +524,8 @@ from anyone but that Anderton (typed in the worker's tab, a voice relay, another
 holds the retirement: it exits 4, lists each message's time and first line, and writes `<name>.held` beside the
 record, which `waiting.sh` (and so the watch) lists until the worker is retired. The Anderton's own messages are
 known from the record alone, never from a display name or the caller: the processes Claude Code verified as the
-record's spawner session, and for Codex, the client ids of the directions `worker.sh message` recorded sending. An
+record's spawner session, and for Codex, the client ids of the directions `worker.sh message` recorded sending (on a
+record from before that ledger, whose finished directions left no id, the text `worker.sh` adds to each). An
 entry a person typed counts whatever its text, apart from the launch brief itself. What Claude Code injects does not
 count: tool results, skill bodies, compaction summaries, hook and Stop feedback, system reminders, task
 notifications, usage-reset and permission-grant prompts, sub-agent hand-backs and agent-team teammates. A report

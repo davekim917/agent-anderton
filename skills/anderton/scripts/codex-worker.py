@@ -519,11 +519,13 @@ def record_sent_direction(worker, client_id):
 def inbound_since_report(client, worker, through_ms=None):
     """The user messages in the worker's thread since its last report that its Anderton did not send, oldest first:
     a completed turn whose final message is a report ends the scan. The Anderton's are its launch brief and the
-    directions worker.sh recorded sending, known by their client ids; a message's text never makes it the Anderton's."""
+    directions worker.sh recorded sending, known by their client ids. Only on a record from before that ledger, whose
+    finished directions left no id behind, does the text worker.sh adds mark a direction."""
     if not worker.get("id"):
         raise ValueError("the record names no Codex thread")
     thread = worker["id"]
     read_thread(client, worker)
+    legacy = "codexDirectionLedger" not in worker
     ledger = worker.get("codexDirectionLedger") or {}
     sent = set(ledger.get("ids", [])) | {entry.get("clientUserMessageId", entry["id"]) for entry in pending_directions(worker)}
     marker = f"Anderton launch {uuid.UUID(worker['codexLaunchToken'])}" if worker.get("codexLaunchToken") else None
@@ -545,6 +547,8 @@ def inbound_since_report(client, worker, through_ms=None):
             # A time no earlier than the message's own, so a review through it covers the message.
             at = entry.get("completedAtMs") or entry.get("startedAtMs") or turn_end
             if item.get("clientId") in sent or (marker and launch_turn and text.partition("\n")[0] == marker):
+                continue
+            if legacy and text.startswith(DIRECTION_PREFIX):
                 continue
             if through_ms is not None and at <= through_ms:
                 continue

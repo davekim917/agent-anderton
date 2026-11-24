@@ -843,8 +843,14 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual((0, []), self.inbound())
         self.assertIn(direction["clientUserMessageId"], self.worker["codexDirectionLedger"]["ids"])
 
-    def test_text_never_makes_a_message_the_andertons(self):
+    def test_a_direction_from_before_the_ledger_is_the_andertons_by_its_text(self):
         self.reported_launch()
+        self.typed_turn("old-direction", worker_api.DIRECTION_PREFIX + "Rebase on main", 1795000000250)
+        self.assertEqual((0, []), self.inbound())
+
+    def test_on_a_ledger_record_text_never_makes_a_message_the_andertons(self):
+        self.reported_launch()
+        self.worker["codexDirectionLedger"] = {"ids": []}
         self.typed_turn("direction-text", worker_api.DIRECTION_PREFIX + "Rebase on main", 1795000000250)
         self.assertEqual(4, self.inbound()[0])
         self.client.turns.pop(0)

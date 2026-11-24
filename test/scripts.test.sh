@@ -2860,6 +2860,8 @@ if [ "$1" = inbound-since-report ]; then
   calls=$(( $(cat "$FAKE_LOG.inbound" 2>/dev/null || echo 0) + 1 ))
   echo "$calls" >"$FAKE_LOG.inbound"
   if [ -n "${FAKE_INBOUND:-}" ] && [ "$calls" -ge "${FAKE_INBOUND_FROM:-1}" ]; then printf '%s\n' "$FAKE_INBOUND"; exit 4; fi
+  # With $FAKE_ACTIVE_AFTER_SCAN, a turn starts in the thread just after the second read.
+  if [ -n "${FAKE_ACTIVE_AFTER_SCAN:-}" ] && [ "$calls" -ge 2 ]; then : >"$FAKE_LOG.became-active"; fi
   echo '{"messages":[]}'
   exit 0
 fi
@@ -2874,6 +2876,7 @@ if [ "$1" = state ]; then
 fi
 n=$(cat "$FAKE_LOG.inactive" 2>/dev/null || echo 0)
 echo $((n + 1)) >"$FAKE_LOG.inactive"
+[ ! -e "$FAKE_LOG.became-active" ] || exit 1
 if [ "$((n + 1))" = "${FAKE_RETITLE_AT:-}" ]; then
   for f in "$FAKE_LOG.panes-open" "$FAKE_LOG.herdr-panes"; do
     [ ! -f "$f" ] || { awk '{ $NF = "019a0000-9999-7222-8333-44445..."; print }' "$f" >"$f.tmp" && mv "$f.tmp" "$f"; }
@@ -2892,7 +2895,7 @@ tmux_pane() { # tmux_pane <pane id> [title]: that pane, open in the fake Codex t
 cx_retire() { # cx_retire <name> [env...]: a fresh daemon count, nothing killed or closed yet
   local n=$1
   shift
-  rm -f "$FAKE_LOG.inactive" "$FAKE_LOG.inbound"
+  rm -f "$FAKE_LOG.inactive" "$FAKE_LOG.inbound" "$FAKE_LOG.became-active"
   : >"$FAKE_LOG.killed"
   : >"$FAKE_LOG.closed"
   run env "$@" "$codexdir/retire.sh" "$n"
@@ -2961,6 +2964,9 @@ check "retire.sh holds a Codex worker whose thread has a turn typed in its pane 
 cx_retire cx-tab FAKE_INBOUND_FROM=2 FAKE_INBOUND='{"messages":[{"at":"2026-11-18T11:06:40.250Z","from":"the user","line":"Also add the retry check."}]}'
 check "or one typed while retire.sh works: its conversation is read again just before the pane closes" \
   eval '[ "$status" -eq 4 ] && [ "$(cat "$FAKE_LOG.inbound")" -eq 2 ] && [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-cx-tab" ]'
+cx_retire cx-tab FAKE_ACTIVE_AFTER_SCAN=1
+check "or one whose thread starts a turn after that read: the thread is checked for activity after it, before the close" \
+  eval '[ "$status" -eq 1 ] && contains "became active while retiring" && [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-cx-tab" ]'
 # The home its record names, which the account helper also finds its thread open on.
 cx_home=$(cd "$(mktemp -d /tmp/anderton-cxhome.XXXXXX)" && pwd -P)
 printf '#!/usr/bin/env bash\n[ "$1" = --locate-thread ] && [ "$2" = %s ] && { echo %s; exit 0; }\nexit 7\n' "$cx_thread" "$cx_home" >"$work/locate-same"
