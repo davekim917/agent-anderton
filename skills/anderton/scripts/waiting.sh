@@ -336,7 +336,7 @@ EOF
     fi
     [ -n "$why" ] || continue
     if [ -d "$dir" ]; then
-      case $(worktree_work "$dir" "$(jq -r '.base // empty' "$r")") in
+      case $(if [ "$provider" = agy ]; then agy_worktree_work "$r"; else worktree_work "$dir" "$(jq -r '.base // empty' "$r")"; fi) in
         uncommitted) why="$why, but has uncommitted work" ;;
         unpushed) why="$why, but has commits no remote branch has" ;;
         flagged) why="$why, but git marks files in it assume-unchanged or skip-worktree, so retire.sh will keep it" ;;

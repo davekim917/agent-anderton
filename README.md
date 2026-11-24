@@ -150,19 +150,22 @@ changed guard registration and a missing login, since agy starts its own sign-in
 
 Before it sends the brief, `spawn.sh` proves the sandbox. The launcher writes its pid to a file `spawn.sh` names, and
 then becomes `bwrap`. That process must run the bwrap `install-agy.sh` pinned, must have a child of it in a mount
-namespace of its own, and must descend from the worker's herdr pane. An agy that fails any of these gets no brief, and
-only its pane is closed.
+namespace of its own, and must descend from the worker's herdr pane (by the `HERDR_PANE_ID` entry of its environment).
+herdr must also report the agy's agent session, which binds every later step to that instance. An agy that fails any
+of these gets no brief, and only its pane is closed.
 
 agy keeps no transcript these scripts read yet, so `worker.sh status`, `output` (a screen read) and `message` go
 through the worker's herdr pane. Each acts only on one herdr snapshot that shows the agy instance `spawn.sh` saw in that
 pane, in the worker's worktree, and only after a last check that the proven launcher is still alive. No sweep reads agy
 workers.
 
-`retire.sh` closes that pane only once herdr reports the worker idle. It removes the worktree only after the launcher
-has exited, and never while the pane's new occupant works in it. Its host git runs with `core.fsmonitor`,
-`core.hooksPath` and `core.untrackedCache` switched off, and only while the worktree's `.git` and `commondir` still
-lead to the repository it started from. A record left with no launcher by a start that timed out retires once its pane
-is gone and nothing runs in its worktree. `ANDERTON_AGY_ROOT` names another install root.
+`retire.sh` closes that pane only once herdr reports the worker idle. It removes the worktree only on positive evidence
+that nothing uses it: the launcher has exited (or, for a record with no launcher, herdr reports the pane gone), and no
+process has its directory there, a plain shell included. Host git never reads an agy worktree's status: the launcher
+works out what retiring would lose (`--anderton-worktree-work`) inside a read-only sandbox with no network, so a clean
+filter or other helper the worktree names runs only there, and `git worktree remove --force` then deletes it without
+reading it again. All of this happens only while the worktree's `.git` and `commondir` still lead to the repository it
+started from; the same holds when a failed spawn cleans up. `ANDERTON_AGY_ROOT` names another install root.
 
 Installing takes two steps, so root never writes inside a user's home.
 

@@ -157,13 +157,12 @@ if [ "$launcher" != bg ] && [ "$provider" = codex ]; then
     exit 1
   fi
 elif [ "$provider" = agy ]; then
-  # Host git below reads a worktree the worker wrote: refuse one that no longer points at its repository, and run
-  # git with none of the helpers a repository can name.
+  # Below, the worktree is inspected only inside the launcher's read-only sandbox, and removed by host git only with
+  # --force, which reads nothing in it: refuse one that no longer points at its repository.
   if [ "$worktree" = true ] && [ -e "$dir" ] && ! agy_git_pointer_ok "$record"; then
     echo "agy worker '$name': $dir/.git no longer points into the repository it was started from, so host git will not read it. Inspect it, then remove the worktree by hand." >&2
     exit 1
   fi
-  agy_git_safe
   # Only the recorded pane is closed, only while the launcher spawn.sh verified runs the same agy instance there, and
   # only after one more check of that launcher just before the close.
   agy_check "$record"
@@ -177,7 +176,9 @@ elif [ "$provider" = agy ]; then
       HERDR_SOCKET_PATH="$socket" herdr pane close "$pane" >/dev/null 2>&1 || true
       ;;
     stopped)
-      # Its launcher has exited; whatever the pane shows now is someone else's, and may be working in the worktree.
+      # Its launcher has exited, so the instance it bound is gone. Whatever holds the pane now is someone else's: herdr
+      # showing it in the worktree keeps the worktree, and herdr showing nothing there is no evidence it is unused
+      # (the check of every process below is).
       case $agy_cwd in
         "$dir" | "$dir"/*)
           echo "agy worker '$name' has stopped, but herdr pane $pane now runs ${agy_agent:-something} in $dir; kept its worktree and record." >&2
@@ -203,6 +204,12 @@ elif [ "$provider" = agy ]; then
   done
   if agy_launcher_alive "$record"; then
     echo "Could not confirm agy worker '$name' stopped (herdr pane $pane); kept its worktree and record." >&2
+    exit 1
+  fi
+  # The worktree goes only on positive evidence that nothing uses it: no process has its directory there. herdr
+  # failing to answer, or finding no agent in the pane, says nothing about a plain shell in it.
+  if [ "$worktree" = true ] && [ -d "$dir" ] && ! worktree_unused "$dir"; then
+    echo "agy worker '$name' has stopped, but a process still has its directory in $dir (the pane's shell, or something started there); kept its worktree and record." >&2
     exit 1
   fi
 elif [ "$launcher" != bg ] && [ -n "$mixed" ] && [ -n "$pane" ]; then
@@ -255,13 +262,15 @@ else
 fi
 
 if [ "$worktree" = true ] && [ -d "$dir" ]; then
-  case $(worktree_work "$dir" "$(jq -r '.base // empty' "$record")") in
+  if [ "$provider" = agy ]; then work=$(agy_worktree_work "$record"); else work=$(worktree_work "$dir" "$(jq -r '.base // empty' "$record")"); fi
+  case $work in
     uncommitted) echo "Stopped '$name'. Kept $dir: it has uncommitted changes."; exit 3 ;;
     unpushed) echo "Stopped '$name'. Kept $dir: it has commits no remote branch has."; exit 3 ;;
     flagged) echo "Stopped '$name'. Kept $dir: git marks files in it assume-unchanged or skip-worktree (as a sparse checkout does), so status cannot show their edits. Remove it yourself once nothing in it needs keeping."; exit 3 ;;
     unreadable) echo "Stopped '$name'. Kept $dir: git could not read its status or compare it with its base and remotes."; exit 3 ;;
   esac
-  git_for_worktree -C "$root" worktree remove "$dir"
+  # Its state was read in the sandbox above; --force keeps host git from reading the worktree again to decide.
+  if [ "$provider" = agy ]; then git -C "$root" worktree remove --force "$dir"; else git -C "$root" worktree remove "$dir"; fi
 fi
 if [ "$launcher" = bg ] && ! claude rm "$id" >/dev/null 2>&1; then
   echo "Stopped '$name' and removed its worktree, but claude rm $id failed; kept the record. Rerun to finish." >&2

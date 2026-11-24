@@ -64,15 +64,19 @@ case "$1 $2" in
     # agy through the launcher: in the tab's directory and in pane $7 (by HERDR_PANE_ID, which herdr sets), the real
     # bwrap sandboxing a sleep, its pid in the launch file. With $FAKE_AGY_FOREIGN some other agy answers and writes
     # nothing; $FAKE_AGY_KIND=script runs a shell script named bwrap instead, =same-ns a process whose child shares its
-    # mount namespace; $FAKE_AGY_PANE names another pane in its environment.
+    # mount namespace; $FAKE_AGY_PANE names another pane in its environment, and $FAKE_AGY_NOTE adds a variable.
+    # $FAKE_AGY_WRITE is a script run in the tab's directory first, for what the worker writes there.
     if [ "$5" = agy ] && [ "${11:-}" = --anderton-launch-file ] && [ -z "${FAKE_AGY_FOREIGN:-}" ]; then
       launch_file=${12} agy_pane=$7 agent_name=$3
+      if [ -n "${FAKE_AGY_WRITE:-}" ]; then (cd "$(cat "$FAKE_LOG.tab-cwd")" && sh "$FAKE_AGY_WRITE"); fi
       case ${FAKE_AGY_KIND:-sandbox} in
         sandbox) set -- "$FAKE_BWRAP" --ro-bind / / --dev /dev --proc /proc --unshare-pid -- sleep 600 ;;
         script) set -- "$FAKE_SCRIPT_BWRAP" ;;
         same-ns) set -- python3 -c 'import subprocess, time; subprocess.Popen(["python3", "-c", "import time; time.sleep(600)"]); time.sleep(600)' ;;
       esac
-      (cd "$(cat "$FAKE_LOG.tab-cwd")" && exec env HERDR_PANE_ID="${FAKE_AGY_PANE:-$agy_pane}" HERDR_SOCKET_PATH="$sock" "$@") \
+      note=()
+      if [ -n "${FAKE_AGY_NOTE:-}" ]; then note=("AGY_NOTE=$FAKE_AGY_NOTE"); fi
+      (cd "$(cat "$FAKE_LOG.tab-cwd")" && exec env HERDR_PANE_ID="${FAKE_AGY_PANE:-$agy_pane}" HERDR_SOCKET_PATH="$sock" "${note[@]}" "$@") \
         >/dev/null 2>&1 </dev/null &
       (set -C && echo "$!" > "$launch_file")
       echo "$!" > "$FAKE_LOG.agy-pid.$agy_pane"
@@ -95,8 +99,9 @@ case "$1 $2" in
       mv "$get.then" "$get"
       if [ -f "$get.kill" ]; then
         rm "$get.kill"
+        kill -STOP "$(cat "$FAKE_LOG.agy-pid.$3")" 2>/dev/null || true # so it starts no child once its children are gone
         pkill -KILL -P "$(cat "$FAKE_LOG.agy-pid.$3")" 2>/dev/null || true
-        kill "$(cat "$FAKE_LOG.agy-pid.$3")" 2>/dev/null || true
+        kill -KILL "$(cat "$FAKE_LOG.agy-pid.$3")" 2>/dev/null || true
         sleep 0.3
       fi
     fi
@@ -122,8 +127,9 @@ case "$1 $2" in
     echo "pane $3" >> "$FAKE_LOG.closed"
     if [ -n "${FAKE_HERDR_CLOSE_FAIL:-}" ]; then exit 1; fi
     if [ -f "$FAKE_LOG.agy-pid.$3" ]; then
+      kill -STOP "$(cat "$FAKE_LOG.agy-pid.$3")" 2>/dev/null || true
       pkill -KILL -P "$(cat "$FAKE_LOG.agy-pid.$3")" 2>/dev/null || true
-      kill "$(cat "$FAKE_LOG.agy-pid.$3")" 2>/dev/null || true
+      kill -KILL "$(cat "$FAKE_LOG.agy-pid.$3")" 2>/dev/null || true
       sleep 0.3
     fi
     awk -v s="$sock" -v p="$3" '!($1 == s && $2 == p)' "$FAKE_LOG.herdr-panes" > "$FAKE_LOG.herdr-panes.tmp" 2>/dev/null || true
@@ -3057,7 +3063,8 @@ check "which retire.sh retires" [ "$status" -eq 0 ]
 agyroot="$work/agyroot"
 agyhome="$work/agyhome"
 mkdir -p "$agyroot/bin" "$agyroot/etc" "$agyhome/.gemini/config" "$agyhome/.gemini/antigravity-cli" "$work/fakebwrap"
-printf '#!/bin/sh\nexit 0\n' > "$agyroot/bin/agy"
+# The real launcher: spawn.sh only checks it is there, and retire.sh has it inspect a worktree inside its sandbox.
+cp "$scripts/agy-sandbox.sh" "$agyroot/bin/agy"
 chmod +x "$agyroot/bin/agy"
 # A shell script named bwrap, which the sandbox check must not take for the sandbox.
 printf '#!/bin/sh\nwhile :; do sleep 1; done\n' > "$work/fakebwrap/bwrap"
@@ -3117,6 +3124,8 @@ else
   agy_refused "an agy worker without a stored login is refused" 1 "no stored login"
   mv "$work/agy-token.saved" "$agyhome/.gemini/antigravity-cli/antigravity-oauth-token"
 
+  # retire.sh, worker.sh and waiting.sh find the launcher where spawn.sh did.
+  export ANDERTON_AGY_ROOT="$agyroot"
   # The sandbox check: each case fails one of its three tests and passes the others, and gets no brief.
   rm -f "$FAKE_LOG.prompt"
   : > "$FAKE_LOG.closed"
@@ -3135,7 +3144,41 @@ else
   agy_spawn "${agy_env[@]}" FAKE_AGY_KIND=same-ns -- --provider agy --effort high agy-refused
   check "the pinned executable with no child in a mount namespace of its own is not the sandbox" eval '[ "$status" -eq 1 ] &&
     contains "is not the pinned bwrap" && [ ! -e "$FAKE_LOG.prompt" ]'
+  check "and its worktree is kept, since what is pinned as bwrap cannot sandbox git reading it" eval '
+    contains "Kept $work/wt-agy-refused" && [ -d "$work/wt-agy-refused" ]'
   agy_pin "$real_bwrap"
+  run "$scripts/retire.sh" agy-refused
+  check "which retire.sh removes once the pinned bwrap can" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-refused" ]'
+  agy_spawn "${agy_env[@]}" FAKE_AGY_PANE=w9:p99 "FAKE_AGY_NOTE=$(printf 'a note\nHERDR_PANE_ID=w9:p5')" -- --provider agy --effort high agy-noted
+  check "a variable whose value holds a line HERDR_PANE_ID=<this pane> does not put another pane's sandbox in it" eval '[ "$status" -eq 1 ] &&
+    contains "is not the pinned bwrap" && [ ! -e "$FAKE_LOG.prompt" ]'
+  # herdr's agent session is what binds later directions to this agy; without one the brief is never sent.
+  printf '%s {"result":{"agent":{"agent":"agy","agent_status":"idle","pane_id":"w9:p5","cwd":"%s","agent_session":null}}}\n' \
+    "$work/herdr.sock" "$work/wt-agy-unbound" > "$FAKE_LOG.agent-get.w9:p5"
+  : > "$FAKE_LOG.closed"
+  agy_spawn "${agy_env[@]}" -- --provider agy --effort high agy-unbound
+  check "an agy with no herdr agent session gets no brief" eval '[ "$status" -eq 1 ] && contains "no agent session" &&
+    [ ! -e "$FAKE_LOG.prompt" ] && grep -qx "pane w9:p5" "$FAKE_LOG.closed" && [ ! -e "$work/wt-agy-unbound" ]'
+  # What a worker can write in its worktree: a .gitattributes naming as a clean filter the formatter the repository's
+  # config runs from the checkout, a staged file whose stat then changes, so git status runs the filter, and then
+  # the formatter itself, which leaves a mark outside the worktree. Only the read-only sandbox may run it.
+  git -C "$alpha" config filter.example-fmt.clean "sh ./fmt.sh"
+  cat > "$work/agy-writes.sh" <<WRITES
+printf '#!/bin/sh\\ncat\\n' > fmt.sh
+printf '*.txt filter=example-fmt\\n' > .gitattributes
+echo example > notes.txt
+git add fmt.sh .gitattributes notes.txt
+printf '#!/bin/sh\\ntouch "%s" 2>/dev/null\\ncat\\n' "$work/filter-ran" > fmt.sh
+touch -d 2001-01-01 notes.txt
+WRITES
+  agy_spawn "${agy_env[@]}" FAKE_AGY_PANE=w9:p99 "FAKE_AGY_WRITE=$work/agy-writes.sh" -- --provider agy --effort high agy-filtered
+  check "a failed agy spawn runs no clean filter its worktree names outside the sandbox" eval '[ "$status" -eq 1 ] &&
+    [ ! -e "$work/filter-ran" ] && contains "Kept $work/wt-agy-filtered"'
+  git -C "$work/wt-agy-filtered" reset -q && git -C "$work/wt-agy-filtered" clean -qfd
+  run "$scripts/retire.sh" agy-filtered
+  check "and retire.sh then removes its clean worktree" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-filtered" ] &&
+    [ ! -e "$work/filter-ran" ]'
+  rm -f "$work/filter-ran"
 
   agy_agent agy
   agy_spawn "${agy_env[@]}" -- --provider agy --effort xhigh --model gemini-example agy-worker
@@ -3177,6 +3220,17 @@ else
   agy_agent agy idle "$work/wt-agy-worker" "" agy-session-2
   run "$scripts/worker.sh" message agy-worker "Rebase on main."
   check "nor while it shows another agy instance" eval '[ "$status" -eq 1 ] && [ ! -e "$FAKE_LOG.prompt" ]'
+  # A record that saved no instance binds to none: neither script acts on whatever agy the pane shows.
+  agy_agent agy
+  jq -c '.agyInstance = ""' "$agy_record" > "$agy_record.tmp" && mv "$agy_record.tmp" "$agy_record"
+  run "$scripts/worker.sh" message agy-worker "Rebase on main."
+  check "nor for a record that saved no agy instance" eval '[ "$status" -eq 1 ] && [ ! -e "$FAKE_LOG.prompt" ]'
+  : > "$FAKE_LOG.closed"
+  run "$scripts/retire.sh" agy-worker
+  check "and retire.sh leaves that pane and worktree alone" eval '[ "$status" -eq 1 ] && ! grep -qx "pane w9:p5" "$FAKE_LOG.closed" &&
+    [ -d "$work/wt-agy-worker" ]'
+  jq -c '.agyInstance = "agy-session-1"' "$agy_record" > "$agy_record.tmp" && mv "$agy_record.tmp" "$agy_record"
+  agy_agent agy idle "$work/wt-agy-worker" "" agy-session-2
   : > "$FAKE_LOG.closed"
   run "$scripts/retire.sh" agy-worker
   check "and retire.sh leaves that instance's pane open" eval '[ "$status" -eq 1 ] && ! grep -qx "pane w9:p5" "$FAKE_LOG.closed"'
@@ -3214,6 +3268,33 @@ else
     [ ! -e "$agy_launch" ]'
   git -C "$agy_root_repo" config --unset extensions.worktreeConfig
 
+  # The same writes in a running worker's worktree: retiring it reads them only in the sandbox.
+  agy_agent agy
+  agy_spawn "${agy_env[@]}" "FAKE_AGY_WRITE=$work/agy-writes.sh" -- --provider agy --effort high agy-worker
+  check "an agy worker starts, and writes a formatter its repository runs as a clean filter" [ "$status" -eq 0 ]
+  run "$scripts/retire.sh" agy-worker
+  check "retire.sh keeps that worktree's staged work, running no clean filter outside the sandbox" eval '[ "$status" -eq 3 ] &&
+    contains "uncommitted changes" && [ ! -e "$work/filter-ran" ] && [ -d "$work/wt-agy-worker" ]'
+  git -C "$work/wt-agy-worker" reset -q && git -C "$work/wt-agy-worker" clean -qfd
+  rm -f "$FAKE_LOG.agent-get.w9:p5"
+  run "$scripts/retire.sh" agy-worker
+  check "and retires it once that work is gone" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-worker" ] && [ ! -e "$work/filter-ran" ]'
+  # Clean but for the formatter, which the repository ignores: the sandbox's status runs the filter and finds nothing to
+  # keep, and the removal that follows reads nothing in the worktree, so the filter never runs on the host.
+  printf '#!/bin/sh\ncat\n' > "$alpha/fmt.sh"
+  printf 'fmt.sh\n' > "$alpha/.gitignore"
+  printf '*.txt filter=example-fmt\n' > "$alpha/.gitattributes"
+  echo example > "$alpha/notes.txt"
+  git -C "$alpha" add .gitignore .gitattributes notes.txt
+  git -C "$alpha" -c user.name=t -c user.email=t@example.invalid commit -q -m "an example formatter, run as a clean filter"
+  printf 'printf '"'"'#!/bin/sh\\ntouch "%%s" 2>/dev/null\\ncat\\n'"'"' "%s" > fmt.sh\ntouch -d 2001-01-01 notes.txt\n' "$work/filter-ran" \
+    > "$work/agy-writes-clean.sh"
+  agy_agent agy
+  agy_spawn "${agy_env[@]}" "FAKE_AGY_WRITE=$work/agy-writes-clean.sh" -- --provider agy --effort high agy-worker
+  run "$scripts/retire.sh" agy-worker
+  check "retire.sh removes a worktree the sandbox finds clean, running its clean filter nowhere outside it" eval '
+    [ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-worker" ] && [ ! -e "$work/filter-ran" ]'
+
   # A pane whose agy exits and that something else takes between two reads: nothing acts on what took it.
   agy_agent agy
   agy_spawn "${agy_env[@]}" -- --provider agy --effort high agy-worker
@@ -3242,6 +3323,24 @@ else
   run "$scripts/retire.sh" agy-worker
   check "and retires it once that pane is no longer in its worktree" [ "$status" -eq 0 ]
 
+  # The pane's agy exits and leaves a plain shell in the worktree, which herdr does not report as an agent.
+  agy_agent agy
+  agy_spawn "${agy_env[@]}" -- --provider agy --effort high agy-worker
+  (cd "$work/wt-agy-worker" && exec sleep 600) </dev/null >/dev/null 2>&1 &
+  agy_shell=$!
+  kill -STOP "$(cat "$agy_launch")" 2>/dev/null || true
+  pkill -KILL -P "$(cat "$agy_launch")" 2>/dev/null || true
+  kill -KILL "$(cat "$agy_launch")" 2>/dev/null || true
+  sleep 0.3
+  rm -f "$FAKE_LOG.agent-get.w9:p5"
+  run "$scripts/retire.sh" agy-worker
+  check "retire.sh keeps a stopped worker's worktree while a plain shell herdr shows no agent for sits in it" eval '[ "$status" -eq 1 ] &&
+    [ -d "$work/wt-agy-worker" ] && [ -f "$agy_record" ]'
+  kill "$agy_shell" 2>/dev/null || true
+  wait "$agy_shell" 2>/dev/null || true
+  run "$scripts/retire.sh" agy-worker
+  check "and retires it once nothing has its directory there" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-worker" ]'
+
   # A start that timed out, whose pane would not close: the record has no launcher. Once the pane is gone it retires.
   awk '$2 != "w9:p5"' "$FAKE_LOG.herdr-panes" > "$FAKE_LOG.herdr-panes.tmp"
   mv "$FAKE_LOG.herdr-panes.tmp" "$FAKE_LOG.herdr-panes"
@@ -3259,8 +3358,9 @@ else
   rm -f "$FAKE_LOG.agent-get.w9:p5"
   for leftover in "$FAKE_LOG".agy-pid.*; do
     [ -f "$leftover" ] || continue
+    kill -STOP "$(cat "$leftover")" 2>/dev/null || true
     pkill -KILL -P "$(cat "$leftover")" 2>/dev/null || true
-    kill "$(cat "$leftover")" 2>/dev/null || true
+    kill -KILL "$(cat "$leftover")" 2>/dev/null || true
   done
 fi
 

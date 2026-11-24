@@ -293,11 +293,28 @@ write_launch_record() {
 
 failed() {
   [ -z "${1:-}" ] || echo "$1" >&2
-  # An agy that ran in the worktree, however briefly, could have written there: host git reads it with no helpers.
-  if [ "$provider" = agy ]; then agy_git_safe; fi
-  if [ "$worktree" = true ] && { [ -n "$(worktree_work "$dir" "$base")" ] || ! git_for_worktree -C "$root" worktree remove "$dir"; }; then
+  local work=""
+  if [ "$worktree" = true ]; then
+    if [ "$provider" = agy ]; then
+      # An agy that ran in the worktree, however briefly, could have written there: it is inspected only inside the
+      # launcher's read-only sandbox, removed only while it points into its repository and nothing has a directory
+      # in it, and with --force, so host git reads nothing in it.
+      if ! agy_git_pointer_ok "$record"; then
+        work="its .git no longer points into $root"
+      elif ! worktree_unused "$dir"; then
+        work="a process still has its directory there"
+      else
+        work=$(agy_worktree_work "$record")
+      fi
+      [ -n "$work" ] || git -C "$root" worktree remove --force "$dir" || work="git could not remove it"
+    else
+      work=$(worktree_work "$dir" "$base")
+      [ -n "$work" ] || git -C "$root" worktree remove "$dir" || work="git could not remove it"
+    fi
+  fi
+  if [ -n "$work" ]; then
     write_record
-    echo "Kept $dir and its worker record because Git could not safely remove it." >&2
+    echo "Kept $dir and its worker record because Git could not safely remove it ($work)." >&2
     exit 1
   fi
   rm -f "$record" "$agy_launch"
@@ -364,12 +381,17 @@ agy_launch_verified() {
   esac
   agy_start=$(proc_start "$launched")
   if [ -z "$agy_start" ] || [ "$(readlink "/proc/$launched/cwd" 2>/dev/null)" != "$dir" ] ||
-    ! agy_sandbox_proven "$launched" "$agy_bwrap" "$pane" "$socket"; then
+    ! agy_sandbox_proven "$launched" "$agy_bwrap" "$pane"; then
     out="process $launched, which the launcher recorded, is not the pinned bwrap ($agy_bwrap) sandboxing $dir from herdr pane $pane."
     return 1
   fi
   # The agy instance herdr now shows in the pane, which later scripts must still see before they act on it.
   agy_instance=$(herdr agent get "$pane" 2>/dev/null | jq -r '(.result.agent // .result).agent_session.value // empty' 2>/dev/null) || agy_instance=""
+  # Without it, nothing later could tell this agy from another one opened in the same pane and worktree.
+  if [ -z "$agy_instance" ]; then
+    out="herdr reports no agent session for the agy in pane $pane, so later directions could not be bound to it."
+    return 1
+  fi
   agy_pid=$launched
   write_record
 }
