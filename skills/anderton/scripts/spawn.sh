@@ -366,7 +366,7 @@ fi
 # The launcher writes its pid to $agy_launch just before it becomes bwrap, and agent start has waited for agy to be
 # ready, so a missing or foreign pid means something other than the launcher answered to "agy" on the tab's PATH.
 agy_launch_verified() {
-  local launched="" tries=20
+  local launched="" tries=20 snapshot kind
   while [ "$tries" -gt 0 ]; do
     launched=$(cat "$agy_launch" 2>/dev/null) || launched=""
     case $launched in '' | *[!0-9]*) ;; *) break ;; esac
@@ -385,8 +385,15 @@ agy_launch_verified() {
     out="process $launched, which the launcher recorded, is not the pinned bwrap ($agy_bwrap) sandboxing $dir from herdr pane $pane."
     return 1
   fi
-  # The agy instance herdr now shows in the pane, which later scripts must still see before they act on it.
-  agy_instance=$(herdr agent get "$pane" 2>/dev/null | jq -r '(.result.agent // .result).agent_session.value // empty' 2>/dev/null) || agy_instance=""
+  # The agent herdr now shows in the pane must be agy: the sandbox proof says what started, not what will read the
+  # brief. Its instance is what later scripts must still see before they act on it.
+  snapshot=$(herdr agent get "$pane" 2>/dev/null) || snapshot=""
+  kind=$(printf '%s' "$snapshot" | jq -r '(.result.agent // .result).agent // empty' 2>/dev/null) || kind=""
+  if [ "$kind" != agy ]; then
+    out="herdr reports ${kind:-no agent} in pane $pane, not agy, so the brief is not sent."
+    return 1
+  fi
+  agy_instance=$(printf '%s' "$snapshot" | jq -r '(.result.agent // .result).agent_session.value // empty' 2>/dev/null) || agy_instance=""
   # Without it, nothing later could tell this agy from another one opened in the same pane and worktree.
   if [ -z "$agy_instance" ]; then
     out="herdr reports no agent session for the agy in pane $pane, so later directions could not be bound to it."

@@ -851,7 +851,8 @@ agy_inspect_once() { # agy_inspect_once <work|refs> <dir> <base>
 agy_worktree_work() {
   local out
   out=$(agy_inspect work "$1") || out=unreadable
-  case $out in '' | uncommitted | flagged | unpushed | unreadable) printf '%s\n' "$out" ;; *) echo unreadable ;; esac
+  # Only the sandbox's explicit "clean" means nothing to keep; no answer at all keeps the worktree.
+  case $out in clean) echo ;; uncommitted | flagged | unpushed | unreadable) printf '%s\n' "$out" ;; *) echo unreadable ;; esac
 }
 
 # What waiting.sh's finished reads from agy worker record $1's worktree, worked out the same way inside the sandbox.

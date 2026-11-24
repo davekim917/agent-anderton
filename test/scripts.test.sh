@@ -3361,8 +3361,26 @@ WRITES
     [ -e "$work/agy-unstarted-once" ]'
   check "sending the brief once, to the one agy that started" eval '[ "$(wc -l < "$FAKE_LOG.prompts")" -eq 1 ] &&
     [ "$(wc -l < "$FAKE_LOG.sandboxes")" -eq 1 ]'
+  # An inspection that answers nothing at all is not a clean worktree.
+  mv "$agyroot/bin/agy" "$agyroot/bin/agy.real"
+  printf '#!/bin/sh\nexit 0\n' > "$agyroot/bin/agy"
+  chmod +x "$agyroot/bin/agy"
+  run "$scripts/retire.sh" agy-retried
+  check "retire.sh keeps a worktree whose inspection exits 0 with no answer" eval '[ "$status" -eq 3 ] &&
+    contains "could not read its status" && [ -d "$work/wt-agy-retried" ]'
+  mv "$agyroot/bin/agy.real" "$agyroot/bin/agy"
+  rm -f "$FAKE_LOG.agent-get.w9:p5"
   run "$scripts/retire.sh" agy-retried
   check "which retires" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-retried" ]'
+
+  # The sandbox proof says what started; the brief goes only to a pane herdr reports agy in.
+  : > "$FAKE_LOG.closed"
+  rm -f "$FAKE_LOG.prompt"
+  agy_agent claude idle "$work/wt-agy-kind" "" claude-session-1
+  agy_spawn "${agy_env[@]}" -- --provider agy --effort high agy-kind
+  check "spawn.sh sends no brief when herdr reports another agent in the pane" eval '[ "$status" -eq 1 ] &&
+    contains "not agy" && [ ! -e "$FAKE_LOG.prompt" ] && grep -qx "pane w9:p5" "$FAKE_LOG.closed" &&
+    [ ! -e "$work/wt-agy-kind" ]'
 
   # waiting.sh reads an agy worktree's refs only inside the sandbox: a git first on PATH that logs where it runs is never
   # run in or on the worktree, and the ready list still finds the worker's landed commit.

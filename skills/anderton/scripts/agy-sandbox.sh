@@ -141,8 +141,8 @@ EOF
   exec "$agy" --dangerously-skip-permissions "$@"
 }
 
-# worktree_work (session-lib.sh) inside the inspecting sandbox: prints uncommitted, flagged, unpushed or unreadable, or
-# nothing. git takes no lock and starts no helper it can be talked out of; one it cannot (a clean filter) runs here.
+# worktree_work (session-lib.sh) inside the inspecting sandbox: prints uncommitted, flagged, unpushed, unreadable or,
+# only when every check found nothing to keep, clean. git takes no lock and starts no helper it can be talked out of; one it cannot (a clean filter) runs here.
 inspect_inside() {
   local out git
   [ "$(/usr/bin/tr -d '\0' < /proc/1/comm 2>/dev/null)" = bwrap ] || die "--inspect-inside runs only as bwrap's child."
@@ -156,7 +156,7 @@ inspect_inside() {
   out=$(set -o pipefail; "${git[@]}" ls-files -v 2>/dev/null | /usr/bin/cut -c1 | LC_ALL=C /usr/bin/sort -u) || { echo unreadable; exit 0; }
   case $out in *[abcdefghijklmnopqrstuvwxyzS]*) echo flagged; exit 0 ;; esac
   out=$("${git[@]}" rev-list -1 HEAD --not --remotes "$1" 2>/dev/null) || { echo unreadable; exit 0; }
-  if [ -n "$out" ]; then echo unpushed; fi
+  if [ -n "$out" ]; then echo unpushed; else echo clean; fi
   exit 0
 }
 
@@ -284,6 +284,8 @@ EOF
       esac
     done < "$conf"
   fi
+  # The token reaches a worker only as GH_TOKEN; the file itself is hidden from every sandbox, a mask line or not.
+  [ -z "$token_file" ] || add_mask "$token_file"
 }
 
 # bwrap mounts the whole view before it runs anything, and fails when a path it was given to mask has gone by then (a

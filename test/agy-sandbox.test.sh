@@ -177,6 +177,10 @@ mkdir -p "$work/glob*dir?" "$work/globXdirY"
 echo canary-value > "$work/glob*dir?/canary"
 echo canary-value > "$work/globXdirY/canary"
 echo "mask $work/glob*dir?" >> "$prefixroot/opt/agy/etc/sandbox.conf"
+# A GitHub token file reaches the worker only as GH_TOKEN; the file itself is hidden, with no mask line for it.
+mkdir -p "$work/tokens"
+echo example-token > "$work/tokens/github.token"
+echo "gh-token-file $work/tokens/github.token" >> "$prefixroot/opt/agy/etc/sandbox.conf"
 
 # Descriptor 9, a directory opened outside, stands in for one a launching shell leaks into the sandbox.
 run() {
@@ -206,6 +210,8 @@ w read-codex-glob       "grep -q canary-value \"$HOME\"/.codex-example/canary"
 w read-codex-backup     "grep -q canary-value \"$HOME\"/.codex.backup/auth.json"
 w read-claude-prefix    "grep -q canary-value \"$HOME\"/.claude-example/canary"
 w read-claude-json      "grep -q canary-value \"$HOME\"/.claude.json"
+w read-token-file       "grep -q example-token '"$work"'/tokens/github.token"
+w token-in-env          "[ \"\$GH_TOKEN\" = example-token ]"
 w read-git-credentials  "grep -q canary-value \"$HOME\"/.git-credentials"
 w read-netrc            "grep -q canary-value \"$HOME\"/.netrc"
 w read-nanoclaw-data    "grep -q canary-value '"$work"'/NanoClaw\ \[dev\]/data/canary"
@@ -231,12 +237,12 @@ w tmp-file              "echo x > /tmp/agy-sandbox-example-$$"
 out=$(run "$attempts" 2>&1) || fail "the launcher did not start: $out"
 for denied in worktree-agents worktree-agents-mv global-hooks gemini-hooks state-hooks state-plugins state-agents-json \
   gemini-moved git-hooks git-config home-rc python-write unshare-umount inherited-fd read-claude-canary read-codex-glob \
-  read-codex-backup read-claude-prefix read-claude-json \
+  read-codex-backup read-claude-prefix read-claude-json read-token-file \
   read-git-credentials read-netrc read-nanoclaw-data read-nanoclaw-env git-config-worktree git-info own-config-worktree \
   own-commondir git-pointer other-worktree git-config-local git-config-cond git-common-new read-glob-literal; do
   printf '%s\n' "$out" | grep -qx "denied $denied" || fail "$denied was not denied: $(printf '%s\n' "$out" | grep " $denied\$")"
 done
-for wrote in worktree-file python-control git-commit state-file cache-file tmp-file host-cache read-glob-sibling; do
+for wrote in worktree-file python-control git-commit state-file cache-file tmp-file host-cache read-glob-sibling token-in-env; do
   printf '%s\n' "$out" | grep -qx "wrote $wrote" || fail "$wrote should be writable: $(printf '%s\n' "$out" | grep " $wrote\$")"
 done
 # The worker's cache is its own: what it writes there never reaches the cache host tools read and run from.
@@ -281,6 +287,23 @@ start_once "$work/launch-once.pid" >/dev/null 2>&1 || fail "the start after one 
 [ -e "$work/wt-example/agy-ran" ] || fail "the start after one that set up no sandbox ran nothing"
 rm -f "$work/launch-once.pid" "$work/wt-example/agy-ran"
 cp "$work/pin.saved" "$prefixroot/opt/agy/etc/pin"
+
+# The inspection sandbox hides the token file too. A required clean filter, which runs there, fails when it can read the
+# token, and then git status, so the inspection, fails.
+printf '#!/bin/sh\nif cat "%s" >/dev/null 2>&1; then exit 1; fi\ncat\n' "$work/tokens/github.token" > "$work/token-filter.sh"
+chmod 0755 "$work/token-filter.sh"
+printf '*.tok filter=tokcheck\n' > "$work/wt-example/.gitattributes"
+echo example > "$work/wt-example/notes.tok"
+git -C "$work/wt-example" add .gitattributes notes.tok
+git -C "$work/wt-example" -c user.name=example -c user.email=example@example.invalid commit -qm "a filtered file"
+git -C "$work/repo" config filter.tokcheck.clean "$work/token-filter.sh"
+git -C "$work/repo" config filter.tokcheck.required true
+touch -d 2001-01-01 "$work/wt-example/notes.tok"
+inspected=$(cd "$work/wt-example" && env -i HOME="$home" PATH=/usr/bin:/bin "$agy" --anderton-worktree-work "$(git rev-parse HEAD)" 2>&1) ||
+  inspected="exit $?: $inspected"
+case $inspected in uncommitted | unpushed | clean) ;; *) fail "the inspection sandbox read the token file, or failed: $inspected" ;; esac
+git -C "$work/repo" config --unset filter.tokcheck.clean
+git -C "$work/repo" config --unset filter.tokcheck.required
 
 # The checks inside the namespace refuse to start agy when the guard could be off.
 refuses() {
