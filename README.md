@@ -226,9 +226,18 @@ is taken literally:
 abstract Unix sockets, and a pathname socket opened after launch, as host Claude and Codex workers can. Phase 1's fleet
 provider runs agy in containers instead. `/tmp` stays shared for host-wide locks.
 
-**Host git must never run in an agy worktree.** A worker writes everything git reads there apart from the protected
-files, so host git in it could run the worker's code with none of the sandbox around it. `spawn.sh`, `retire.sh` and
-`waiting.sh` (#42) read an agy worktree only through the launcher, inside a read-only sandbox; run nothing else there.
+**Host git must never run in an agy worktree: no `commit`, `push`, `status`, `log` or any other command, not even with
+`-C`.** A worker writes everything git reads there apart from the protected files, so host git in it could run the
+worker's code with none of the sandbox around it. An absolute `core.hooksPath` outside the worktree does not make it
+safe: husky's shared hook runner (`.husky/_/h`) puts the cwd-relative `node_modules/.bin` first on `PATH`, and git runs
+hooks from the worktree's top level, so a host `git commit` there would run a `grep` or `git` the agent planted.
+`spawn.sh`, `retire.sh` and `waiting.sh` (#42) touch an agy worktree only through the launcher, inside a read-only
+sandbox. Commits and pushes happen inside the worker's own sandbox, and the Anderton reviews the pushed ref.
+
+A repository whose `prepare` script writes the shared git config (husky, a hooks-path pin) still installs inside the
+sandbox. On this host's NanoClaw layout, `pnpm install --frozen-lockfile` in an agy worktree under the launcher exited 0:
+husky's `git config core.hooksPath` and the pin script's write both failed against the read-only `.git/config`, each
+printed its error, and the existing absolute `core.hooksPath` stayed as it was.
 
 **Git inside the sandbox, known limits.** The repository's own config stays read-only, so `git push -u` publishes the
 branch but cannot record its upstream: push with `git push origin <branch>`, and the Anderton opens the PR from the pushed
