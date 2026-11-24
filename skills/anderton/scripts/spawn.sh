@@ -2,8 +2,7 @@
 # Start a full worker in its own worktree of the caller's repository, in a herdr tab or tmux window.
 # $ANDERTON_START_WAIT (seconds, default 30) bounds the wait for a tmux worker to register.
 # Claude workers run on Opus unless --model supplies another model. Codex and agy workers use their configured model.
-# agy workers start only inside herdr, through the sandbox launcher install-agy.sh put under $ANDERTON_AGY_ROOT
-# (default /opt/agy); Linux only.
+# agy workers start only inside herdr, run the agy on PATH, and only while agy-hooks.sh check passes.
 # Worktrees go under $ANDERTON_WORKTREES, default the folder that holds the repository, as wt-<name>.
 # Portable to macOS's bash 3.2 and BSD userland.
 set -euo pipefail
@@ -84,31 +83,17 @@ case $provider in
 esac
 if [ "$provider" = agy ]; then
   if [ "$launcher" != herdr ]; then
-    echo "agy workers start only inside herdr, whose agy kind runs the sandbox launcher." >&2
+    echo "agy workers start only inside herdr, whose pane carries their status and directions." >&2
     exit 2
   fi
-  if [ -n "$mode" ]; then
-    echo "agy workers run in their sandbox without permission prompts. Omit --mode." >&2
-    exit 2
-  fi
-  if [ "$effort" = max ]; then
-    echo "agy's models stop at xhigh effort. Use low, medium, high or xhigh." >&2
-    exit 2
-  fi
-  # Absolute, since the tab resolves its PATH from the worktree, not from here.
-  agy_install=$(cd "$(agy_root)" 2>/dev/null && pwd -P) || agy_install=$(agy_root)
-  # The launcher repeats these checks inside its sandbox and owns the refusal; here they give an early, plain error.
-  if [ "$(uname -s)" != Linux ] || [ ! -x "$agy_install/bin/agy" ] || [ ! -f "$agy_install/etc/pin" ]; then
-    echo "agy is not installed at $agy_install (Linux only). The operator installs it with install-agy.sh." >&2
+  # herdr's agy kind runs agy by name, from the same PATH.
+  if ! command -v agy >/dev/null 2>&1; then
+    echo "spawn.sh needs the agy CLI on PATH for an agy worker." >&2
     exit 1
   fi
-  if [ "$(sha256sum "$HOME/.gemini/config/hooks.json" 2>/dev/null | cut -d' ' -f1)" != \
-    "$(sed -n 's/^hooks_sha256=//p' "$agy_install/etc/pin" | head -n 1)" ]; then
-    echo "$HOME/.gemini/config/hooks.json is not the guard registration install-agy.sh wrote; agy would run unguarded." >&2
-    exit 1
-  fi
-  if [ ! -f "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" ]; then
-    echo "agy has no stored login, and without one it starts its own sign-in. The owner signs in first." >&2
+  if ! out=$("$anderton_scripts/agy-hooks.sh" check 2>&1); then
+    echo "$out
+agy would run unguarded, so no agy worker was started." >&2
     exit 1
   fi
 fi
@@ -121,10 +106,6 @@ if [ "$provider" = codex ] && [ -n "$mode" ]; then
   exit 2
 fi
 if [ -n "${2:-}" ]; then brief=$(cat "$2"); else brief=$(cat); fi
-if [ "$provider" = agy ] && ! git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
-  echo "agy workers need a Git worktree." >&2
-  exit 2
-fi
 if [ "$provider" = codex ]; then
   if ! git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
     echo "Codex workers need a Git worktree." >&2
@@ -213,7 +194,7 @@ if ! (set -C && : > "$record") 2>/dev/null; then
 fi
 reserved=1
 trap '[ -z "$reserved" ] || rm -f "$record"' EXIT
-agy_pid="" agy_start="" agy_instance="" agy_common="" agy_launch="${record%.json}.agy-launch"
+agy_instance="" agy_config="${record%.json}.agy-config"
 if command -v claude >/dev/null 2>&1 &&
   claude agents --json 2>/dev/null | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null; then
   echo "A live session is already named '$name'; pick another name." >&2
@@ -278,7 +259,7 @@ write_launch_record() {
     --arg pane "$pane" --arg spawner_session "$sid" --arg spawner_provider "$caller_provider" \
     --arg spawner_scope "$role_scope" --arg spawner_claim "$role_claim" --arg role "$role" --arg claude_launch "$claude_launch" \
     --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg provider "$provider" --arg codex "$codex_home" --arg launched "$launched_at" --arg token "$launch_token" \
-    --arg agy_pid "$agy_pid" --arg agy_start "$agy_start" --arg agy_instance "$agy_instance" --arg agy_common "$agy_common" \
+    --arg agy_instance "$agy_instance" \
     --slurpfile previous "$record" '
       ($previous[0] // {}) + {name: $name, launcher: $launcher, id: ($previous[0].id // $id), tab: $tab, socket: $socket, server: $server, dir: $dir, root: $root,
       base: $base, worktree: $worktree, spawner: $spawner, spawnerSession: $spawner_session, label: $label, startedAt: ($previous[0].startedAt // $at)}
@@ -288,9 +269,7 @@ write_launch_record() {
       + if $provider == "claude" then {claudeLaunchId: $claude_launch} else {} end
       + if $provider == "claude" and $spawner_provider == "codex" then {reportTransport: "transcript"} else {} end
       + if $provider == "codex" then {provider: $provider, codexHome: $codex, codexLaunchedAt: ($launched | tonumber), codexLaunchToken: $token} else {} end
-      + if $provider == "agy" then {provider: $provider}
-          + (if $agy_common != "" then {agyCommon: $agy_common} else {} end)
-          + if $agy_pid != "" then {agyPid: ($agy_pid | tonumber), agyProcStart: $agy_start, agyInstance: $agy_instance} else {} end
+      + if $provider == "agy" then {provider: $provider} + if $agy_instance != "" then {agyInstance: $agy_instance} else {} end
         else {} end' > "$updated" || return 1
   mv -f "$updated" "$record"
 }
@@ -299,29 +278,15 @@ failed() {
   [ -z "${1:-}" ] || echo "$1" >&2
   local work=""
   if [ "$worktree" = true ]; then
-    if [ "$provider" = agy ]; then
-      # An agy that ran in the worktree, however briefly, could have written there: it is inspected only inside the
-      # launcher's read-only sandbox, removed only while it points into its repository and nothing has a directory
-      # in it, and with --force, so host git reads nothing in it.
-      if ! agy_git_pointer_ok "$record"; then
-        work="its .git no longer points into $root"
-      elif ! worktree_unused "$dir"; then
-        work="a process still has its directory there"
-      else
-        work=$(agy_worktree_work "$record")
-      fi
-      [ -n "$work" ] || git -C "$root" worktree remove --force "$dir" || work="git could not remove it"
-    else
-      work=$(worktree_work "$dir" "$base")
-      [ -n "$work" ] || git -C "$root" worktree remove "$dir" || work="git could not remove it"
-    fi
+    work=$(worktree_work "$dir" "$base")
+    [ -n "$work" ] || git -C "$root" worktree remove "$dir" || work="git could not remove it"
   fi
   if [ -n "$work" ]; then
     write_record
     echo "Kept $dir and its worker record because Git could not safely remove it ($work)." >&2
     exit 1
   fi
-  rm -f "$record" "$agy_launch"
+  rm -f "$record" "$agy_config"
   exit 1
 }
 
@@ -353,90 +318,24 @@ $brief"
   if [ -n "$model" ]; then set -- "$@" -m "$model"; fi
 elif [ "$provider" = agy ]; then
   provider_name=agy
-  # herdr runs its agy kind by name, so the launcher's directory goes first on the tab's PATH.
-  config_env="PATH=$agy_install/bin:$PATH"
-  agy_bwrap=$(sed -n 's/^bwrap=//p' "$agy_install/etc/pin" | head -n 1)
-  agy_common=$(cd "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)
-  mode="bwrap sandbox, no permission prompts"
-  rm -f "$agy_launch"
-  set -- --anderton-launch-file "$agy_launch" --effort "$effort"
+  # agy's prompting mode would stop on routine commands, as a Claude worker in auto mode does not: the guard, which sees
+  # every tool call, is the gate. --mode names one of agy's own modes instead.
+  if [ -n "$mode" ]; then
+    set -- --mode "$mode"
+  else
+    mode="no permission prompts; the guard gates every tool call"
+    set -- --dangerously-skip-permissions
+  fi
+  set -- "$@" --effort "$effort"
   if [ -n "$model" ]; then set -- "$@" --model "$model"; fi
+  out=$("$anderton_scripts/agy-hooks.sh" check --workspace "$dir" 2>&1) || failed "$out
+agy would run unguarded, so no agy worker was started."
 else
   set -- -n "$name" --permission-mode "$mode" --effort "$effort" --model "${model:-opus}" --session-id "$claude_launch"
   if [ "$caller_provider" = codex ]; then
     set -- "$@" --plugin-dir "$(cd "$anderton_scripts/../../.." && pwd)"
   fi
 fi
-# The launcher writes its pid to $agy_launch just before it becomes bwrap, and agent start has waited for agy to be
-# ready, so a missing or foreign pid means something other than the launcher answered to "agy" on the tab's PATH.
-agy_launch_verified() {
-  local launched="" tries=20 snapshot kind
-  while [ "$tries" -gt 0 ]; do
-    launched=$(cat "$agy_launch" 2>/dev/null) || launched=""
-    case $launched in '' | *[!0-9]*) ;; *) break ;; esac
-    tries=$((tries - 1))
-    sleep 0.25
-  done
-  case $launched in
-    '' | *[!0-9]*)
-      out="the agy that started is not the sandbox launcher at $agy_install/bin/agy."
-      return 1
-      ;;
-  esac
-  agy_start=$(proc_start "$launched")
-  if [ -z "$agy_start" ] || [ "$(readlink "/proc/$launched/cwd" 2>/dev/null)" != "$dir" ] ||
-    ! agy_sandbox_proven "$launched" "$agy_bwrap" "$pane"; then
-    out="process $launched, which the launcher recorded, is not the pinned bwrap ($agy_bwrap) sandboxing $dir from herdr pane $pane."
-    return 1
-  fi
-  # The agent herdr now shows in the pane must be agy: the sandbox proof says what started, not what will read the
-  # brief. Its instance is what later scripts must still see before they act on it.
-  snapshot=$(herdr agent get "$pane" 2>/dev/null) || snapshot=""
-  kind=$(printf '%s' "$snapshot" | jq -r '(.result.agent // .result).agent // empty' 2>/dev/null) || kind=""
-  if [ "$kind" != agy ]; then
-    out="herdr reports ${kind:-no agent} in pane $pane, not agy, so the brief is not sent."
-    return 1
-  fi
-  agy_instance=$(printf '%s' "$snapshot" | jq -r '(.result.agent // .result).agent_session.value // empty' 2>/dev/null) || agy_instance=""
-  # Without it, nothing later could tell this agy from another one opened in the same pane and worktree.
-  if [ -z "$agy_instance" ]; then
-    out="herdr reports no agent session for the agy in pane $pane, so later directions could not be bound to it."
-    return 1
-  fi
-  agy_pid=$launched
-  write_record
-}
-
-# One start of agy in the pane, then its proof. 75 when herdr's start failed and the launcher wrote that it set up no
-# sandbox, so nothing ran in the pane and the start may be tried again (agy_until_started); never after anything ran.
-agy_start_attempt() {
-  if [ "$(cat "$agy_launch" 2>/dev/null)" = unstarted ]; then rm -f "$agy_launch"; fi
-  if ! out=$(herdr agent start "$name" --kind "$provider" --pane "$pane" --timeout 120000 -- "$@" 2>&1); then
-    if [ "$(cat "$agy_launch" 2>/dev/null)" = unstarted ]; then
-      out="the sandbox could not be set up (a path it masks changed as it started), so agy did not start."
-      return 75
-    fi
-    return 1
-  fi
-  agy_launch_verified
-}
-
-# True once the pane is gone and any launcher process this launch recorded has exited, waiting up to 5 seconds.
-agy_launch_undone() {
-  local launched answer _
-  launched=$(cat "$agy_launch" 2>/dev/null) || launched=""
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    # herdr exits non-zero for a missing pane, which pipefail would read as a failed check.
-    answer=$(herdr pane get "$pane" 2>&1) || true
-    if printf '%s' "$answer" | jq -e '.error.code == "pane_not_found"' >/dev/null 2>&1 &&
-      { [ -z "$launched" ] || [ -z "$(proc_start "$launched")" ]; }; then
-      return 0
-    fi
-    sleep 0.5
-  done
-  return 1
-}
-
 # A tab or window id is unique only within its server, so the record keeps which server it was opened in.
 write_record
 if [ "$launcher" = herdr ]; then
@@ -457,26 +356,17 @@ if [ "$launcher" = herdr ]; then
   write_record
   # A startup prompt (folder trust, a new permission mode) leaves the agent blocked: show it, then undo.
   # The brief goes to the pane, whose id herdr never reuses, not to the name, which the user can rename and reuse.
+  # What agy loads hooks and agents from, as it stands when agy starts: waiting.sh reports any change from it.
   if [ "$provider" = agy ]; then
-    if agy_until_started agy_start_attempt "$@"; then started=0; else started=1; fi
-  elif out=$(herdr agent start "$name" --kind "$provider" --pane "$pane" --timeout 120000 -- "$@" 2>&1); then
+    agy_config_state "$dir" > "$agy_config" || failed "Could not read what agy loads hooks from."
+  fi
+  if out=$(herdr agent start "$name" --kind "$provider" --pane "$pane" --timeout 120000 -- "$@" 2>&1); then
     started=0
   else
     started=1
   fi
   if [ "$started" -ne 0 ] || ! out=$(herdr agent prompt "$pane" "$brief" 2>&1); then
     screen=$(herdr agent read "$pane" 2>/dev/null | tail -n 20 || true)
-    if [ "$provider" = agy ]; then
-      herdr pane close "$pane" >/dev/null 2>&1 || true
-      if ! agy_launch_undone; then
-        echo "agy in herdr pane $pane did not take the brief: $out
-$screen
-It is not confirmed stopped, so $dir and its record are kept: close pane $pane, then run retire.sh $name." >&2
-        exit 1
-      fi
-      failed "agy in herdr pane $pane did not take the brief: $out
-$screen"
-    fi
     if [ "$provider" = codex ]; then
       echo "Codex worker '$name' could not take the brief: $out
 $screen
@@ -492,6 +382,22 @@ It is not confirmed stopped, so $dir and its record are kept: close tab $tab, th
     fi
     failed "$provider_name in herdr tab '$name' did not take the brief: $out
 $screen"
+  fi
+  # herdr learns an agy's session from its first prompt, when herdr's antigravity-cli integration is installed. Once
+  # recorded, later steps act only on that session; without it, on the agy herdr shows in this pane and worktree.
+  if [ "$provider" = agy ]; then
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      agy_instance=$(herdr agent get "$pane" 2>/dev/null |
+        jq -r '.result.agent | select(.agent == "agy") | .agent_session.value // empty' 2>/dev/null) || agy_instance=""
+      [ -z "$agy_instance" ] || break
+      sleep 0.5
+    done
+    write_record
+    present=$(grep -v '	absent$' "$agy_config" | cut -f1 | grep -F "$dir/" || true)
+    if [ -n "$present" ]; then
+      echo "agy loads hooks, plugins or agents from this worktree as it started; the watch reports changes only from here:
+$present" >&2
+    fi
   fi
   where="herdr tab '$label' ($tab)"
 else

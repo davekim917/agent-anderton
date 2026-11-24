@@ -90,6 +90,28 @@ for h in "$holders"/workers/*.held; do
     "$h" 2>/dev/null || echo "waiting.sh: could not read $h" >&2
 done
 
+# agy reloads hook and agent configuration mid-session, so a change to any of it since an agy worker started can turn its
+# guard off or start an unhooked subagent. Nothing here undoes it; each distinct changed state is one header, which the
+# watch tells once. A worker herdr shows blocked waits on a person in its pane.
+for r in "$holders"/workers/*.json; do
+  [ -f "$r" ] && [ "$(record_provider "$r")" = agy ] || continue
+  if [ -z "$all" ] && [ "$(jq -r '.root // empty' "$r" 2>/dev/null)" != "$root" ]; then continue; fi
+  [ -z "$mine" ] || worker_belongs "$r" "$root" "$mine" || continue
+  name=$(jq -r '.name // empty' "$r")
+  if [ -f "${r%.json}.agy-config" ]; then
+    now=$(agy_config_state "$(jq -r '.dir // empty' "$r")")
+    changed=$(printf '%s\n' "$now" | grep -vxF -f "${r%.json}.agy-config" | cut -f1 | tr '\n' ' ' || true)
+    if [ -n "$changed" ]; then
+      printf '=== %s (agy hook or agent configuration changed since it started, so its guard may be off: %sstate %s. Inspect them; nothing was undone)\n' \
+        "$name" "$changed" "$(printf '%s' "$now" | sha256_stdin | cut -c1-12)"
+    fi
+  fi
+  agy_check "$r"
+  if [ "$agy_state:$agy_status" = running:blocked ]; then
+    printf '=== %s (agy, blocked on a person in herdr pane %s; open it to respond)\n' "$name" "$(jq -r '.pane // empty' "$r")"
+  fi
+done
+
 # Each entry is judged on one copy: Claude Code rewrites it as the session's status changes, and a session selected
 # as blocked but rendered from a newer entry reads as a call unanswered for over a minute, a header the watch never
 # reported. Without a temporary file it reads the entry in place, as before.
@@ -234,7 +256,7 @@ EOF
     and (.name == $n or ($id != "" and .id == $id) or ((.cwd // "") as $c | $c == $d or ($c | startswith($d + "/")))))' >/dev/null 2>&1
 }
 finished() { # finished <record>: prints why the worker's work is finished, "open" when a PR for it is open, or nothing
-  local dir base head ref land at branch prs gh_dir agy=""
+  local dir base head ref land at branch prs
   dir=$(jq -r '.dir // empty' "$1")
   [ -n "$dir" ] || return 0
   if [ ! -d "$dir" ]; then
@@ -242,39 +264,24 @@ finished() { # finished <record>: prints why the worker's work is finished, "ope
     return
   fi
   base=$(jq -r '.base // empty' "$1")
-  # An agy worker's worktree is read only inside its sandbox, and gh, which runs git where it starts, starts in the
-  # repository's own checkout instead.
-  if [ "$(jq -r '.provider // "claude"' "$1")" = agy ]; then
-    agy_worktree_refs "$1" || return 0
-    agy=1 head=$agy_head ref=$agy_ref branch=$agy_branch
-    gh_dir=$(jq -r '.root // empty' "$1")
-    [ -n "$gh_dir" ] || branch=""
-  else
-    head=$(git -C "$dir" rev-parse -q --verify HEAD 2>/dev/null) || return 0
-    for ref in "$(git -C "$dir" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)" origin/main origin/master; do
-      if [ -n "$ref" ] && git -C "$dir" rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1; then break; fi
-      ref=""
-    done
-    branch=$(git -C "$dir" symbolic-ref -q --short HEAD 2>/dev/null || true)
-    gh_dir=$dir
-  fi
+  head=$(git -C "$dir" rev-parse -q --verify HEAD 2>/dev/null) || return 0
+  for ref in "$(git -C "$dir" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)" origin/main origin/master; do
+    if [ -n "$ref" ] && git -C "$dir" rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1; then break; fi
+    ref=""
+  done
+  branch=$(git -C "$dir" symbolic-ref -q --short HEAD 2>/dev/null || true)
   # Any open PR for its branch, whatever it targets, means the work is not finished; only a PR whose head is the
   # worktree's HEAD settles it otherwise, since a branch reused after its PR merged holds newer work.
   prs=""
   if [ -n "$branch" ] && command -v gh >/dev/null 2>&1; then
-    prs=$(cd "$gh_dir" && gh pr list --head "$branch" --state all --limit 20 --json number,state,mergedAt,closedAt,headRefOid 2>/dev/null) || prs=""
+    prs=$(cd "$dir" && gh pr list --head "$branch" --state all --limit 20 --json number,state,mergedAt,closedAt,headRefOid 2>/dev/null) || prs=""
     if printf '%s' "$prs" | jq -e 'any(.[]?; .state == "OPEN")' >/dev/null 2>&1; then
       echo open
       return 0
     fi
   fi
   # A worker still at the commit it started from has landed nothing.
-  if [ -n "$agy" ]; then
-    if [ -n "$agy_landed" ]; then
-      echo "branch merged into $ref${agy_landed_at:+ $(ago "$agy_landed_at")}"
-      return
-    fi
-  elif [ -n "$ref" ] && [ "$head" != "$base" ] && git -C "$dir" merge-base --is-ancestor "$head" "$ref" 2>/dev/null; then
+  if [ -n "$ref" ] && [ "$head" != "$base" ] && git -C "$dir" merge-base --is-ancestor "$head" "$ref" 2>/dev/null; then
     # It landed in the oldest commit on the branch's first-parent line that contains it: a merge commit, or itself
     # when it was fast-forwarded or rebased in, and then the commit after it has it as first parent.
     land=$(git -C "$dir" rev-list --first-parent --ancestry-path "$head..$ref" 2>/dev/null | tail -n 1)
@@ -346,18 +353,12 @@ EOF
     if [ "$provider" = codex ]; then
       "$(dirname "$0")/codex-worker.py" inactive "$r" || continue
     elif [ "$provider" = agy ]; then
-      # Listed only when it has stopped, or herdr shows it idle: a read that fails must not look like readiness.
+      # Listed only when its pane is gone, or herdr shows it idle: a read that fails must not look like readiness.
       agy_check "$r"
       case $agy_state:$agy_status in
-        stopped:* | running:idle | running:done) ;;
+        gone:* | running:idle | running:done) ;;
         *) continue ;;
       esac
-      # Its worktree is read below, inside the sandbox: only one still pointing into its repository.
-      if [ -d "$dir" ] && ! agy_git_pointer_ok "$r"; then
-        lines="$lines- $name: its .git no longer points into its repository; inspect it before retiring
-"
-        continue
-      fi
     elif [ -z "$claude_ready" ] || worker_busy "$r"; then
       continue
     fi
@@ -374,7 +375,7 @@ EOF
     [ -n "$why" ] || continue
     if [ -f "${r%.json}.held" ]; then why="$why, but retire.sh held it for messages since its last report (listed above)"; fi
     if [ -d "$dir" ]; then
-      case $(if [ "$provider" = agy ]; then agy_worktree_work "$r"; else worktree_work "$dir" "$(jq -r '.base // empty' "$r")"; fi) in
+      case $(worktree_work "$dir" "$(jq -r '.base // empty' "$r")") in
         uncommitted) why="$why, but has uncommitted work" ;;
         unpushed) why="$why, but has commits no remote branch has" ;;
         flagged) why="$why, but git marks files in it assume-unchanged or skip-worktree, so retire.sh will keep it" ;;

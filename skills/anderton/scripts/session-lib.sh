@@ -706,62 +706,10 @@ place_state() {
   esac
 }
 
-# Where install-agy.sh put agy, its launcher and its pin.
-agy_root() {
-  printf '%s\n' "${ANDERTON_AGY_ROOT:-/opt/agy}"
-}
-
-# The HERDR_PANE_ID process $1 was started with, read entry by entry (each ends in a NUL, and a value may hold
-# newlines), or nothing. Status 1 when the process cannot be read or has no such entry.
-pane_of_process() {
-  local entry
-  while IFS= read -r -d '' entry; do
-    case $entry in HERDR_PANE_ID=*) printf '%s\n' "${entry#HERDR_PANE_ID=}"; return 0 ;; esac
-  done < "/proc/$1/environ" 2>/dev/null
-  return 1
-}
-
-# True when process $1 is agy's sandbox started in herdr pane $3: it runs the bwrap install-agy.sh pinned ($2), so does
-# a child of it, in a mount namespace other than this one, and the nearest ancestor herdr placed in a pane (the
-# launcher's environment is cleared, so the search starts at the process itself) is in that pane. Which herdr server
-# is the record's to say, not the environment's.
-agy_sandbox_proven() { # agy_sandbox_proven <pid> <bwrap> <pane>
-  local pid=$1 own child children child_mnt found="" p in_pane _
-  [ -n "$2" ] && [ "$(readlink "/proc/$pid/exe" 2>/dev/null)" = "$2" ] || return 1
-  own=$(readlink /proc/self/ns/mnt) || return 1
-  children=$(cat "/proc/$pid"/task/*/children 2>/dev/null) || children=""
-  for child in $children; do
-    child_mnt=$(readlink "/proc/$child/ns/mnt" 2>/dev/null) || child_mnt=""
-    if [ "$(readlink "/proc/$child/exe" 2>/dev/null)" = "$2" ] && [ -n "$child_mnt" ] && [ "$child_mnt" != "$own" ]; then
-      found=1
-    fi
-  done
-  [ -n "$found" ] || return 1
-  p=$pid
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
-    [ -r "/proc/$p/environ" ] || return 1
-    if in_pane=$(pane_of_process "$p"); then
-      [ "$in_pane" = "$3" ]
-      return
-    fi
-    p=$(sed 's/.*) //' "/proc/$p/stat" 2>/dev/null | cut -d' ' -f2) || return 1
-    case $p in '' | 0 | 1) return 1 ;; esac
-  done
-  return 1
-}
-
-# True while the launcher process agy worker record $1 names is the one spawn.sh verified: same pid, same start.
-agy_launcher_alive() {
-  local pid start
-  pid=$(jq -r '.agyPid // empty' "$1" 2>/dev/null) || pid=""
-  start=$(jq -r '.agyProcStart // empty' "$1" 2>/dev/null) || start=""
-  [ -n "$pid" ] && [ -n "$start" ] && process_start_matches "$pid" "$start"
-}
-
-# Where agy worker record $1 stands, read from its launcher process and one herdr snapshot of its pane. Sets:
-#   agy_state: running (that launcher is alive, and herdr shows the agy instance spawn.sh verified in the pane, in the
-#     worktree; a record with no instance never is), stopped (the launcher has exited), elsewhere (it is alive, but the
-#     pane is gone or shows something else) or unknown (the record names no launcher);
+# Where agy worker record $1 stands, from one herdr snapshot of its pane. Sets:
+#   agy_state: running (herdr shows agy in the recorded pane, in the worktree, and as the agy session the record bound,
+#     when it bound one), gone (herdr says the pane is gone), elsewhere (the pane shows no agent, another one, or another
+#     session) or unknown (herdr gave no answer these scripts can read);
 #   agy_status: herdr's status for the pane (idle, working, blocked, done), or nothing;
 #   agy_agent, agy_cwd: what that snapshot shows in the pane, or nothing.
 # shellcheck disable=SC2034 # the scripts that source this file read what it sets
@@ -770,19 +718,24 @@ agy_check() {
   agy_state=unknown agy_status="" agy_agent="" agy_cwd=""
   socket=$(jq -r '.socket // empty' "$1") pane=$(jq -r '.pane // empty' "$1") dir=$(jq -r '.dir // empty' "$1")
   instance=$(jq -r '.agyInstance // empty' "$1")
-  if [ -n "$socket" ] && [ -n "$pane" ] && command -v herdr >/dev/null 2>&1 &&
-    out=$(HERDR_SOCKET_PATH="$socket" herdr agent get "$pane" 2>/dev/null); then
-    # A separator that is not whitespace, so an empty field stays a field.
-    IFS=$'\x1f' read -r agy_agent agy_status agy_cwd got_instance got_pane <<EOF
-$(printf '%s' "$out" | jq -r '(.result.agent // .result) | [.agent // "", .agent_status // "", .cwd // "", (.agent_session.value // "" | tostring), .pane_id // ""] | join("\u001f")' 2>/dev/null)
-EOF
-  else
-    got_instance="" got_pane=""
+  [ -n "$socket" ] && [ -n "$pane" ] && command -v herdr >/dev/null 2>&1 || return 0
+  # herdr exits non-zero for a pane with no agent and for a missing pane, which pipefail would read as a failed read.
+  out=$(HERDR_SOCKET_PATH="$socket" herdr agent get "$pane" 2>/dev/null) || true
+  if printf '%s' "$out" | jq -e '.error.code == "agent_not_found"' >/dev/null 2>&1; then
+    out=$(HERDR_SOCKET_PATH="$socket" herdr pane get "$pane" 2>&1) || true
+    if printf '%s' "$out" | jq -e '.error.code == "pane_not_found"' >/dev/null 2>&1; then
+      agy_state=gone
+    elif printf '%s' "$out" | jq -e '.result.pane.pane_id' >/dev/null 2>&1; then
+      agy_state=elsewhere
+    fi
+    return 0
   fi
-  if [ -z "$(jq -r '.agyPid // empty' "$1")" ]; then return 0; fi
-  if ! agy_launcher_alive "$1"; then
-    agy_state=stopped
-  elif [ -n "$instance" ] && [ "$got_instance" = "$instance" ] && [ "$got_pane" = "$pane" ] && [ "$agy_agent" = agy ] &&
+  # A separator that is not whitespace, so an empty field stays a field.
+  IFS=$'\x1f' read -r agy_agent agy_status agy_cwd got_instance got_pane <<EOF
+$(printf '%s' "$out" | jq -r '(.result.agent // empty) | [.agent // "", .agent_status // "", .cwd // "", (.agent_session.value // "" | tostring), .pane_id // ""] | join("\u001f")' 2>/dev/null)
+EOF
+  [ -n "$got_pane" ] || return 0
+  if [ "$got_pane" = "$pane" ] && [ "$agy_agent" = agy ] && { [ -z "$instance" ] || [ "$got_instance" = "$instance" ]; } &&
     { [ "$agy_cwd" = "$dir" ] || case $agy_cwd in "$dir"/*) true ;; *) false ;; esac; }; then
     agy_state=running
   else
@@ -790,109 +743,45 @@ EOF
   fi
 }
 
-# True when no process this user can see has its working directory in worktree $1: positive evidence that nothing
-# would lose its directory when the worktree goes. A process that has exited, or keeps its directory unreadable to its
-# own user (systemd --user, an agent that made itself non-dumpable), is not seen.
-worktree_unused() {
-  local proc cwd
-  for proc in /proc/[0-9]*; do
-    [ -O "$proc" ] || continue
-    cwd=$(readlink "$proc/cwd" 2>/dev/null) || continue
-    case $cwd in "$1" | "$1"/*) return 1 ;; esac
+# The SHA-256 of standard input, by whichever of the two common tools this system has.
+sha256_stdin() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi
+}
+
+# The hook, plugin and agent configuration an agy session in worktree $1 loads: its global files and directories, and
+# the same names in each of the four workspace roots agy reads. agy reloads hooks mid-session, so any of these can turn
+# the guard off or start an unhooked subagent while the worker runs.
+agy_config_paths() {
+  local g="$HOME/.gemini" root name
+  for name in config/hooks.json config/hooks config/plugins config/plugins.json config/agents hooks.json \
+    antigravity-cli/hooks.json antigravity-cli/plugins antigravity-cli/plugins.json antigravity-cli/agents \
+    antigravity-cli/agents.json antigravity-cli/secplugins; do
+    printf '%s\n' "$g/$name"
   done
-  return 0
-}
-
-# True when agy worker record $1, which names no launcher, cannot still be running: herdr says its pane is gone, any
-# launcher the launch file names has exited, and no process of this user has a directory inside its worktree.
-agy_unlaunched_gone() {
-  local socket pane dir launched out
-  socket=$(jq -r '.socket // empty' "$1") pane=$(jq -r '.pane // empty' "$1") dir=$(jq -r '.dir // empty' "$1")
-  [ -n "$socket" ] && [ -n "$pane" ] && [ -n "$dir" ] || return 1
-  # herdr exits non-zero for a missing pane, which pipefail would read as a failed check.
-  out=$(HERDR_SOCKET_PATH="$socket" herdr pane get "$pane" 2>&1) || true
-  printf '%s' "$out" | jq -e '.error.code == "pane_not_found"' >/dev/null 2>&1 || return 1
-  launched=$(cat "${1%.json}.agy-launch" 2>/dev/null) || launched=""
-  case $launched in '' | *[!0-9]*) ;; *) [ ! -e "/proc/$launched" ] || return 1 ;; esac
-  worktree_unused "$dir"
-}
-
-# Runs "$@" up to three times while it answers 75, the agy launcher's "the sandbox could not be set up, so nothing
-# started". Any other answer is final: a start that ran something is never repeated, nor one killed by its timeout.
-agy_until_started() {
-  local status _
-  for _ in 1 2 3; do
-    if "$@"; then return 0; else status=$?; fi
-    [ "$status" -eq 75 ] || return "$status"
+  for root in .agents .agent _agents _agent; do
+    for name in hooks.json plugins plugins.json agents; do printf '%s\n' "$1/$root/$name"; done
   done
-  return "$status"
 }
 
-# The launcher's --anderton-worktree-<$1> answer for agy worker record $2's worktree, given two minutes per start.
-agy_inspect() {
-  agy_until_started agy_inspect_once "$1" "$(jq -r '.dir // empty' "$2")" "$(jq -r '.base // empty' "$2")"
-}
-# One start of it. A mask target can still vanish between the launcher's dry run and its real start, and then bwrap
-# itself fails before it runs anything, saying so first on stderr: that start set up nothing either (75). Rerunning an
-# inspection only reads the worktree again.
-agy_inspect_once() { # agy_inspect_once <work|refs> <dir> <base>
-  local out err status=0
-  err=$(mktemp) || return 1
-  out=$(cd "$2" 2>/dev/null && timeout -s KILL 120 "$(agy_root)/bin/agy" "--anderton-worktree-$1" "$3" 2>"$err") || status=$?
-  if [ "$status" -ne 0 ] && [ "$status" -ne 137 ] && [ -z "$out" ] && head -n 1 "$err" | grep -q '^bwrap: '; then status=75; fi
-  rm -f "$err"
-  [ "$status" -eq 0 ] || return "$status"
-  printf '%s\n' "$out"
-}
-
-# What worktree_work says of agy worker record $1's worktree, worked out by the launcher inside its sandbox, as the
-# worker, read-only and with no network: host git never reads a worktree the worker wrote, so a filter, fsmonitor or
-# hook it names runs only there. Anything the sandbox cannot answer is unreadable, which keeps the worktree.
-agy_worktree_work() {
-  local out
-  out=$(agy_inspect work "$1") || out=unreadable
-  # Only the sandbox's explicit "clean" means nothing to keep; no answer at all keeps the worktree.
-  case $out in clean) echo ;; uncommitted | flagged | unpushed | unreadable) printf '%s\n' "$out" ;; *) echo unreadable ;; esac
-}
-
-# What waiting.sh's finished reads from agy worker record $1's worktree, worked out the same way inside the sandbox.
-# Sets agy_head, agy_ref, agy_branch, agy_landed (1 or nothing) and agy_landed_at; status 1 when the sandbox gives no
-# answer these scripts can use, a ref or branch that could pass for an option included.
-agy_worktree_refs() {
-  local out
-  agy_head="" agy_ref="" agy_branch="" agy_landed="" agy_landed_at=""
-  out=$(agy_inspect refs "$1") || return 1
-  IFS=$'\x1f' read -r agy_head agy_ref agy_branch agy_landed agy_landed_at <<EOF
-$out
+# One line per path agy_config_paths names for worktree $1: the path, a tab, and the digest of what is there now (every
+# entry beneath a directory, a link's target, a file's bytes) or "absent".
+agy_config_state() {
+  local path entry
+  while IFS= read -r path; do
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+      printf '%s\tabsent\n' "$path"
+      continue
+    fi
+    printf '%s\t%s\n' "$path" "$(
+      find "$path" -print 2>/dev/null | LC_ALL=C sort | while IFS= read -r entry; do
+        if [ -L "$entry" ]; then printf 'L %s %s\n' "$entry" "$(readlink "$entry")"
+        elif [ -d "$entry" ]; then printf 'D %s\n' "$entry"
+        elif [ -f "$entry" ]; then printf 'F %s %s\n' "$entry" "$(sha256_stdin < "$entry" 2>/dev/null || echo unreadable)"
+        else printf 'O %s\n' "$entry"; fi
+      done | sha256_stdin)"
+  done <<EOF
+$(agy_config_paths "$1")
 EOF
-  case $agy_head in '' | *[!0-9a-f]*) return 1 ;; esac
-  case $agy_ref$agy_branch in *[!A-Za-z0-9._/-]*) return 1 ;; esac
-  case $agy_ref in -*) return 1 ;; esac
-  case $agy_branch in -*) return 1 ;; esac
-  case $agy_landed in '' | 1) ;; *) return 1 ;; esac
-  case $agy_landed_at in *[!0-9]*) return 1 ;; esac
-}
-
-# True when agy worker record $1's worktree still belongs to the repository spawn.sh recorded: its .git is a plain file
-# naming a git directory under that repository's worktrees, whose commondir leads back to the repository. The sandbox
-# keeps both read-only; this check is for anything that changed them outside it.
-agy_git_pointer_ok() {
-  local dir common line gitdir back root
-  dir=$(jq -r '.dir // empty' "$1") common=$(jq -r '.agyCommon // empty' "$1") root=$(jq -r '.root // empty' "$1")
-  # A record from before agyCommon was kept: the repository it was started from says where its common directory is.
-  if [ -z "$common" ] && [ -n "$root" ]; then
-    common=$(cd "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P) || common=""
-  fi
-  [ -n "$dir" ] && [ -n "$common" ] && [ -f "$dir/.git" ] && [ ! -L "$dir/.git" ] || return 1
-  IFS= read -r line < "$dir/.git" || return 1
-  case $line in 'gitdir: '?*) gitdir=${line#gitdir: } ;; *) return 1 ;; esac
-  case $gitdir in /*) ;; *) gitdir="$dir/$gitdir" ;; esac
-  gitdir=$(cd "$gitdir" 2>/dev/null && pwd -P) || return 1
-  case $gitdir in "$common"/worktrees/?*) ;; *) return 1 ;; esac
-  [ -f "$gitdir/commondir" ] && [ ! -L "$gitdir/commondir" ] || return 1
-  IFS= read -r back < "$gitdir/commondir" || return 1
-  case $back in /*) ;; *) back="$gitdir/$back" ;; esac
-  [ "$(cd "$back" 2>/dev/null && pwd -P)" = "$common" ]
 }
 
 # True once worker $4's tab or window ($1 herdr|tmux, socket $2, id $3, tmux server pid $5) is absent from its

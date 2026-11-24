@@ -141,217 +141,84 @@ only when status reports `never arrived` for the direction ID.
 Anderton Stop hook. A Claude session you adopt must already have this plugin
 loaded and end a turn to receive those directions.
 
-### Prepare agy workers (Linux)
+### Prepare agy workers
 
-`spawn.sh --provider agy` starts an agy (Antigravity CLI) worker, on Linux and inside herdr only. It opens the worker's
-tab with `/opt/agy/bin` first on its PATH, so herdr's `agy` kind runs the sandbox launcher below, and passes
-`--effort` (low to xhigh; agy's models have no max) and `--model` when given. It refuses `--mode`, a missing install, a
-changed guard registration and a missing login, since agy starts its own sign-in without one.
+`spawn.sh --provider agy` starts an agy (Antigravity CLI) worker in its own worktree, in a herdr tab, the way Claude and
+Codex workers start. It runs the `agy` on your PATH with your own environment, so it pushes and opens PRs with your
+normal `gh` login. agy's guard hook, from your bootstrap checkout, gates every tool call it makes. Three steps, once:
 
-Before it sends the brief, `spawn.sh` proves the sandbox. The launcher writes its pid to a file `spawn.sh` names, and
-then becomes `bwrap`. That process must run the bwrap `install-agy.sh` pinned, must have a child of it in a mount
-namespace of its own, and must descend from the worker's herdr pane (by the `HERDR_PANE_ID` entry of its environment).
-herdr must also report the agy's agent session, which binds every later step to that instance. An agy that fails any
-of these gets no brief, and only its pane is closed.
+1. **Install agy** the way its README says. It installs to `~/.local/bin/agy` and updates itself:
 
-agy keeps no transcript these scripts read yet, so `worker.sh status`, `output` (a screen read) and `message` go
-through the worker's herdr pane. Each acts only on one herdr snapshot that shows the agy instance `spawn.sh` saw in that
-pane, in the worker's worktree, and only after a last check that the proven launcher is still alive. No sweep reads agy
-workers.
+   ```sh
+   curl -fsSL https://antigravity.google/cli/install.sh | bash
+   ```
 
-`retire.sh` closes that pane only once herdr reports the worker idle. It removes the worktree only on positive evidence
-that nothing uses it: the launcher has exited (or, for a record with no launcher, herdr reports the pane gone), and no
-process has its directory there, a plain shell included. Host git never runs on an agy worktree: the launcher works out
-what retiring would lose (`--anderton-worktree-work`) and what `waiting.sh` reads of its commits
-(`--anderton-worktree-refs`) inside a read-only sandbox with no network, so a clean filter or other helper the worktree
-names runs only there. `gh` starts in the repository's checkout instead, and `git worktree remove --force`, run on the
-repository, deletes the worktree without reading it. All of this happens only while the worktree's `.git` and `commondir` still lead to the repository it
-started from; the same holds when a failed spawn cleans up. `ANDERTON_AGY_ROOT` names another install root.
+   Run `agy` once and sign in, so it sets up `~/.gemini/config`.
+2. **Optionally, install herdr's agy integration:** `herdr integration install antigravity-cli`. It adds a
+   `herdr` entry to `~/.gemini/config/hooks.json` that tells herdr each agy pane's session, so later steps act
+   only on the session `spawn.sh` started. Without it they act on the agy herdr shows in the worker's pane and
+   worktree. Install it before step 3: herdr cannot write the read-only file step 3 leaves. If you install it
+   afterwards, run `chmod u+w ~/.gemini/config/hooks.json` first, then repeat step 3.
+3. **Register the guard:**
 
-The launcher dry-runs its sandbox view before it starts anything. When the view cannot be set up, because a socket it
-masks closed as it started, it exits 75 having started nothing. `spawn.sh` and the worktree inspection then try again, up
-to three starts in all. A start that ran something is never repeated, and neither is one its 120-second timeout ended.
+   ```sh
+   skills/anderton/scripts/agy-hooks.sh register --guard /path/to/bootstrap
+   ```
 
-**Known limit, updates:** `retire.sh` and `waiting.sh` ask the installed launcher (`/opt/agy/bin/agy`) to inspect a worktree. If
-the plugin's scripts are updated before the launcher is reinstalled, a launcher that gives no `clean` answer makes a clean
-retirement exit 3 and keep the worktree. That is safe; reinstall the launcher (`install-agy.sh`) together with the
-plugin.
+   It writes a `PreToolUse` entry that runs that checkout's
+   `plugins/workflow-agents/hooks/agy-guard.sh` in place, as Claude Code runs the checkout's guard hooks, with a
+   3660-second timeout, above the guard supervisor's own deadline. The entry points the guard at the checkout's
+   `merge-scope.local.json` and `response-secrets.local.json`, and leaves the dev and lab scopes empty. It keeps
+   herdr's entry and refuses any other hook unless you pass `--replace`, which drops them. It refuses links, and
+   leaves the file read-only (0444); rerunning it rewrites the file the same way.
 
-Installing takes four steps, in this order, so root never writes inside a user's home and agy's first-run migration
-cannot replace the guard registration.
+Then start a worker:
 
-1. **As root,** `skills/anderton/scripts/install-agy.sh` writes only under the prefix (`/opt`):
-   - the release pinned in `agy.pin`, checked against its sha256, root-owned under `/opt/agy`;
-   - the agy guard from a reviewed bootstrap checkout, under `/opt/agy-guard`;
-   - a copy of a trusted bun (`--bun`, default `/usr/local/bin/bun`, 1.3.3 or newer) alone in `/opt/agy/hookbin`, which
-     heads the hook's PATH;
-   - the hook script `/opt/agy/libexec/agy-guard-hook`, with the worker's home and the policy files quoted inside it;
-   - its registration `/opt/agy/etc/hooks.json`, with a 3660-second timeout;
-   - a default `/opt/agy/etc/sandbox.conf`.
-   
-   It takes `--bun` and `--bwrap` only when each file, and every directory above it, belongs to root and no one else can
-   write it. The hook points the guard at the bootstrap checkout's `merge-scope.local.json` and
-   `response-secrets.local.json` (`--scope-dir` to read them from elsewhere, outside anything agy workers can write). The
-   dev and lab scopes are set empty, so agy workers get none of their approval exemptions: they build code, and agy has no
-   approval channel. It refuses a guard without `agy-supervisor.ts`, or whose supervisor deadline is not above the guard's
-   one-hour approval wait and at least 10 seconds under the hook timeout.
-2. **As the worker user, log in once, unsandboxed,** with the command `install-agy.sh` prints. agy's first start
-   migrates its configuration: it moves the legacy `~/.gemini/antigravity-cli/hooks.json` over
-   `~/.gemini/config/hooks.json`, leaves a link to it in the old place, and writes `~/.gemini/config/.migrated`. A
-   registration written before that is lost, and agy then loads no hooks.
-3. **As the worker user,** `/opt/agy/libexec/register-agy` copies that registration into `~/.gemini/config/hooks.json` and
-   creates the two other hook files agy reads as `{}`. It refuses until `~/.gemini/config/.migrated` exists, and refuses
-   root, a link at any path it writes, and a hard-linked hook file. The one link it replaces, with an empty file, is the
-   migration's `antigravity-cli/hooks.json` link to `config/hooks.json`; a link there to anything else is refused. When
-   `~/.gemini/config/hooks.json` holds other hooks (anything but `{}` or nothing), it stops until you pass
-   `--replace-hooks`.
-
-   **Known limit:** a process that saves a regular `antigravity-cli/hooks.json` after `register-agy` has checked the
-   migration link, and before it renames `{}` over that name, loses what it saved. This is accepted because
-   `register-agy` runs once, by hand, right after the login, when nothing else should write there.
-4. **Verify:** `cmp /opt/agy/etc/hooks.json ~/.gemini/config/hooks.json` succeeds, and `/opt/agy/bin/agy` started from a
-   linked worktree opens agy instead of refusing with a reason.
-
-```bash
-sudo skills/anderton/scripts/install-agy.sh --user <worker user> --guard <bootstrap>/plugins/workflow-agents/hooks \
-  --nanoclaw <NanoClaw install>
-# as the worker user:
-env -u DBUS_SESSION_BUS_ADDRESS AGY_CLI_DISABLE_AUTO_UPDATE=true /opt/agy/<version>/antigravity acp --login
-/opt/agy/libexec/register-agy
-cmp /opt/agy/etc/hooks.json ~/.gemini/config/hooks.json
+```sh
+skills/anderton/scripts/spawn.sh --provider agy --effort high <name> brief.md
 ```
 
-**Known limit, upgrades:** the installer refuses any symbolic link under the prefix. A guard copy that an installer older
-than this one left there can still hold bun's `node_modules/.cache` links, and then the upgrade stops at the scan and
-names the link. Remove that copy, `<prefix>/agy-guard/<digest>`, and rerun. Nothing is installed in `/opt` yet, so no
-such copy exists today.
+Before it starts agy, `spawn.sh` runs `agy-hooks.sh check`. The check refuses unless all of these hold:
 
-**Known limit, agy versions:** agy unpacks its built-in plugins and skills into `~/.gemini/antigravity-cli/builtin` on a
-run, and rewrites them only when their checksum changes. The launcher keeps that directory read-only and refuses to
-start without it, or with one that lacks its `.manifest` or `.checksum`, so after any change of agy version, run agy
-once unsandboxed, as the worker user (the login command above), to reseed it before any worker starts.
+- the registration holds exactly the guard's entry, plus herdr's when present;
+- the file is read-only;
+- the guard and `bun` are in place;
+- neither of agy's other global hook files defines hooks;
+- none of the new worktree's workspace roots (`.agents`, `.agent`, `_agents`, `_agent`) names either entry.
 
-`test/agy-guard-install.test.sh` installs from the bootstrap commit in `test/agy-guard.commit` and checks the installed
-hook's replies, run both by a shell and as split words. CI runs it.
+Otherwise agy would run unguarded, and `spawn.sh` says so and starts nothing.
 
-`/opt/agy/bin/agy` is the launcher (`agy-sandbox.sh`). It starts agy with `--dangerously-skip-permissions` inside the
-pinned `bwrap`, with this view:
+agy runs with `--dangerously-skip-permissions`. Its prompting mode would stop on routine commands, which a Claude
+worker in auto mode does not, and its auto mode needs a terminal sandbox that a plain Linux host may lack, in which case
+agy falls back to prompting. The guard is the gate. `--mode accept-edits|auto|plan` runs that agy mode instead, and
+its prompts wait in the pane, where `waiting.sh` lists the worker as blocked. agy keeps no transcript these scripts
+read, so `worker.sh status`, `output` (a screen read) and `message` go through the worker's herdr pane, only
+while herdr shows agy there in its worktree. `retire.sh` holds every agy worker until you pass
+`--reviewed-through`, then closes its pane and removes its worktree as for any worker.
 
-- **Read-only:** the host.
-- **Writable:** the worktree; of its repository's git directory only `objects/`, `refs/`, `logs/`, `packed-refs`,
-  `FETCH_HEAD` and this worktree's own `worktrees/<name>/`; agy's state directory; and `/tmp`. The launcher gives each its
-  reason, and refuses any writable root that is the home or contains it. It runs only in a linked worktree, never the
-  repository's main checkout. With the repository's git directory read-only otherwise, a worker cannot add a worktree,
-  rewrite `packed-refs` in place (deleting a packed branch, `pack-refs`), or write submodule or LFS state.
-- **Private:** `~/.cache`, `~/.npm`, `~/.bun/install/cache` and `~/.local/share/pnpm` are this worktree's own, kept under
-  `~/.cache/anderton-agy/`, never the caches host tools run from. The launcher creates a missing one only inside a
-  directory the worker user owns and can write; under one it cannot (a `~/.bun` root installed bun into), the sandbox
-  gets it in a read-only tmpfs over that directory, with the directory's own entries bound back read-only. It refuses
-  such a directory it cannot list, and one holding a link that resolves into a writable root.
-- **Read-only even inside those:** every hook, plugin and agent location agy reads, among them all four workspace roots
-  (`.agents`, `.agent`, `_agents`, `_agent`), which the launcher creates empty when missing; agy's built-in plugins
-  and skills (`~/.gemini/antigravity-cli/builtin`); and this worktree's `config.worktree`, `commondir` and `.git` pointer, which
-  host git reads.
-- **Hidden:** credential stores (every entry of the home whose name starts with `.claude` or `.codex`, a backup or second
-  account included; `~/.config/gh`, `~/.ssh`, `~/.git-credentials`, `~/.netrc` and more) and the sockets of processes
-  that would run a command for the worker.
+agy reloads hooks mid-session. A same-named entry with `"enabled": false` in a workspace `.agent/hooks.json`
+switched the guard off on the next turn, and a custom agent that does not inherit customizations runs its subagent
+unhooked. So `spawn.sh` records what agy loads hooks, plugins and agents from as the worker starts:
 
-Just before agy starts, it refuses to run unless all of these hold, checked inside the sandbox:
+- `~/.gemini/config/hooks.json`, `hooks/`, `plugins/`, `plugins.json` and `agents/`;
+- `~/.gemini/hooks.json`;
+- `~/.gemini/antigravity-cli/hooks.json`, `plugins/`, `plugins.json`, `agents/`, `agents.json` and `secplugins/`;
+- `hooks.json`, `plugins/`, `plugins.json` and `agents/` in each of the worktree's four workspace roots.
 
-- the guard registration and the hook script are byte for byte what the install wrote;
-- no other hook file defines hooks;
-- the installed guard, its supervisor and `/bin/bash` are present;
-- the supervisor's deadline is above the one-hour approval wait and at least 10 seconds under the registered hook
-  timeout;
-- agy has a non-empty stored login;
-- no `.agents/hooks.json` sits above the worktree;
-- each of the four workspace roots (`.agents`, `.agent`, `_agents`, `_agent`) is missing, or a directory holding only
-  `rules/`, `skills/` and `workflows/`, each a real directory with no link and no `hooks.json` at any depth. Anything
-  else there is refused by name: `hooks.json`, `plugins/`, `agents/`, `skills.json` or any other file, and links;
-- `~/.gemini/config/agents`, and the `agents` directory of every plugin in `~/.gemini/config/plugins/`, is missing or
-  an empty directory, never a link, and no plugin there is a link;
-- `~/.gemini/config/plugins.json` and agy's state-directory `~/.gemini/antigravity-cli/plugins.json`, which can
-  register a plugin from anywhere, are each missing, empty or `{}`, never a link and never unreadable (both of the
-  file's fields, `entries` and `inherits`, are optional, so `{}` registers nothing). These workspace and user checks
-  also run before `bwrap` starts;
-- every protected path is mounted read-only;
-- the guard's policy files are not writable.
+`waiting.sh` compares them on each pass. Each changed state is one header, which your watch tells you once.
 
-Before that it also refuses:
-- a policy file inside a writable root;
-- a missing or unseeded `~/.gemini/antigravity-cli/builtin` (agy's built-in plugins and skills): it must hold
-  `.manifest` and `.checksum` as regular files. It never stands an empty, read-only directory in for them;
-- a second hard link to any protected file;
-- a git configuration include (plain or conditional, from the system, global or repository config, followed
-  recursively) of a file inside a writable root, and any git configuration file with a second hard link;
-- a `core.hooksPath`, `core.fsmonitor` or `filter.*.clean`/`smudge`/`process` command that resolves inside a writable
-  root. A relative path counts as relative to the worktree, so a repository that sets `core.hooksPath` to a tracked
-  directory (husky's `.husky`, a `.githooks`) cannot run agy workers;
-- an agy release, hook, guard or bun with any directory above it not owned by root, writable by others, or inside a
-  writable root.
-  The installer checks the prefix's directories the same way.
+**Known limits:**
 
-Inside, it also checks that `hookbin/` holds only the pinned bun, byte for byte, read-only, at a release no older than
-1.3.3.
-
-**Agent definitions.** agy loads custom agent definitions (`<name>.md` or `<name>/agent.md`) from the worktree's
-`.agents/agents/` and from `~/.gemini/config/agents/`. One whose frontmatter sets `inheritCustomizations: false`, or
-`inheritScopes` to `none` or `repo_and_org`, runs its subagent with no hooks, so the guard never sees what that subagent
-does. A plugin's `agents/` directory loads the same way. These directories are read-only inside the sandbox, but a
-repository can ship `.agents/agents`, and a worker can commit one for a later worktree to check out, so the launcher
-refuses to start instead. agy also reloads a workspace root's `hooks.json` mid-session, so a worker that could create
-`.agent/hooks.json` could switch the guard off for its next turn: all four roots are bound read-only. A workspace
-plugin can carry hooks and agents, and `skills.json` or `plugins.json` can name customizations anywhere, so a root may
-hold only rules, skills and workflows, which carry none of those. A repository that ships anything else in a workspace
-root cannot run agy workers. The empty directories the launcher creates are not tracked, so they leave `git status`
-clean.
-
-**Known limit, startup window:** the checks inside the sandbox run just before agy starts, and agy discovers agent
-definitions after that. The protected directories are read-only only to the worker: a process on the host that writes
-one in that window (a checkout into the worktree, say) gets its definition loaded, and the read-only bind keeps it
-there. Nothing on the host should write a worker's worktree or `~/.gemini/config` while the worker starts.
-
-**Known limit, branch switches:** `rules/`, `skills/` and `workflows/` in a workspace root pass the launcher's checks
-but are read-only for the whole session, so a checkout inside the sandbox that would change, add or remove a file under
-them (switching to a branch with different rules, say) fails. Switch branches before the worker starts, or in a new one.
-
-**Known limit, unwritable worktrees:** the launcher creates any missing workspace root (`.agents`, `.agent`, `_agents`,
-`_agent`) at the worktree's top level before it binds it read-only. If that top level is not writable by the worker user
-and one of them is missing, the launcher cannot create it and exits with `mkdir`'s error before agy starts.
-
-`/opt/agy/etc/sandbox.conf` starts with masks for the credential stores and, with `--nanoclaw`, that install's `data/` and
-`.env`. Add lines, owned by root. A leading `~/` is the home; every other character, brackets and `*` and `?` included,
-is taken literally:
-
-- `rw <path> <reason>` makes a path writable;
-- `mask <path>` hides one;
-- `gh-token-file <path>` names a file holding a GitHub token scoped to the repositories the worker may push to. The
-  worker cannot reach `~/.config/gh`.
-
-**What the sandbox does not cover.** Workers share the host's network namespace. They can reach loopback services,
-abstract Unix sockets, and a pathname socket opened after launch, as host Claude and Codex workers can. Phase 1's fleet
-provider runs agy in containers instead. `/tmp` stays shared for host-wide locks.
-
-**Host git must never run in an agy worktree: no `commit`, `push`, `status`, `log` or any other command, not even with
-`-C`.** A worker writes everything git reads there apart from the protected files, so host git in it could run the
-worker's code with none of the sandbox around it. An absolute `core.hooksPath` outside the worktree does not make it
-safe: husky's shared hook runner (`.husky/_/h`) puts the cwd-relative `node_modules/.bin` first on `PATH`, and git runs
-hooks from the worktree's top level, so a host `git commit` there would run a `grep` or `git` the agent planted.
-`spawn.sh`, `retire.sh` and `waiting.sh` (#42) touch an agy worktree only through the launcher, inside a read-only
-sandbox. Commits and pushes happen inside the worker's own sandbox, and the Anderton reviews the pushed ref.
-
-A repository whose `prepare` script writes the shared git config (husky, a hooks-path pin) still installs inside the
-sandbox. On this host's NanoClaw layout, `pnpm install --frozen-lockfile` in an agy worktree under the launcher exited 0:
-husky's `git config core.hooksPath` and the pin script's write both failed against the read-only `.git/config`, each
-printed its error, and the existing absolute `core.hooksPath` stayed as it was.
-
-**Git inside the sandbox, known limits.** The repository's own config stays read-only, so `git push -u` publishes the
-branch but cannot record its upstream: push with `git push origin <branch>`, and the Anderton opens the PR from the pushed
-ref. `git fetch --deepen` or `--unshallow` in a shallow clone cannot work: git rewrites the repository's `shallow` file
-through a lock file it creates beside it, and the directory holding both stays read-only. Start agy workers from a full
-clone.
-
-`test/agy-sandbox.test.sh` checks the view, and each refusal, against a throwaway install.
+- The watch detects a change and does not undo it: the worker keeps running until you act. It notices within one
+  watch tick (30 seconds by default), and only while your Anderton's watch runs. There is no inotify on macOS, and
+  `inotifywait` is not a dependency here, so each tick compares digests.
+- Hook files a worktree already has at its base are recorded as they are. `spawn.sh` lists them when it starts the
+  worker.
+- The 0444 lock stops an accidental write, not a process running as you: such a process can rename over the file or
+  chmod it. The guard denies agy's own writes to hook config, and the watch reports any change.
+- The dev and lab scopes are off for agy: their approval exemptions do not apply to agy workers.
+- agy updates itself, and an update that rewrites its built-in plugins (`~/.gemini/antigravity-cli/builtin`) is not
+  watched.
 
 ## Questions
 

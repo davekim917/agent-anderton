@@ -229,14 +229,7 @@ if [ "$launcher" != bg ] && [ "$provider" = codex ]; then
     exit 1
   fi
 elif [ "$provider" = agy ]; then
-  # Below, the worktree is inspected only inside the launcher's read-only sandbox, and removed by host git only with
-  # --force, which reads nothing in it: refuse one that no longer points at its repository.
-  if [ "$worktree" = true ] && [ -e "$dir" ] && ! agy_git_pointer_ok "$record"; then
-    echo "agy worker '$name': $dir/.git no longer points into the repository it was started from, so host git will not read it. Inspect it, then remove the worktree by hand." >&2
-    exit 1
-  fi
-  # Only the recorded pane is closed, only while the launcher spawn.sh verified runs the same agy instance there, and
-  # only after one more check of that launcher just before the close.
+  # Only the recorded pane is closed, and only while herdr shows the agy spawn.sh started there, idle.
   agy_check "$record"
   case $agy_state in
     running)
@@ -244,44 +237,25 @@ elif [ "$provider" = agy ]; then
         idle | done) ;;
         *) echo "agy worker '$name' is not idle (herdr says: ${agy_status:-nothing}). Retire it once it is." >&2; exit 1 ;;
       esac
-      agy_launcher_alive "$record" || { echo "agy worker '$name' stopped while retiring; rerun." >&2; exit 1; }
       HERDR_SOCKET_PATH="$socket" herdr pane close "$pane" >/dev/null 2>&1 || true
       ;;
-    stopped)
-      # Its launcher has exited, so the instance it bound is gone. Whatever holds the pane now is someone else's: herdr
-      # showing it in the worktree keeps the worktree, and herdr showing nothing there is no evidence it is unused
-      # (the check of every process below is).
-      case $agy_cwd in
-        "$dir" | "$dir"/*)
-          echo "agy worker '$name' has stopped, but herdr pane $pane now runs ${agy_agent:-something} in $dir; kept its worktree and record." >&2
-          exit 1
-          ;;
-      esac
-      ;;
+    gone) ;;
     elsewhere)
-      echo "agy worker '$name' still runs, but its herdr pane $pane does not show it as recorded (moved, or herdr cannot say). Close it yourself, then rerun." >&2
+      echo "agy worker '$name': herdr pane $pane does not show it as recorded (it exited, or something else runs there). Close the pane yourself once nothing in it needs keeping, then rerun." >&2
       exit 1
       ;;
     *)
-      # A start that timed out leaves no launcher in the record. Once the pane is gone, nothing of it remains.
-      if ! agy_unlaunched_gone "$record"; then
-        echo "The record for agy worker '$name' names no launcher, and its pane ${pane:-(none recorded)} or a process in $dir is still there. Close the pane, then rerun." >&2
-        exit 1
-      fi
+      echo "agy worker '$name': herdr could not say what runs in pane ${pane:-(none recorded)}; kept its worktree and record." >&2
+      exit 1
       ;;
   esac
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    agy_launcher_alive "$record" || break
+    agy_check "$record"
+    [ "$agy_state" != gone ] || break
     sleep 0.5
   done
-  if agy_launcher_alive "$record"; then
+  if [ "$agy_state" != gone ]; then
     echo "Could not confirm agy worker '$name' stopped (herdr pane $pane); kept its worktree and record." >&2
-    exit 1
-  fi
-  # The worktree goes only on positive evidence that nothing uses it: no process has its directory there. herdr
-  # failing to answer, or finding no agent in the pane, says nothing about a plain shell in it.
-  if [ "$worktree" = true ] && [ -d "$dir" ] && ! worktree_unused "$dir"; then
-    echo "agy worker '$name' has stopped, but a process still has its directory in $dir (the pane's shell, or something started there); kept its worktree and record." >&2
     exit 1
   fi
 elif [ "$launcher" != bg ] && [ -n "$mixed" ] && [ -n "$pane" ]; then
@@ -337,22 +311,20 @@ else
 fi
 
 if [ "$worktree" = true ] && [ -d "$dir" ]; then
-  if [ "$provider" = agy ]; then work=$(agy_worktree_work "$record"); else work=$(worktree_work "$dir" "$(jq -r '.base // empty' "$record")"); fi
-  case $work in
+  case $(worktree_work "$dir" "$(jq -r '.base // empty' "$record")") in
     uncommitted) echo "Stopped '$name'. Kept $dir: it has uncommitted changes."; exit 3 ;;
     unpushed) echo "Stopped '$name'. Kept $dir: it has commits no remote branch has."; exit 3 ;;
     flagged) echo "Stopped '$name'. Kept $dir: git marks files in it assume-unchanged or skip-worktree (as a sparse checkout does), so status cannot show their edits. Remove it yourself once nothing in it needs keeping."; exit 3 ;;
     unreadable) echo "Stopped '$name'. Kept $dir: git could not read its status or compare it with its base and remotes."; exit 3 ;;
   esac
-  # Its state was read in the sandbox above; --force keeps host git from reading the worktree again to decide.
-  if [ "$provider" = agy ]; then git -C "$root" worktree remove --force "$dir"; else git -C "$root" worktree remove "$dir"; fi
+  git -C "$root" worktree remove "$dir"
 fi
 if [ "$launcher" = bg ] && ! claude rm "$id" >/dev/null 2>&1; then
   echo "Stopped '$name' and removed its worktree, but claude rm $id failed; kept the record. Rerun to finish." >&2
   exit 1
 fi
 emit_worker_done "$record"
-rm -f "$record" "${record%.json}.agy-launch" "$hold_file"
+rm -f "$record" "${record%.json}.agy-config" "$hold_file"
 # Earlier versions kept a last-report file beside each worker record.
 find "$holders/workers" -maxdepth 1 -name '*.last-report' -exec rm -f {} + 2>/dev/null || true
 echo "Retired '$name'."
