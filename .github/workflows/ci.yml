@@ -28,6 +28,13 @@ jobs:
         run: /bin/bash test/custody.test.sh
       - name: Codex worker reports
         run: python3 -B test/codex.test.py
+      - name: agy sandbox
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y -q bubblewrap
+          # Ubuntu runners refuse unprivileged user namespaces through AppArmor; bwrap needs them.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          /bin/bash test/agy-sandbox.test.sh
       - name: shellcheck
         if: runner.os == 'Linux'
         run: shellcheck skills/anderton/scripts/*.sh test/*.sh

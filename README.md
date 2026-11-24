@@ -141,6 +141,45 @@ only when status reports `never arrived` for the direction ID.
 Anderton Stop hook. A Claude session you adopt must already have this plugin
 loaded and end a turn to receive those directions.
 
+### Prepare agy workers (Linux)
+
+agy workers (Antigravity CLI) do not exist yet: `spawn.sh --provider agy` arrives in a later change. This change ships
+what they run inside. `skills/anderton/scripts/install-agy.sh` installs the release pinned in `agy.pin`, checked
+against its sha256, root-owned under `/opt/agy`. It also installs the agy guard from a reviewed bootstrap checkout
+under `/opt/agy-guard`, and registers that guard in the worker user's `~/.gemini/config/hooks.json`. Run it as root
+after reading it:
+
+```bash
+sudo skills/anderton/scripts/install-agy.sh --user <worker user> --guard <bootstrap>/plugins/workflow-agents/hooks
+```
+
+`/opt/agy/bin/agy` is the launcher (`agy-sandbox.sh`). It starts agy with `--dangerously-skip-permissions` inside
+`bwrap`, with this view:
+
+- **Read-only:** the host.
+- **Writable:** the worktree, its repository's `.git`, agy's state directory, `/tmp` and the tool caches. The launcher
+  gives each its reason.
+- **Read-only even inside those:** every hook and plugin location agy reads.
+- **Hidden:** credential stores and the sockets of processes that would run a command for the worker.
+
+Just before agy starts, it refuses to run unless all of these hold, checked inside the sandbox:
+
+- the guard registration is byte for byte what the install wrote;
+- no other hook file defines hooks;
+- no `.agents/hooks.json` sits above the worktree;
+- every protected path is mounted read-only.
+
+Add paths in `/opt/agy/etc/sandbox.conf`, one per line, owned by root:
+
+- `rw <path> <reason>` makes a path writable;
+- `mask <path>` hides one;
+- `gh-token-file <path>` names a file holding a GitHub token scoped to the repositories the worker may push to. The
+  worker cannot reach `~/.config/gh`.
+
+The install only puts its own hooks in that file: when `~/.gemini/config/hooks.json` already holds other hooks, it
+stops until you pass `--replace-hooks`. `test/agy-sandbox.test.sh` checks the view, and each refusal, against a
+throwaway install.
+
 ## Questions
 
 **Why full sessions instead of sub-agents?**
