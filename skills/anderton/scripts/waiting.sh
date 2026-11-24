@@ -77,10 +77,10 @@ for h in "$holders"/workers/*.held; do
   [ -z "$mine" ] || worker_belongs "$r" "$root" "$mine" || continue
   jq -r --arg blocked "$blocked" '
     (.messages // []) as $m
-    | "=== \(.name) (retire held \(.heldAt): "
+    | "=== \(.name) (retire held: "
       + (if ($m | length) > 0 then
-           "\($m | length) message(s) since its last report, at \([$m[].at] | join(", ")); read them, then retire.sh \(.name) --reviewed-through \($m | last | .at))"
-         else .why + ")" end)
+           "\($m | length) message(s) since its last report, at \([$m[].at] | join(", ")); read them, then retire.sh \(.name) --reviewed-through \([$m[].at] | max))"
+         else "\(.why) Read it, then retire.sh \(.name) --reviewed-through <the current time>)" end)
       + (if $blocked != "" or ($m | length) == 0 then "" else "\n" + ([$m[] | "  \(.at)  \(.from): \(.line)"] | join("\n")) + "\n" end)' \
     "$h" 2>/dev/null || echo "waiting.sh: could not read $h" >&2
 done
@@ -366,6 +366,7 @@ EOF
       fi
     fi
     [ -n "$why" ] || continue
+    if [ -f "${r%.json}.held" ]; then why="$why, but retire.sh held it for messages since its last report (listed above)"; fi
     if [ -d "$dir" ]; then
       case $(if [ "$provider" = agy ]; then agy_worktree_work "$r"; else worktree_work "$dir" "$(jq -r '.base // empty' "$r")"; fi) in
         uncommitted) why="$why, but has uncommitted work" ;;

@@ -804,8 +804,13 @@ check "listing the message's time and first line" contains "$typed_at  the user:
 check "and how to clear it once read" contains "retire.sh hc-typed --reviewed-through $typed_at"
 out=$(env CLAUDE_PID="$p_lead" "$scripts/waiting.sh" --blocked)
 check "the watch's waiting.sh --blocked lists the held worker, with the command that clears it" \
-  contains "=== hc-typed (retire held"
-check "naming when the message came" contains "at $typed_at; read them, then retire.sh hc-typed --reviewed-through $typed_at)"
+  contains "=== hc-typed (retire held: 1 message(s) since its last report, at $typed_at; read them, then retire.sh hc-typed --reviewed-through $typed_at)"
+# shellcheck disable=SC2034 # read in the check's eval string
+held_line=$(printf '%s\n' "$out" | grep '^=== hc-typed')
+sleep 1
+hc_retire hc-typed
+check "a retry that holds it again lists the same line, so the watch, which tells each line once, is not woken again" \
+  eval '[ "$status" -eq 4 ] && [ "$(env CLAUDE_PID="$p_lead" "$scripts/waiting.sh" --blocked | grep "^=== hc-typed")" = "$held_line" ]'
 hc_retire hc-typed --force
 check "--force does not clear it" eval '[ "$status" -eq 2 ] && [ -d "$work/wt-hc-typed" ]'
 hc_retire hc-typed --reviewed-through 2099-01-01T00:00:00Z
@@ -3247,6 +3252,9 @@ mv "$work/hc-agy.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/hc-agy.json"
 hc_retire hc-agy
 check "an agy worker, whose conversation nothing here reads, is held until a review is given" \
   eval '[ "$status" -eq 4 ] && contains "agy keeps no transcript" && contains "retire.sh hc-agy --reviewed-through" && [ -d "$work/wt-hc-agy" ]'
+out=$(cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/waiting.sh" --blocked)
+check "and the Anderton holding the claim it reports to sees the hold in its watch" \
+  contains "=== hc-agy (retire held: agy keeps no transcript these scripts read, so nothing shows what it was told since its last report. Read it, then retire.sh hc-agy --reviewed-through <the current time>)"
 rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/hc-agy.json" "$CLAUDE_CONFIG_DIR/anderton/workers/hc-agy.held"
 git -C "$alpha" worktree remove --force "$work/wt-hc-agy"
 agy_spawn() { # agy_spawn <env...> -- <spawn args...>: as the lead session, with a one-line brief

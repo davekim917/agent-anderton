@@ -78,25 +78,28 @@ if [ "$(jq -r '.adopted // false' "$record")" = true ]; then
   exit 0
 fi
 
-# hold <why> [messages JSON]: records the hold for waiting.sh and refuses.
+# hold <why> [messages JSON] [advice]: records the hold for waiting.sh and refuses. What is recorded stays the same
+# across retries, so the watch tells it once.
 held="${record%.json}.held"
 hold() {
-  local updated
+  local updated messages=${2:-[]}
   updated=$(mktemp "$held.XXXXXX")
-  jq -n --arg name "$name" --arg why "$1" --argjson messages "${2:-[]}" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  jq -n --arg name "$name" --arg why "$1" --argjson messages "$messages" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{name: $name, why: $why, heldAt: $at, messages: $messages}' > "$updated" && mv -f "$updated" "$held"
   {
     echo "Not retiring '$name': $1"
-    if [ "${2:-[]}" != "[]" ]; then
-      printf '%s' "$2" | jq -r '.[] | "  \(.at)  \(.from): \(.line)"'
-      echo "Read them first. If nothing in them is still open, run: retire.sh $name --reviewed-through $(printf '%s' "$2" | jq -r 'last.at')"
+    if [ "$messages" != "[]" ]; then
+      printf '%s' "$messages" | jq -r '.[] | "  \(.at)  \(.from): \(.line)"'
+      echo "Read them first. If nothing in them is still open, run: retire.sh $name --reviewed-through $(printf '%s' "$messages" | jq -r '[.[].at] | max')"
+    else
+      echo "${3:-Read it yourself}, then run: retire.sh $name --reviewed-through $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     fi
   } >&2
   exit 4
 }
 case $provider in
   agy)
-    [ -n "$reviewed" ] || hold "agy keeps no transcript these scripts read, so nothing shows what it was told since its last report. Read its pane, then run: retire.sh $name --reviewed-through $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    [ -n "$reviewed" ] || hold "agy keeps no transcript these scripts read, so nothing shows what it was told since its last report." "[]" "Read its pane"
     ;;
   *)
     if [ "$provider" = codex ]; then
@@ -115,7 +118,7 @@ case $provider in
     case $status in
       0) rm -f "$held" ;;
       4) hold "it has messages since its last report to its Anderton, from someone other than that Anderton:" "$(printf '%s' "$found" | jq -c '.messages')" ;;
-      *) [ -n "$reviewed" ] || hold "its conversation could not be read (${error:-no reason given}), so nothing shows it has no messages since its last report. Read it yourself, then run: retire.sh $name --reviewed-through $(date -u +%Y-%m-%dT%H:%M:%SZ)" ;;
+      *) [ -n "$reviewed" ] || hold "its conversation could not be read (${error:-no reason given}), so nothing shows it has no messages since its last report." "[]" "Read its conversation yourself" ;;
     esac
     ;;
 esac
