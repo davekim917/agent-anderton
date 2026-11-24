@@ -198,6 +198,21 @@ A Codex worker's pane is titled with its thread ID. `retire.sh` closes only that
 opened with wherever it now is, and only while it still shows that thread: after `/resume` or `/new` there, close
 it yourself.
 
+**What happens when a Codex account hits its usage limit?**
+
+Nothing changes unless you install a Codex account helper: an executable named by `ANDERTON_CODEX_ACCOUNTS`, or
+`codex-accounts` on `PATH`. With `--start-home` it prints the Codex home a new session from `$CODEX_HOME` starts
+on. With `--move-thread <id> --message <text>` it marks the thread's account limited, puts the thread's rollout in
+the next account's home, and prints that home, or exits non-zero when no account may take it. The helper decides
+which accounts qualify, for example only those whose hooks match.
+
+With a helper, `spawn.sh` and `codex-anderton.sh` start on the home it names and start that home's daemon if it is
+not running. When the watch finds a Codex worker's latest turn failed at the usage limit, it moves the worker: the
+thread resumes on the new home's daemon, the worker's record points there, its pane reopens on that daemon while it
+still shows the thread, and the worker is told to continue without repeating completed work. The watch reports the
+move, or why the worker stayed. A Codex Anderton's own session is not moved for you; reopen it with
+`codex resume <id>` under the new home.
+
 **How is it different from firstmate?**
 
 [firstmate](https://github.com/kunchenguid/firstmate) inspired it. firstmate is a full agent

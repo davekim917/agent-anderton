@@ -207,6 +207,63 @@ class WorkerTest(unittest.TestCase):
         self.delivered()
         self.assertEqual([], self.scan())
 
+    def test_reports_a_usage_limit_and_offers_only_a_latest_idle_one_for_a_move(self):
+        limit = {"message": "You've hit your usage limit.", "codexErrorInfo": "usageLimitExceeded"}
+        for turns, moved in [
+            ([{"id": "limited", "status": "failed", "error": limit}], True),
+            ([{"id": "limited", "status": "failed", "error": {"message": "You've hit your usage limit. Try later."}}],
+             True),
+            ([{"id": "later", "status": "inProgress"}, {"id": "limited", "status": "failed", "error": limit}], False),
+            ([{"id": "later", "status": "completed"}, {"id": "limited", "status": "failed", "error": limit}], False),
+            ([{"id": "other", "status": "failed", "error": {"message": "stream disconnected"}}], False),
+        ]:
+            with self.subTest(turns=[turn["id"] for turn in turns], moved=moved):
+                for stale in self.state.iterdir():
+                    stale.unlink()
+                self.client.turns = turns
+                self.client.items = {turn["id"]: [] for turn in turns}
+                limited = []
+                events = worker_api.sweep_worker(self.worker, self.state, self.stage, limited)
+                self.assertEqual([self.worker] if moved else [], limited)
+                reported = any(f"failed at the usage limit of {self.worker['codexHome']}" in e for e in events)
+                self.assertEqual(any(turn["id"] == "limited" for turn in turns), reported)
+
+    def test_limited_names_the_limit_only_while_the_thread_waits_on_nothing(self):
+        self.record.write_text(json.dumps(self.worker))
+        self.client.turns = [{"id": "limited", "status": "failed",
+                              "error": {"message": "You've hit your usage limit. Try again at 9:00 PM."}}]
+
+        def limited():
+            with contextlib.redirect_stdout(io.StringIO()) as out, \
+                    patch.object(worker_api.sys, "argv", ["codex-worker.py", "limited", str(self.record)]):
+                status = worker_api.main()
+            return status, out.getvalue()
+
+        self.assertEqual((0, "You've hit your usage limit. Try again at 9:00 PM.\n"), limited())
+        self.client.queue = [{"id": "direction"}]
+        self.assertEqual((3, ""), limited())
+        self.client.queue = []
+        self.client.info["status"] = {"type": "active"}
+        self.assertEqual((3, ""), limited())
+
+    def test_move_resumes_the_thread_in_its_worktree_before_recording_the_new_home(self):
+        self.record.write_text(json.dumps(self.worker))
+        calls = []
+        original = self.client.call
+        self.client.call = lambda method, params, timeout=None: calls.append((method, params)) or original(method, params)
+        with patch.object(worker_api.sys, "argv", ["codex-worker.py", "move", str(self.record), "/next-home"]):
+            self.assertEqual(0, worker_api.main())
+        self.assertEqual(("thread/resume", {"threadId": self.worker["id"], "cwd": self.worker["dir"],
+                                            "excludeTurns": True}), calls[0])
+        self.assertEqual("/next-home", json.loads(self.record.read_text())["codexHome"])
+        worker_api.Codex.assert_called_with(Path("/next-home"))
+        self.client.info["cwd"] = "/elsewhere"
+        self.record.write_text(json.dumps(self.worker))
+        with patch.object(worker_api.sys, "argv", ["codex-worker.py", "move", str(self.record), "/next-home"]):
+            with self.assertRaisesRegex(ValueError, "identity does not match"):
+                worker_api.main()
+        self.assertEqual(self.worker["codexHome"], json.loads(self.record.read_text())["codexHome"])
+
     def test_launch_uses_first_user_message_of_the_matching_thread(self):
         expected = self.worker["id"]
         unrelated = "00000000-0000-7000-8000-000000000456"

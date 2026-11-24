@@ -98,6 +98,78 @@ invoking_codex_home() {
   (cd "${CODEX_HOME:-$HOME/.codex}" && pwd -P) 2>/dev/null
 }
 
+# An optional Codex account helper: $ANDERTON_CODEX_ACCOUNTS, else codex-accounts on PATH. `--start-home` with
+# CODEX_HOME set prints the home a new session from that home starts on. `--move-thread <id> --message <text>` with
+# CODEX_HOME set to a thread's home marks that account limited, makes the next account hold the thread, and prints
+# that home; it exits non-zero when no account may take the thread. Without a helper every session keeps its home.
+codex_accounts() {
+  local helper=${ANDERTON_CODEX_ACCOUNTS:-}
+  if [ -z "$helper" ]; then helper=$(command -v codex-accounts 2>/dev/null) || return 1; fi
+  [ -x "$helper" ] && printf '%s\n' "$helper"
+}
+
+codex_socket() {
+  printf '%s/app-server-control/app-server-control.sock\n' "$1"
+}
+
+# The home a new Codex session from home $1 starts on: the account helper's choice, else $1.
+codex_start_home() {
+  local helper start
+  if helper=$(codex_accounts) && start=$(CODEX_HOME=$1 "$helper" --start-home </dev/null 2>/dev/null) &&
+    start=$(cd "$start" 2>/dev/null && pwd -P); then
+    printf '%s\n' "$start"
+  else
+    (cd "$1" && pwd -P)
+  fi
+}
+
+# Starts the Codex daemon of home $1 unless its socket is there, waiting up to 10 seconds for it.
+codex_daemon_up() {
+  local socket tries=20
+  socket=$(codex_socket "$1")
+  [ -S "$socket" ] && return 0
+  CODEX_HOME=$1 codex app-server daemon start </dev/null >/dev/null 2>&1 || return 1
+  while [ "$tries" -gt 0 ]; do
+    [ -S "$socket" ] && return 0
+    tries=$((tries - 1))
+    sleep 0.5
+  done
+  return 1
+}
+
+# The Codex worker's pane (launcher $1, socket $2, pane id $3, tmux server pid $4), wherever it now lives:
+# "present <title>", gone, or unknown. A tmux pane id counts only in the server process it was opened in, since a
+# restarted server reuses ids.
+codex_pane() {
+  local out
+  case $1 in
+    herdr)
+      out=$(HERDR_SOCKET_PATH="$2" herdr pane get "$3" 2>&1) || true
+      printf '%s' "$out" | jq -r 'if .error.code == "pane_not_found" or .error.code == "server_not_running" then "gone"
+        elif (.result.pane.terminal_title | type) == "string" then "present " + .result.pane.terminal_title else "unknown" end' \
+        2>/dev/null || echo unknown
+      ;;
+    tmux)
+      if out=$(tmux -S "$2" list-panes -a -F '#{pid} #{pane_id} #{pane_title}' 2>&1); then
+        printf '%s\n' "$out" | awk -v p="$4" -v id="$3" '
+          $1 == p && $2 == id { sub(/^[^ ]* [^ ]* ?/, ""); print "present " $0; f = 1; exit }
+          END { if (!f) print "gone" }'
+      else
+        case $out in *"no server running"* | *"No such file or directory"*) echo gone ;; *) echo unknown ;; esac
+      fi
+      ;;
+    *) echo unknown ;;
+  esac
+}
+
+# True when codex_pane's answer $1 is the pane titled as Codex titles thread $2: its id cut to 29 characters and
+# "...", after "Action Required | " while it waits on the user.
+shows_thread() {
+  [ ${#2} -ge 29 ] || return 1
+  case $1 in "present $(printf '%.29s' "$2")..." | "present "*" | $(printf '%.29s' "$2")...") return 0 ;; esac
+  return 1
+}
+
 record_provider() {
   jq -er '.provider // "claude"' "$1" 2>/dev/null
 }

@@ -17,6 +17,8 @@ cleanup() {
 trap cleanup EXIT
 export HOME="$tmp/home" CLAUDE_CONFIG_DIR="$tmp/claude" CODEX_HOME="$tmp/codex"
 export ANDERTON_WORKTREES="$tmp/worktrees" ANDERTON_START_WAIT=1
+# No Codex account helper on this machine's PATH is reached.
+export ANDERTON_CODEX_ACCOUNTS="$tmp/no-codex-accounts"
 export FIXTURE_TMUX_LOG="$tmp/tmux.log"
 export FIXTURE_NOTICE_HOME="$tmp/notices"
 unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID TMUX HERDR_ENV

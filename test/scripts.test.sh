@@ -16,6 +16,8 @@ trap cleanup EXIT
 
 export CLAUDE_CONFIG_DIR="$work/claude"
 unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_SOCKET_PATH TMUX
+# No Codex account helper on this machine's PATH is reached: a test names its own.
+export ANDERTON_CODEX_ACCOUNTS="$work/no-codex-accounts"
 # A fake claude CLI, so no test reaches this machine's real sessions: `agents --json` prints $FAKE_AGENTS,
 # A background launch attempt is logged and refused. `stop` and `rm` log themselves.
 mkdir -p "$work/bin"
@@ -153,6 +155,7 @@ case $1 in
     mv "$FAKE_LOG.panes-open.tmp" "$FAKE_LOG.panes-open"
     ;;
   capture-pane) cat "$FAKE_SCREEN" ;;
+  respawn-pane) printf '%s\n' "$@" > "$FAKE_LOG.respawn" ;;
   send-keys)
     echo "$3 $4" >> "$FAKE_LOG.keys"
     ;;
@@ -2693,9 +2696,92 @@ check "finding it among threads created since its launch, with no lookup by work
   '[ "$(wc -l <"$FAKE_LOG.codex-worker")" -eq 1 ] && grep -q -- " --since [0-9][0-9]* --token " "$FAKE_LOG.codex-worker"'
 check "and keeping that launch time for a later registration" \
   [ "$(jq -r --argjson before "$before" '.codexLaunchedAt >= $before' "$CLAUDE_CONFIG_DIR/anderton/workers/cx-titled.json")" = true ]
-rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/cx-titled.json" "$work/bin/codex"
-rm -rf "$cxhome"
+rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/cx-titled.json"
 [ ! -d "$work/wt-cx-titled" ] || git -C "$rho" worktree remove --force "$work/wt-cx-titled"
+
+# With a Codex account helper, a new worker starts on the home it names.
+cxnext=$(mktemp -d /tmp/anderton-cx.XXXXXX)
+mkdir -p "$cxnext/app-server-control"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$cxnext/app-server-control/app-server-control.sock"
+cat >"$work/accounts" <<'FAKE'
+#!/usr/bin/env bash
+echo "$CODEX_HOME $*" >>"$FAKE_LOG.accounts"
+if [ -n "${FAKE_ACCOUNTS_REFUSE:-}" ]; then echo "accounts: no account other than $CODEX_HOME is confirmed to dispatch every hook" >&2; exit 3; fi
+echo "$FAKE_ACCOUNTS_HOME"
+FAKE
+chmod +x "$work/accounts"
+rm -f "$FAKE_LOG.window" "$FAKE_LOG.accounts"
+set +e
+out=$(cd "$rho" && printf 'Task.\n' | env CLAUDE_CODE_SESSION_ID=rl-1 CLAUDE_PID="$p_rl" CODEX_HOME="$cxhome" TMUX=/tmp/fake-tmux,1,0 \
+  FAKE_TMUX_WINDOW=@42 ANDERTON_CODEX_ACCOUNTS="$work/accounts" FAKE_ACCOUNTS_HOME="$cxnext" \
+  "$cxs/spawn.sh" --provider codex --effort low cx-moved 2>&1)
+status=$?
+set -e
+check "spawn.sh starts a Codex worker on the home the account helper names" eval \
+  '[ "$status" -eq 0 ] && [ "$(cat "$FAKE_LOG.accounts")" = "$cxhome --start-home" ] &&
+   [ "$(jq -r .codexHome "$CLAUDE_CONFIG_DIR/anderton/workers/cx-moved.json")" = "$cxnext" ] &&
+   grep -qxF "unix://$cxnext/app-server-control/app-server-control.sock" "$FAKE_LOG.window"'
+rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/cx-moved.json" "$work/bin/codex"
+[ ! -d "$work/wt-cx-moved" ] || git -C "$rho" worktree remove --force "$work/wt-cx-moved"
+
+# A Codex worker whose latest turn failed at its account's usage limit moves to the account the helper names: its thread
+# resumes there, its pane reopens on that daemon, and it is told to continue. The daemon's answers are faked.
+fodir="$work/codex-failover"
+mkdir -p "$fodir"
+cp "$scripts/codex-workers.sh" "$scripts/session-lib.sh" "$fodir/"
+printf '#!/usr/bin/env bash\necho "%s"\n' "$CLAUDE_CONFIG_DIR/anderton/workers/cx-fail.json" >"$fodir/waiting.sh"
+cat >"$fodir/codex-worker.py" <<'FAKE'
+#!/usr/bin/env bash
+case $1 in
+  sweep)
+    echo "cx-fail turn failed at the usage limit."
+    printf '%s\n' "$2" >>"$ANDERTON_CODEX_LIMITED" ;;
+  limited) [ -d "$2.lock" ] || exit 1; echo "You've hit your usage limit. Try again at 9:00 PM." ;;
+  move)
+    echo "$2 $3" >>"$FAKE_LOG.move"
+    jq --arg home "$3" '.codexHome = $home' "$2" >"$2.tmp" && mv "$2.tmp" "$2" ;;
+  message) printf '%s\n' "$4" >>"$FAKE_LOG.direction" ;;
+esac
+FAKE
+chmod +x "$fodir/waiting.sh" "$fodir/codex-worker.py"
+cx_failover() { # cx_failover <pane title> [env...]: a sweep of worker cx-fail, recorded on $cxhome in pane %31
+  local title=$1
+  shift
+  rm -f "$FAKE_LOG.accounts" "$FAKE_LOG.move" "$FAKE_LOG.respawn" "$FAKE_LOG.direction"
+  rho_worker cx-fail
+  jq -c --arg id "$cx_thread" --arg home "$cxhome" '. + {provider: "codex", launcher: "tmux", id: $id, tab: "@31", pane: "%31",
+    socket: "/tmp/fake-codex-tmux", server: "4", label: "cx-fail", codexHome: $home}' \
+    "$CLAUDE_CONFIG_DIR/anderton/workers/cx-fail.json" >"$work/cx.tmp"
+  mv "$work/cx.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/cx-fail.json"
+  tmux_pane %31 "$title"
+  set +e
+  out=$(cd "$rho" && env FAKE_ACCOUNTS_HOME="$cxnext" "$@" "$fodir/codex-workers.sh" sweep 2>&1)
+  status=$?
+  set -e
+  rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/cx-fail.json"
+  git -C "$rho" worktree remove --force "$work/wt-cx-fail"
+}
+cx_failover "$cx_title" ANDERTON_CODEX_ACCOUNTS="$work/accounts"
+check "a Codex worker at its usage limit continues on the account the helper names" eval \
+  '[ "$status" -eq 0 ] && contains "cx-fail turn failed at the usage limit." && contains "continues on $cxnext. Its pane shows it there."'
+check "the helper moving its thread from the home it ran on, with the limit message" \
+  [ "$(cat "$FAKE_LOG.accounts")" = "$cxhome --move-thread $cx_thread --message You've hit your usage limit. Try again at 9:00 PM." ]
+check "its thread resumed and recorded on the new home" [ "$(cat "$FAKE_LOG.move")" = "$CLAUDE_CONFIG_DIR/anderton/workers/cx-fail.json $cxnext" ]
+check "its pane reopened at that thread on the new home's daemon, titled with it for retire.sh" \
+  [ "$(tr '\n' ' ' <"$FAKE_LOG.respawn")" = "respawn-pane -k -t %31 -e CODEX_HOME=$cxnext codex resume $cx_thread --remote unix://$cxnext/app-server-control/app-server-control.sock -c tui.terminal_title=[\"thread-id\"] " ]
+check "and told to continue without repeating completed work" grep -q "Check the current state before repeating" "$FAKE_LOG.direction"
+cx_failover "019a0000-9999-7222-8333-44445..." ANDERTON_CODEX_ACCOUNTS="$work/accounts"
+check "a moved worker whose pane shows another conversation keeps that pane, and says how to open it" eval \
+  '[ ! -e "$FAKE_LOG.respawn" ] && [ -s "$FAKE_LOG.move" ] && contains "Its pane no longer shows thread $cx_thread." &&
+   contains "Open it with: CODEX_HOME=$cxnext codex resume $cx_thread"'
+cx_failover "$cx_title" ANDERTON_CODEX_ACCOUNTS="$work/accounts" FAKE_ACCOUNTS_REFUSE=1
+check "a worker no account may take stays where it is, and the watch says why" eval \
+  '[ ! -e "$FAKE_LOG.move" ] && [ ! -e "$FAKE_LOG.respawn" ] && [ ! -e "$FAKE_LOG.direction" ] &&
+   contains "stays at the usage limit of $cxhome: accounts: no account other than $cxhome is confirmed to dispatch every hook"'
+cx_failover "$cx_title" ANDERTON_CODEX_ACCOUNTS="$work/missing-helper"
+check "and so does one with no account helper installed" eval \
+  '[ ! -e "$FAKE_LOG.move" ] && contains "no Codex account helper is installed"'
+rm -rf "$cxhome" "$cxnext"
 
 # tmux reads an argument ending in ";" as the end of its command, and expands formats in the start directory.
 mkdir -p "$work/hash#{session_name}"
