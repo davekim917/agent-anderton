@@ -49,6 +49,7 @@ fi
 git init -q "$work/repo"
 git -C "$work/repo" -c user.name=example -c user.email=example@example.invalid commit -q --allow-empty -m init
 git -C "$work/repo" worktree add -q --detach "$work/wt-example" HEAD
+printf 'import sys\nopen(sys.argv[1], "w").write("x")\n' > "$work/wt-example/write.py"
 mkdir -p "$home/.claude"
 echo canary-value > "$home/.claude/canary"
 mkdir -p "$home/.cache"
@@ -72,7 +73,8 @@ w gemini-moved          "mv $HOME/.gemini $HOME/gemini-moved"
 w git-hooks             "echo x > $(git rev-parse --git-common-dir)/hooks/post-checkout"
 w git-config            "git config --file $(git rev-parse --git-common-dir)/config core.hooksPath /tmp"
 w home-rc               "echo x >> $HOME/.bashrc"
-w python-write          "python3 -c \"open(\x27.agents/hooks.json\x27, \x27w\x27)\""
+w python-write          "python3 -I write.py .agents/hooks.json"
+w python-control        "python3 -I write.py python-control.txt"
 w unshare-umount        "unshare -Urm sh -c \"umount .agents && echo x > .agents/hooks.json\""
 w inherited-fd          "echo x > /proc/self/fd/9/.agents/hooks.json"
 w read-claude-canary    "grep -q canary-value $HOME/.claude/canary"
@@ -87,7 +89,7 @@ for denied in worktree-agents worktree-agents-mv global-hooks gemini-hooks state
   gemini-moved git-hooks git-config home-rc python-write unshare-umount inherited-fd read-claude-canary; do
   printf '%s\n' "$out" | grep -qx "denied $denied" || fail "$denied was not denied: $(printf '%s\n' "$out" | grep " $denied\$")"
 done
-for wrote in worktree-file git-commit state-file cache-file tmp-file; do
+for wrote in worktree-file python-control git-commit state-file cache-file tmp-file; do
   printf '%s\n' "$out" | grep -qx "wrote $wrote" || fail "$wrote should be writable: $(printf '%s\n' "$out" | grep " $wrote\$")"
 done
 
@@ -107,10 +109,39 @@ printf '{}' > "$home/.gemini/hooks.json"
 echo '{}' > "$work/wt-example/.agents/hooks.json"
 refuses "the worktree has workspace hooks" ".agents/hooks.json exists"
 rm "$work/wt-example/.agents/hooks.json"
+ln -s ../outside-hooks.json "$work/wt-example/.agents/hooks.json"
+refuses "the worktree has a dangling link where workspace hooks load" ".agents/hooks.json exists"
+rm "$work/wt-example/.agents/hooks.json"
+ln -s ../plugins-elsewhere "$work/wt-example/.agents/plugins"
+refuses "a workspace plugin location is a link" "is a symbolic link"
+rm "$work/wt-example/.agents/plugins"
+ln -s ../outside-hooks.json "$work/wt-example/.agents/hooks.json"
+rm "$work/wt-example/.agents/hooks.json"
+mv "$home/.cache" "$home/cache-target"
+ln -s "$home/cache-target" "$home/.cache"
+refuses "a writable root is a symbolic link" "symbolic link"
+rm "$home/.cache"
+mv "$home/cache-target" "$home/.cache"
+ln "$work/repo/.git/config" "$work/wt-example/config-alias"
+refuses "a protected file has another hard link" "another hard link"
+rm "$work/wt-example/config-alias"
 run true >/dev/null 2>&1 || fail "the launcher did not start again once the hook config was restored"
 
-# The in-namespace stage refuses when run directly, outside the sandbox.
-if (cd "$work/wt-example" && HOME="$home" "$agy" --inside true) >/dev/null 2>&1; then
+# A listening socket outside the usual places, standing in for a tmux or herdr server on a custom path.
+python3 -I -c 'import socket, sys, time; s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(); time.sleep(60)' \
+  "$work/example.sock" &
+listener=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "$work/example.sock" ] && break; sleep 0.2; done
+# shellcheck disable=SC2016 # expanded inside the sandbox
+got=$(run 'python3 -I -c "import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])" '"$work/example.sock"' 2>/dev/null && echo reached || echo unreachable' 2>/dev/null)
+kill "$listener" 2>/dev/null || true
+[ "$got" = unreachable ] || fail "a listening socket outside the sandbox was reachable: $got"
+
+# The in-namespace stage refuses when run directly, outside the sandbox, even with a findmnt that says read-only.
+mkdir -p "$work/fakebin"
+printf '#!/bin/sh\necho rw,ro\n' > "$work/fakebin/findmnt"
+chmod +x "$work/fakebin/findmnt"
+if (cd "$work/wt-example" && HOME="$home" PATH="$work/fakebin:$PATH" "$agy" --inside true) >/dev/null 2>&1; then
   fail "--inside started agy outside the sandbox"
 fi
 

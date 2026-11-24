@@ -23,7 +23,7 @@ pinned() {
 }
 
 sha256() {
-  sha256sum "$1" | cut -d' ' -f1
+  /usr/bin/sha256sum "$1" | /usr/bin/cut -d' ' -f1
 }
 
 [ -f "$pin" ] || die "no $pin; run install-agy.sh first."
@@ -44,24 +44,22 @@ read_only_paths() {
 }
 
 inside() {
-  local wt common path options entry dir
-  wt=$(git rev-parse --show-toplevel 2>/dev/null) || die "not inside a git worktree."
-  common=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
+  local wt common path options
+  # The caller's PATH chose nothing so far; every tool below is named by its path.
+  [ "$(/usr/bin/tr -d '\0' < /proc/1/comm 2>/dev/null)" = bwrap ] || die "--inside runs only as bwrap's child."
+  case ,$(/usr/bin/findmnt -rn -o OPTIONS --mountpoint / | /usr/bin/head -n 1), in *,ro,*) ;; *) die "/ is not read-only here." ;; esac
+  wt=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || die "not inside a git worktree."
+  common=$(cd "$(/usr/bin/git rev-parse --git-common-dir)" && pwd -P)
   [ "$(owner_of "$base")" = 0 ] || [ -e "$base/etc/user-owned-test-install" ] || die "$base is not root-owned."
   [ "$(sha256 "$agy")" = "$(pinned binary_sha256)" ] || die "$agy does not match its pinned digest."
   [ "$(sha256 "$gemini/config/hooks.json")" = "$(pinned hooks_sha256)" ] ||
     die "$gemini/config/hooks.json is not the guard registration install-agy.sh wrote."
   for path in "$gemini/hooks.json" "$state/hooks.json"; do
-    case $(tr -d '[:space:]' < "$path") in '' | '{}') ;; *) die "$path defines hooks; only $gemini/config/hooks.json may." ;; esac
+    case $(/usr/bin/tr -d '[:space:]' < "$path") in '' | '{}') ;; *) die "$path defines hooks; only $gemini/config/hooks.json may." ;; esac
   done
-  dir=$PWD
-  while :; do
-    [ ! -e "$dir/.agents/hooks.json" ] || die "$dir/.agents/hooks.json exists; workspace hooks can switch the guard off."
-    [ "$dir" != / ] || break
-    dir=$(dirname "$dir")
-  done
+  refuse_workspace_config
   while IFS= read -r path; do
-    options=$(findmnt -rn -o OPTIONS --mountpoint "$path" 2>/dev/null | head -n 1) || options=""
+    options=$(/usr/bin/findmnt -rn -o OPTIONS --mountpoint "$path" 2>/dev/null | /usr/bin/head -n 1) || options=""
     case ,$options, in *,ro,*) ;; *) die "$path is not mounted read-only; refusing to start agy outside its sandbox." ;; esac
   done <<EOF
 $(read_only_paths "$wt" "$common")
@@ -71,7 +69,21 @@ EOF
 }
 
 owner_of() {
-  stat -c %u "$1"
+  /usr/bin/stat -c %u "$1"
+}
+
+# agy loads hooks and plugins from the .agents directory of the worktree, which it treats as the workspace root. A
+# hooks.json there would load; a link there, even a dangling one, could point at a file the worker can still write.
+refuse_workspace_config() {
+  local entry
+  for entry in hooks.json plugins plugins.json plugins.txt; do
+    if [ "$entry" = hooks.json ] && { [ -e "$wt/.agents/$entry" ] || [ -L "$wt/.agents/$entry" ]; }; then
+      die "$wt/.agents/hooks.json exists; workspace hooks can switch the guard off."
+    fi
+    if [ -L "$wt/.agents/$entry" ]; then
+      die "$wt/.agents/$entry is a symbolic link; its target could stay writable."
+    fi
+  done
 }
 
 if [ "${1:-}" = --inside ]; then
@@ -89,7 +101,10 @@ common=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
 
 args=(--ro-bind / / --dev /dev --proc /proc --unshare-pid --die-with-parent)
 add_rw() {
-  if [ -e "$1" ]; then args+=(--bind "$1" "$1"); fi
+  [ -e "$1" ] || return 0
+  # bwrap binds a link's target, which could be anywhere.
+  [ "$(readlink -f "$1")" = "$1" ] || die "$1 is or passes through a symbolic link; name the real path."
+  args+=(--bind "$1" "$1")
 }
 add_ro() {
   if [ -e "$1" ]; then args+=(--ro-bind "$1" "$1"); else args+=(--ro-bind /dev/null "$1"); fi
@@ -117,6 +132,12 @@ if [ -f "$conf" ]; then
   done < "$conf"
 fi
 
+refuse_workspace_config
+# A second hard link to a protected file, made before launch inside a writable root, would write it past the bind.
+for path in "$common/config" "$gemini/config/hooks.json"; do
+  [ "$(stat -c %h "$path")" = 1 ] || die "$path has another hard link; remove it before starting agy."
+done
+
 # Hook and plugin config agy reads stays read-only, inside the writable roots too.
 mkdir -p "$wt/.agents" "$common/hooks"
 for path in "$gemini/hooks.json" "$state/hooks.json"; do
@@ -128,11 +149,23 @@ $(read_only_paths "$wt" "$common")
 EOF
 
 # Credential stores, and sockets of processes that would run a command outside the sandbox.
+# A store created after launch would not be masked, so the usual ones are masked even while empty.
+for path in "$HOME/.claude" "$HOME/.codex" "$HOME/.config/gh" "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.aws" \
+  "$HOME/.config/gcloud" "$HOME/.docker"; do
+  mkdir -p "$path"
+done
 for path in "$HOME/.claude" "$HOME/.codex" "$HOME"/.codex-* "$HOME/.config/gh" "$HOME/.ssh" "$HOME/.gnupg" \
   "$HOME/.aws" "$HOME/.config/gcloud" "$HOME/.docker" "$HOME/.config/herdr" "$HOME/.config/pairfob" \
   "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" "/tmp/tmux-$(id -u)" /var/run/docker.sock "${HERDR_SOCKET_PATH:-}"; do
   [ -z "$path" ] || add_mask "$path"
 done
+# Every listening Unix socket with a path, wherever it lives: a tmux or herdr server on a custom socket would run a
+# command for the worker outside the sandbox. One opened after launch is not covered.
+while read -r path; do
+  case $path in /*) [ -S "$path" ] && add_mask "$path" ;; esac
+done <<EOF
+$(ss -xlnH 2>/dev/null | awk '{ print $5 }')
+EOF
 token_file=""
 if [ -f "$conf" ]; then
   while read -r kind path _; do
@@ -155,5 +188,5 @@ fi
 
 # A directory descriptor inherited from outside would reach the host's writable view of a protected path, so every
 # descriptor above stderr is closed in the process that becomes bwrap. bash cannot do it itself: it keeps the script open.
-exec python3 -I -c 'import os, sys; os.closerange(3, os.sysconf("SC_OPEN_MAX")); os.execvp(sys.argv[1], sys.argv[1:])' \
+exec python3 -I -c 'import os, sys; os.closerange(3, 1 << 30); os.execvp(sys.argv[1], sys.argv[1:])' \
   env -i "${env[@]}" bwrap "${args[@]}" --chdir "$wt" -- "$self" --inside "$@"

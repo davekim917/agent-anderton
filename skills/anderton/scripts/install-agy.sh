@@ -48,11 +48,14 @@ version=$(value version) url=$(value url) sha=$(value sha256)
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-if [ -z "$tarball" ]; then
-  tarball="$work/agy.tar.gz"
-  curl -fsSL -o "$tarball" "$url" || die "could not download $url."
+# The bytes checked against the pin are the bytes extracted: a copy nobody else can write.
+if [ -n "$tarball" ]; then
+  cp "$tarball" "$work/agy.tar.gz" || die "could not read $tarball."
+else
+  curl -fsSL -o "$work/agy.tar.gz" "$url" || die "could not download $url."
 fi
-[ "$(sha256sum "$tarball" | cut -d' ' -f1)" = "$sha" ] || die "$tarball does not match the pinned sha256."
+tarball="$work/agy.tar.gz"
+[ "$(sha256sum "$tarball" | cut -d' ' -f1)" = "$sha" ] || die "the release does not match the pinned sha256."
 mkdir "$work/x"
 tar -xzf "$tarball" -C "$work/x"
 [ -f "$work/x/antigravity" ] || die "the release holds no antigravity binary."
@@ -62,27 +65,32 @@ install -d -m 0755 "$root" "$root/$version" "$root/bin" "$root/etc"
 install -m 0755 "$work/x/antigravity" "$root/$version/antigravity"
 install -m 0755 "$here/agy-sandbox.sh" "$root/bin/agy"
 
-# The guard, copied under its content digest so a later checkout cannot change what the hook runs.
-digest=$(cd "$guard" && find . -type f \( -name '*.ts' -o -name '*.sh' -o -name 'package.json' -o -name 'bun.lock' \) \
-  -not -path './node_modules/*' -not -name '*.test.ts' | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-16)
+# The guard is copied first and named by the digest of the copy, so the name always matches what the hook runs.
+copy="$work/guard"
+install -d -m 0755 "$copy" "$copy/guards"
+for file in agy-guard.sh agy-guard.ts guard-policy.ts package.json bun.lock; do
+  if [ -f "$guard/$file" ]; then install -m 0644 "$guard/$file" "$copy/$file"; fi
+done
+for file in "$guard"/guards/*.ts; do
+  if [ -f "$file" ]; then install -m 0644 "$file" "$copy/guards/${file##*/}"; fi
+done
+digest=$(cd "$copy" && find . -type f | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-16)
 dest="$prefix/agy-guard/$digest"
-if [ ! -d "$dest" ]; then
-  install -d -m 0755 "$dest" "$dest/guards"
-  for file in agy-guard.sh agy-guard.ts guard-policy.ts package.json bun.lock; do
-    if [ -f "$guard/$file" ]; then install -m 0644 "$guard/$file" "$dest/$file"; fi
-  done
-  for file in "$guard"/guards/*.ts; do
-    if [ -f "$file" ]; then install -m 0644 "$file" "$dest/guards/${file##*/}"; fi
-  done
-  if [ -f "$dest/package.json" ]; then
-    (cd "$dest" && bun install --production --frozen-lockfile --ignore-scripts >/dev/null) || die "could not install the guard's dependencies."
+if [ ! -f "$dest/.complete" ]; then
+  if [ -f "$copy/package.json" ]; then
+    (cd "$copy" && bun install --production --frozen-lockfile --ignore-scripts >/dev/null) || die "could not install the guard's dependencies."
   fi
+  install -d -m 0755 "$prefix/agy-guard"
+  rm -rf "$dest"
+  cp -a "$copy" "$dest"
+  touch "$dest/.complete"
 fi
 
 # agy runs every hook in this file; the launcher refuses to start unless it still has exactly these bytes.
 hooks="$home/.gemini/config/hooks.json"
 registration=$(printf '{"agent-anderton-agy-guard":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=%s /bin/bash %s/agy-guard.sh PreToolUse","timeout":3660}]}]}}' "$home" "$dest")
-if [ -f "$hooks" ] && [ "$(cat "$hooks")" != "$registration" ] && [ -z "$replace" ]; then
+expected=$(printf '%s' "$registration" | sha256sum | cut -d' ' -f1)
+if [ -f "$hooks" ] && [ "$(sha256sum "$hooks" | cut -d' ' -f1)" != "$expected" ] && [ -z "$replace" ]; then
   die "$hooks already holds other hooks; review it, then rerun with --replace-hooks."
 fi
 install -d -o "$user" -m 0755 "$home/.gemini" "$home/.gemini/config" "$home/.gemini/antigravity-cli"
@@ -95,7 +103,7 @@ done
 {
   echo "version=$version"
   echo "binary_sha256=$(sha256sum "$root/$version/antigravity" | cut -d' ' -f1)"
-  echo "hooks_sha256=$(sha256sum "$hooks" | cut -d' ' -f1)"
+  echo "hooks_sha256=$expected"
   echo "guard=$dest"
 } > "$root/etc/pin"
 [ -f "$root/etc/sandbox.conf" ] || : > "$root/etc/sandbox.conf"
