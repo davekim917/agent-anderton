@@ -684,6 +684,9 @@ def main():
     loaded.add_argument("--wait", type=int, default=0)
     limit = commands.add_parser("limited")
     limit.add_argument("record", type=Path)
+    still = commands.add_parser("still-limited")
+    still.add_argument("record", type=Path)
+    still.add_argument("turn")
     resume = commands.add_parser("resume-on")
     resume.add_argument("record", type=Path)
     resume.add_argument("home", type=Path)
@@ -770,6 +773,16 @@ def main():
         if message is None:
             return 3
         print(f"{message[0]}\n{message[1]}")
+    elif args.command == "still-limited":
+        # The limited turn is still the thread's latest and nothing is queued or running behind it.
+        worker = json.loads(args.record.read_text())
+        with Codex(Path(worker["codexHome"])) as client:
+            turns = client.call("thread/turns/list", {"threadId": worker["id"], "limit": 1, "itemsView": "notLoaded"})["data"]
+            if not turns or turns[0]["id"] != args.turn:
+                return 3
+            if client.call("thread/queue/list", {"threadId": worker["id"], "limit": 1})["data"]:
+                return 3
+            return 0 if read_thread(client, worker)["status"]["type"] in {"idle", "notLoaded"} else 3
     elif args.command == "resume-on":
         resume_on(json.loads(args.record.read_text()), args.home)
     elif args.command == "blocker-during-notice":

@@ -295,6 +295,22 @@ class WorkerTest(unittest.TestCase):
                 patch.object(worker_api.time, "sleep"):
             self.assertEqual(0, loaded("--wait", "5"))
 
+    def test_still_limited_only_while_the_limited_turn_is_latest_and_nothing_follows_it(self):
+        self.record.write_text(json.dumps(self.worker))
+
+        def still(turn):
+            with patch.object(worker_api.sys, "argv", ["codex-worker.py", "still-limited", str(self.record), turn]):
+                return worker_api.main()
+
+        self.client.turns = [{"id": "limited", "status": "failed", "error": {"message": "You've hit your usage limit."}}]
+        self.assertEqual(0, still("limited"))
+        self.assertEqual(3, still("older"))
+        self.client.queue = [{"id": "direction"}]
+        self.assertEqual(3, still("limited"))
+        self.client.queue = []
+        self.client.info["status"] = {"type": "active"}
+        self.assertEqual(3, still("limited"))
+
     def test_limited_names_the_turn_and_limit_only_while_the_thread_waits_on_nothing(self):
         self.record.write_text(json.dumps(self.worker))
         self.client.turns = [{"id": "limited", "status": "failed",

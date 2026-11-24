@@ -179,18 +179,25 @@ set_failover() {
 }
 
 # Runs the steps a move of worker record $1 still owes, under its worker lock and on later sweeps too: reopens its
-# pane on the new home and tells it to continue. A step that fails is tried on three sweeps at most. A direction to
-# continue whose submission is unconfirmed is not sent again: the watch says to check the worker first. Returns 10
-# when it ran a step.
+# pane on the new home (tried on three sweeps at most) and tells it to continue. The direction is sent once, and only
+# while the limited turn is still the thread's latest with nothing queued or running behind it; one whose submission
+# is not confirmed is left for the Anderton to check. Returns 10 when it ran a step.
 finish_failover() {
-  local record=$1 id name home from reopen cont tries note="" status
-  IFS=$'\x1f' read -r id name home from reopen cont tries <<EOF
-$(jq -r '[.id, .name, .codexHome, (.codexFailover.from // ""), (.codexFailover.reopen // false),
-  (.codexFailover.continue // false), (.codexFailover.tries // 0)] | map(tostring) | join([31] | implode)' "$record")
+  local record=$1 id name home from turn reopen cont tries note="" status said=""
+  failover_fields() {
+    IFS=$'\x1f' read -r id name home from turn reopen cont tries <<EOF
+$(jq -r '[.id, .name, .codexHome, (.codexFailover.from // ""), (.codexFailover.turn // ""),
+  (.codexFailover.reopen // false), (.codexFailover.continue // false), (.codexFailover.tries // 0)]
+  | map(tostring) | join([31] | implode)' "$record")
 EOF
+  }
+  failover_fields
   [ "$reopen" = true ] || [ "$cont" = true ] || return 0
   lock_owned_worker "$record" "$id" || return 0
   release_repository_lock
+  # Read again under the lock: another sweep may have run the steps meanwhile.
+  failover_fields
+  [ "$reopen" = true ] || [ "$cont" = true ] || return 0
   tries=$((tries + 1))
   set_failover "$record" tries "$tries" || return 0
   from=${from:-its old account}
@@ -207,24 +214,20 @@ EOF
     note="Its pane did not show thread $id, so it was left alone. Open the thread with: CODEX_HOME=$home codex resume $id --remote unix://$(codex_socket "$home")"
   fi
   if [ "$cont" = true ]; then
-    status=0
-    "$scripts/codex-worker.py" message "$record" -- "$continue_text" >/dev/null 2>&1 || status=$?
-    if [ "$status" -eq 0 ]; then
-      set_failover "$record" continue false || true
-    elif [ "$status" -eq 4 ]; then
-      set_failover "$record" continue false || true
-      once "$record" "$name (Codex $id) moved from $from to $home, but the direction to continue is unconfirmed: check its status before resending. $note"
-      return 10
-    elif [ "$tries" -ge 3 ]; then
-      set_failover "$record" continue false || true
-      once "$record" "$name (Codex $id) moved from $from to $home, but could not be told to continue. Tell it yourself. $note"
-      return 10
+    if ! "$scripts/codex-worker.py" still-limited "$record" "$turn" >/dev/null 2>&1; then
+      said="$name (Codex $id) moved from $from to $home, where its conversation has moved on since, so no direction to continue was sent. $note"
+    elif "$scripts/codex-worker.py" message "$record" -- "$continue_text" >/dev/null 2>&1; then
+      said="$name (Codex $id) hit the usage limit of $from and continues on $home. $note"
     else
-      once "$record" "$name (Codex $id) moved from $from to $home; telling it to continue failed and is retried next sweep. $note"
-      return 10
+      said="$name (Codex $id) moved from $from to $home, but its direction to continue is unconfirmed: check its status before resending. $note"
     fi
+    set_failover "$record" continue false || true
   fi
-  echo "$name (Codex $id) hit the usage limit of $from and continues on $home. $note"
+  if [ -n "$said" ]; then
+    once "$record" "$said"
+  else
+    once "$record" "$name (Codex $id) runs on $home. $note"
+  fi
   return 10
 }
 
