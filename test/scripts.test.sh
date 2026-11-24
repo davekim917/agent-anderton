@@ -2699,8 +2699,10 @@ check "and keeping that launch time for a later registration" \
 rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/cx-titled.json"
 [ ! -d "$work/wt-cx-titled" ] || git -C "$rho" worktree remove --force "$work/wt-cx-titled"
 
-# With a Codex account helper, a new worker starts on the home it names.
-cxnext=$(mktemp -d /tmp/anderton-cx.XXXXXX)
+# With a Codex account helper, a new worker starts on the home it names. Homes are compared as spawn.sh resolves them
+# (macOS's /tmp is a link).
+cxhome=$(cd "$cxhome" && pwd -P)
+cxnext=$(cd "$(mktemp -d /tmp/anderton-cx.XXXXXX)" && pwd -P)
 mkdir -p "$cxnext/app-server-control"
 python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$cxnext/app-server-control/app-server-control.sock"
 cat >"$work/accounts" <<'FAKE'
