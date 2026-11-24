@@ -39,7 +39,9 @@ case $1 in
   identity) jq -cn --arg id "$3" --arg dir "$FIXTURE_ROOT" '{id:$id, dir:$dir, name:"fixture-codex"}' ;;
   claim-state) if [ -n "${NOT_REACHABLE:-}" ]; then exit 1; fi; echo "${CLAIM_STATE:-live}" ;;
   start-watch) echo "${CODEX_THREAD_ID:-} ${CODEX_HOME:-} $3" >> "$FIXTURE_ROOT/../watch-starts" ;;
-  loaded) sleep "${FIXTURE_LOADED_DELAY:-0}"; echo "$2 $3" >> "$FIXTURE_ROOT/../loaded-checks"; [ -z "${FIXTURE_NOT_LOADED:-}" ] ;;
+  loaded)
+    while [ -n "${FIXTURE_LOADED_GATE:-}" ] && [ ! -e "$FIXTURE_LOADED_GATE" ]; do sleep 0.1; done
+    echo "$2 $3" >> "$FIXTURE_ROOT/../loaded-checks"; [ -z "${FIXTURE_NOT_LOADED:-}" ] ;;
   launch-matches)
     [ -z "${LAUNCH_LOOKUP_FAIL:-}" ] || exit 1
     [ "$3" = "${MATCHING_LAUNCH:-}" ] || exit 3
@@ -190,14 +192,17 @@ codex_role env CODEX_HOME="$moved_home" "$script/claim.sh"
 # A hand-over that finds the repository lock held past its ten-second wait says so and tries again.
 jq --arg home "$CODEX_HOME" '.codexHome = $home' "$root_claim" > "$root_claim.tmp" && mv "$root_claim.tmp" "$root_claim"
 rm -f "${root_claim%.json}.handover.log"
-codex_role env ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" ANDERTON_HANDOVER_RETRY=1 FIXTURE_LOADED_DELAY=3 \
+# The new daemon reports the thread loaded only once the lock is held here, after the launcher has let go of it.
+codex_role env ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" ANDERTON_HANDOVER_RETRY=1 FIXTURE_LOADED_GATE="$tmp/loaded-gate" \
   "$script/codex-anderton.sh" --move "$FIXTURE_THREAD"
 if command -v flock > /dev/null 2>&1; then
-  flock "$root_claim.lock.flock" sleep 13 &
+  flock "$root_claim.lock.flock" sh -c ': > "$0"; sleep 13' "$tmp/lock-held" &
 else
-  ( mkdir "$root_claim.lock" && echo $$ > "$root_claim.lock/pid" && sleep 13; rm -rf "$root_claim.lock" ) &
+  ( mkdir "$root_claim.lock" && echo $$ > "$root_claim.lock/pid" && : > "$tmp/lock-held" && sleep 13; rm -rf "$root_claim.lock" ) &
 fi
 lock_holder=$!
+for _ in $(seq 1 50); do [ -e "$tmp/lock-held" ] && break; sleep 0.1; done
+: > "$tmp/loaded-gate"
 handed_over "$moved_home" 300
 wait "$lock_holder" 2> /dev/null || true
 grep -q 'the repository lock is held; try 1 of 10' "${root_claim%.json}.handover.log"
