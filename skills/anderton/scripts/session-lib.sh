@@ -98,6 +98,132 @@ invoking_codex_home() {
   (cd "${CODEX_HOME:-$HOME/.codex}" && pwd -P) 2>/dev/null
 }
 
+# An optional Codex account helper: $ANDERTON_CODEX_ACCOUNTS, else codex-accounts on PATH. `--start-home` with
+# CODEX_HOME set prints the home a new session from that home starts on. `--move-thread <id> --message <text>` with
+# CODEX_HOME set to a thread's home marks that account limited and prints the next home reading the same conversation
+# store, where the thread resumes as it is; it exits non-zero when no account may take the thread, or a codex still
+# has it open. Anderton runs a session on whatever home the
+# helper prints, so the helper must print only a home that runs the same hook guards. Without a helper every session
+# keeps its home.
+codex_accounts() {
+  local helper=${ANDERTON_CODEX_ACCOUNTS:-}
+  if [ -z "$helper" ]; then helper=$(command -v codex-accounts 2>/dev/null) || return 1; fi
+  [ -x "$helper" ] && printf '%s\n' "$helper"
+}
+
+codex_socket() {
+  printf '%s/app-server-control/app-server-control.sock\n' "$1"
+}
+
+# The home a new Codex session from home $1 starts on, judged under the codex options after it: the account helper's
+# choice, else $1.
+codex_start_home() {
+  local helper start from=$1
+  shift
+  # --same-store: a session started here may later move or resume, so only a home on $1's conversation store is named.
+  if helper=$(codex_accounts) && start=$(CODEX_HOME=$from "$helper" --start-home --same-store -- "$@" </dev/null 2>/dev/null) &&
+    start=$(cd "$start" 2>/dev/null && pwd -P); then
+    printf '%s\n' "$start"
+  else
+    (cd "$from" && pwd -P)
+  fi
+}
+
+# The home that last ran Codex thread $1, by the account helper: where a claim whose move was interrupted belongs.
+# Fails when there is no helper, or it cannot say (no such thread, an older helper).
+codex_thread_home() {
+  local helper home
+  helper=$(codex_accounts) || return 1
+  home=$("$helper" --locate-thread "$1" </dev/null 2>/dev/null) || return 1
+  (cd "$home" 2>/dev/null && pwd -P)
+}
+
+# Stops the watch of claim $1, if one runs, and waits until it has let go of the job: a watch for the same thread on
+# another home would otherwise leave on finding it held. TERM runs the watch's EXIT trap, which a sleep between ticks
+# delays; one that outlives that is killed and its job file removed.
+stop_codex_watch() {
+  local watcher pid owner command waited=0 limit=$(( ${ANDERTON_WATCH_TICK:-30} + 15 ))
+  watcher="$holders/$(basename "$1" .json).watch"
+  { read -r pid _ <"$watcher"; } 2>/dev/null || return 0
+  command=$(ps -ww -o command= -p "$pid" 2>/dev/null) || return 0
+  case $command in *watch.sh*) ;; *) return 0 ;; esac
+  kill -TERM "$pid" 2>/dev/null || return 0
+  while [ "$waited" -lt "$limit" ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if [ "$(ps -ww -o command= -p "$pid" 2>/dev/null)" = "$command" ]; then kill -KILL "$pid" 2>/dev/null; fi
+  { read -r owner _ <"$watcher"; } 2>/dev/null && [ "$owner" = "$pid" ] && rm -f "$watcher"
+  return 0
+}
+
+# Points claim or worker record $1 at home $2, atomically; the caller holds the repository lock.
+set_codex_home() {
+  local updated
+  updated=$(mktemp "$1.XXXXXX") || return 1
+  if jq --arg home "$2" '.codexHome = $home' "$1" >"$updated" && mv -f "$updated" "$1"; then return 0; fi
+  rm -f "$updated"
+  return 1
+}
+
+# Gives back the repository lock while this script keeps working; a worker lock it holds stays.
+release_repository_lock() {
+  if [ -n "${repository_directory_lock:-}" ]; then
+    rm -f -- "$repository_directory_lock/pid"
+    rmdir -- "$repository_directory_lock"
+    repository_directory_lock=""
+  fi
+  exec 9>&-
+}
+
+# Starts the Codex daemon of home $1 unless its socket is there, waiting up to 10 seconds for it.
+codex_daemon_up() {
+  local socket tries=20
+  socket=$(codex_socket "$1")
+  [ -S "$socket" ] && return 0
+  # The daemon outlives this script: it must not inherit the repository lock's descriptor.
+  CODEX_HOME=$1 codex app-server daemon start </dev/null >/dev/null 2>&1 9>&- || return 1
+  while [ "$tries" -gt 0 ]; do
+    [ -S "$socket" ] && return 0
+    tries=$((tries - 1))
+    sleep 0.5
+  done
+  return 1
+}
+
+# The Codex worker's pane (launcher $1, socket $2, pane id $3, tmux server pid $4), wherever it now lives:
+# "present <title>", gone, or unknown. A tmux pane id counts only in the server process it was opened in, since a
+# restarted server reuses ids.
+codex_pane() {
+  local out
+  case $1 in
+    herdr)
+      out=$(HERDR_SOCKET_PATH="$2" herdr pane get "$3" 2>&1) || true
+      printf '%s' "$out" | jq -r 'if .error.code == "pane_not_found" or .error.code == "server_not_running" then "gone"
+        elif (.result.pane.terminal_title | type) == "string" then "present " + .result.pane.terminal_title else "unknown" end' \
+        2>/dev/null || echo unknown
+      ;;
+    tmux)
+      if out=$(tmux -S "$2" list-panes -a -F '#{pid} #{pane_id} #{pane_title}' 2>&1); then
+        printf '%s\n' "$out" | awk -v p="$4" -v id="$3" '
+          $1 == p && $2 == id { sub(/^[^ ]* [^ ]* ?/, ""); print "present " $0; f = 1; exit }
+          END { if (!f) print "gone" }'
+      else
+        case $out in *"no server running"* | *"No such file or directory"*) echo gone ;; *) echo unknown ;; esac
+      fi
+      ;;
+    *) echo unknown ;;
+  esac
+}
+
+# True when codex_pane's answer $1 is the pane titled as Codex titles thread $2: its id cut to 29 characters and
+# "...", after "Action Required | " while it waits on the user.
+shows_thread() {
+  [ ${#2} -ge 29 ] || return 1
+  case $1 in "present $(printf '%.29s' "$2")..." | "present "*" | $(printf '%.29s' "$2")...") return 0 ;; esac
+  return 1
+}
+
 record_provider() {
   jq -er '.provider // "claude"' "$1" 2>/dev/null
 }
@@ -106,6 +232,8 @@ caller_matches_claim() {
   local p codex
   [ -f "$1" ] && [ "$(record_provider "$1")" = "$(invoking_provider)" ] || return 1
   if [ "$(invoking_provider)" = codex ]; then
+    # The claim names the conversation and the home it runs on: the same thread opened on another account's home does
+    # not hold it until codex-anderton.sh --move hands the claim over.
     codex=$(invoking_codex_home) || return 1
     jq -e --arg sid "${CODEX_THREAD_ID:-}" --arg codex "$codex" '
       $sid != "" and .sessionId == $sid and .codexHome == $codex' "$1" >/dev/null 2>&1

@@ -98,8 +98,13 @@ if [ "$provider" = codex ]; then
     echo "Codex workers need the codex CLI, its running local daemon, and python3." >&2
     exit 2
   fi
-  codex_home=$(cd "${codex_home:-${CODEX_HOME:-$HOME/.codex}}" && pwd -P)
-  if [ ! -S "$codex_home/app-server-control/app-server-control.sock" ]; then
+  base_home=$(cd "${codex_home:-${CODEX_HOME:-$HOME/.codex}}" && pwd -P)
+  codex_home=$(codex_start_home "$base_home")
+  if codex_accounts >/dev/null && ! codex_daemon_up "$codex_home"; then
+    echo "Could not start the Codex daemon of $codex_home, the account new Codex sessions start on." >&2
+    exit 2
+  fi
+  if [ ! -S "$(codex_socket "$codex_home")" ]; then
     echo "Start the local Codex daemon before launching a Codex worker." >&2
     exit 2
   fi
@@ -277,7 +282,7 @@ $brief"
   config_env="CODEX_HOME=$codex_home"
   mode="workspace-write, user approvals"
   # The thread id as the tab's title is how retire.sh tells that the tab still shows this worker's conversation.
-  set -- --remote "unix://$codex_home/app-server-control/app-server-control.sock" \
+  set -- --remote "unix://$(codex_socket "$codex_home")" \
     --sandbox workspace-write -a on-request -c 'approvals_reviewer="user"' -c "model_reasoning_effort=\"$effort\"" \
     -c 'tui.terminal_title=["thread-id"]'
   if [ -n "$model" ]; then set -- "$@" -m "$model"; fi

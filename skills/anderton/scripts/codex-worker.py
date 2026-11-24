@@ -33,6 +33,10 @@ QUEUE_PAGE_SIZE = 100
 # RFC 6455 requires the handshake GUID in uppercase ASCII.
 HANDSHAKE_GUID = str(uuid.UUID("258eafa5-e914-47da-95ca-c5ab0dc85b11")).upper().encode("ascii")
 REPORT = re.compile(r"^(RESULT|QUESTION|BLOCKED|ANSWER):[ \t]*\S")
+# Codex's own usage-limit sentence starts so; only a failure with no structured kind is read from its words.
+USAGE_LIMIT = re.compile(r"^You['\N{RIGHT SINGLE QUOTATION MARK}]ve hit your usage limit")
+# A move that could not run (no account free, a daemon that did not start) is tried again after this long.
+FAILOVER_RETRY_SECONDS = 600
 
 
 def daemon_socket(home):
@@ -256,6 +260,56 @@ def final_report(client, thread, turn):
             text = item["text"].strip()
             return text if REPORT.match(text) else None
     return None
+
+
+def usage_limit(turn):
+    """The message of a turn that failed at its account's usage limit, else None."""
+    error = turn.get("error") or {}
+    message = error.get("message") or ""
+    if turn.get("status") != "failed":
+        return None
+    kind = error.get("codexErrorInfo")
+    if kind is not None:
+        return (message or "usage limit") if kind == "usageLimitExceeded" else None
+    return message if USAGE_LIMIT.match(message) else None
+
+
+# A loaded thread whose turn failed on an error stays systemError until its next turn starts; like idle, nothing runs.
+QUIET_AFTER_FAILURE = {"idle", "notLoaded", "systemError"}
+
+
+def failover_due(worker, turn):
+    """True when the move of the worker's limited turn has not been tried, or failed long enough ago to retry. A moved
+    thread brings its failed turn along, so the new account must not read it as its own limit."""
+    tried = worker.get("codexFailover") or {}
+    if tried.get("turn") != turn:
+        return True
+    if tried.get("moved") or tried.get("resumed"):
+        return False
+    if tried.get("stage") == "stopped":
+        return True
+    return time.time() - tried.get("at", 0) >= FAILOVER_RETRY_SECONDS
+
+
+def limited_turn(client, worker):
+    """(turn id, usage-limit message) of the worker's latest turn when its move is due and the thread waits idle on
+    nothing, else None."""
+    turns = client.call("thread/turns/list", {"threadId": worker["id"], "limit": 1, "itemsView": "notLoaded"})["data"]
+    if not turns or not usage_limit(turns[0]) or not failover_due(worker, turns[0]["id"]):
+        return None
+    if client.call("thread/queue/list", {"threadId": worker["id"], "limit": 1})["data"]:
+        return None
+    if read_thread(client, worker)["status"]["type"] not in QUIET_AFTER_FAILURE:
+        return None
+    return turns[0]["id"], usage_limit(turns[0])
+
+
+def resume_on(worker, home):
+    """Resumes the worker's thread on the daemon of home, in its worktree; the caller records the home."""
+    with Codex(home) as client:
+        client.call("thread/resume", {"threadId": worker["id"], "cwd": worker["dir"], "excludeTurns": True},
+                    timeout=60)
+        read_thread(client, worker)
 
 
 def is_inactive(client, worker, directions_only=False, reconcile=True):
@@ -536,7 +590,7 @@ def blocker_during_notice(worker, pending_stage, bookmarks):
     print(blocker_signal(worker, key))
 
 
-def sweep_worker(worker, state_dir, stage_dir):
+def sweep_worker(worker, state_dir, stage_dir, limited=None):
     thread = str(uuid.UUID(worker["id"]))
     name = worker["name"]
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
@@ -550,8 +604,10 @@ def sweep_worker(worker, state_dir, stage_dir):
         waiting = blocker_flags(info)
         completed = []
         running = None
+        latest = None
         for turn in client.pages("thread/turns/list", threadId=thread, limit=20,
                                  itemsView="notLoaded"):
+            latest = latest or turn
             if turn["id"] == state.get("turn"):
                 break
             if turn["status"] == "inProgress":
@@ -579,8 +635,15 @@ def sweep_worker(worker, state_dir, stage_dir):
                 text = final_report(client, thread, turn["id"])
                 if text:
                     events.append(f"{name} (Codex {thread}) report:\n{text[:2000]}")
+            elif usage_limit(turn) and failover_due(worker, turn["id"]):
+                events.append(f"{name} (Codex {thread}) turn {turn['id']} failed at the usage limit of "
+                              f"{worker['codexHome']}.")
             elif turn["status"] in {"failed", "interrupted"}:
                 events.append(f"{name} (Codex {thread}) turn {turn['id']} {turn['status']}.")
+        # Offered on every sweep while due, not only when first reported, so a move that could not run is retried.
+        if (limited is not None and latest and latest["status"] != "inProgress" and usage_limit(latest)
+                and failover_due(worker, latest["id"])):
+            limited.append(worker)
         current = {"turn": completed[0]["id"] if completed else state.get("turn"), "block": block}
     if state != current:
         (stage_dir / bookmark).write_text(json.dumps(current) + "\n")
@@ -616,6 +679,21 @@ def main():
     watch = commands.add_parser("start-watch")
     watch.add_argument("script", type=Path)
     watch.add_argument("claim", type=Path)
+    unloaded = commands.add_parser("unloaded")
+    unloaded.add_argument("record", type=Path)
+    unloaded.add_argument("--wait", type=int, default=0)
+    loaded = commands.add_parser("loaded")
+    loaded.add_argument("home", type=Path)
+    loaded.add_argument("thread")
+    loaded.add_argument("--wait", type=int, default=0)
+    limit = commands.add_parser("limited")
+    limit.add_argument("record", type=Path)
+    still = commands.add_parser("still-limited")
+    still.add_argument("record", type=Path)
+    still.add_argument("turn")
+    resume = commands.add_parser("resume-on")
+    resume.add_argument("record", type=Path)
+    resume.add_argument("home", type=Path)
     for command in ("state", "inactive", "output", "message"):
         action = commands.add_parser(command)
         action.add_argument("record", type=Path)
@@ -674,6 +752,43 @@ def main():
                 return 0 if deliver_notice(client, claim, args.notice) else 3
             read_thread(client, worker)
             print("live")
+    elif args.command in {"unloaded", "loaded"}:
+        if args.command == "unloaded":
+            worker = json.loads(args.record.read_text())
+            home, thread = Path(worker["codexHome"]), worker["id"]
+        else:
+            home, thread = args.home, args.thread
+        deadline = time.monotonic() + args.wait
+        while True:
+            try:
+                with Codex(home) as client:
+                    if (thread in client.pages("thread/loaded/list")) == (args.command == "loaded"):
+                        return 0
+            except OSError:
+                if args.command == "unloaded":
+                    raise
+            if time.monotonic() >= deadline:
+                return 3
+            time.sleep(2)
+    elif args.command == "limited":
+        worker = json.loads(args.record.read_text())
+        with Codex(Path(worker["codexHome"])) as client:
+            message = limited_turn(client, worker)
+        if message is None:
+            return 3
+        print(f"{message[0]}\n{message[1]}")
+    elif args.command == "still-limited":
+        # The limited turn is still the thread's latest and nothing is queued or running behind it.
+        worker = json.loads(args.record.read_text())
+        with Codex(Path(worker["codexHome"])) as client:
+            turns = client.call("thread/turns/list", {"threadId": worker["id"], "limit": 1, "itemsView": "notLoaded"})["data"]
+            if not turns or turns[0]["id"] != args.turn:
+                return 3
+            if client.call("thread/queue/list", {"threadId": worker["id"], "limit": 1})["data"]:
+                return 3
+            return 0 if read_thread(client, worker)["status"]["type"] in QUIET_AFTER_FAILURE else 3
+    elif args.command == "resume-on":
+        resume_on(json.loads(args.record.read_text()), args.home)
     elif args.command == "blocker-during-notice":
         blocker_during_notice(json.loads(args.record.read_text()), args.pending_stage, args.bookmarks)
     elif args.command in {"state", "inactive", "output", "message"}:
@@ -727,12 +842,17 @@ def main():
     else:
         state_dir = Path(os.environ["ANDERTON_PROBE_STATE"])
         stage_dir = Path(os.environ["ANDERTON_PROBE_STAGE"])
+        limited_out = os.environ.get("ANDERTON_CODEX_LIMITED")
         failed = False
         for path in args.records:
             try:
                 worker = json.loads(path.read_text())
-                for event in sweep_worker(worker, state_dir, stage_dir):
+                limited = []
+                for event in sweep_worker(worker, state_dir, stage_dir, limited):
                     print(event)
+                if limited and limited_out:
+                    with open(limited_out, "a") as file:
+                        file.write(f"{path}\t{worker['id']}\n")
             except (OSError, ValueError, KeyError) as error:
                 print(f"{path.stem}: {error}", file=sys.stderr)
                 failed = True

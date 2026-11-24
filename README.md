@@ -198,6 +198,50 @@ A Codex worker's pane is titled with its thread ID. `retire.sh` closes only that
 opened with wherever it now is, and only while it still shows that thread: after `/resume` or `/new` there, close
 it yourself.
 
+**What happens when a Codex account hits its usage limit?**
+
+Nothing changes unless you install a Codex account helper: an executable named by `ANDERTON_CODEX_ACCOUNTS`, or
+`codex-accounts` on `PATH`. Anderton asks it, with `CODEX_HOME` set to the home in question:
+
+- `--start-home [-- <codex options>]` prints the home a new session starts on.
+- `--move-thread <id> [--message <text>] [-- <codex options>]` marks the account limited and prints the next home,
+  which must read the same conversation store, so the thread resumes there as it is. It exits non-zero, marking
+  nothing, when a codex still has the thread open, and exits non-zero when no account may take it.
+- `--locate-thread <id>` prints the home that last ran the thread.
+- `--is-limited` exits 0 while `CODEX_HOME` is marked limited, and 1 once it is not.
+
+The helper decides which accounts qualify, and must print only a home that runs the same hook guards: Anderton runs the
+session there as given. An answer it cannot read (an older helper's exit 2) leaves the session where it is.
+
+With a helper, `spawn.sh` and `codex-anderton.sh` start on the home it names, judged under their codex options, and
+start that home's daemon if it is not running. When a worker's latest turn failed at the usage limit (Codex's
+structured `usageLimitExceeded`, or with no structured kind its own "You've hit your usage limit" sentence), the watch
+moves it over sweeps, so no sweep waits:
+
+1. A sweep stops the Codex client in its pane. Until the move ends, `codex-workers.sh message` refuses the worker: a
+   turn started then would run on the old account. A loaded thread whose turn failed reads `systemError` until its
+   next turn, and counts as waiting on nothing.
+2. A later sweep, once the old daemon has let go of the thread (about a minute after its last client leaves), asks the
+   helper for the next home and resumes the thread on that home's daemon. Then one write points the worker's record
+   there and records the steps still owed: reopen the pane there, and tell the worker to continue without repeating
+   completed work.
+3. That sweep, or a later one if it was cut short, runs the owed steps. A direction to continue that did not go
+   through is retried.
+
+Only the record's writes hold the repository lock, and a sweep takes a step for one worker at most. A thread another
+client still has open after three minutes is not moved, and a pane showing another conversation is left alone. If
+the new daemon does not start or take the thread, the worker stays on its old home, with nothing to undo. A move that
+could not run is retried quietly: the worker continues on its own home once that home's limit has reset, or moves once
+the helper names another home.
+
+A Codex Anderton at its limit moves with `codex-anderton.sh --move <thread-id>` after you close its window: it resumes
+the thread on the home the helper names. The claim keeps naming the old home until the new home's daemon has the
+thread loaded. Then, under the repository lock, the old home's watch is stopped, the claim names the new home, and a
+watch for the new home starts. A hand-over that finds the lock held past its ten-second wait logs that next to the
+claim (`<claim>.handover.log`) and tries again, ten times. `retire.sh` keeps a worker whose thread a daemon on another
+account's home has open. A claim whose hand-over never ran follows its thread when `claim.sh` runs from the home
+that last ran it.
+
 **How is it different from firstmate?**
 
 [firstmate](https://github.com/kunchenguid/firstmate) inspired it. firstmate is a full agent

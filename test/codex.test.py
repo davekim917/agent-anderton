@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -30,6 +31,7 @@ class FakeCodex:
         self.listings = []
         self.listed = []
         self.others = {}
+        self.loaded = []
 
     def __enter__(self):
         return self
@@ -85,6 +87,8 @@ class FakeCodex:
             return iter(self.turns)
         if method == "thread/queue/list":
             return iter(self.queue)
+        if method == "thread/loaded/list":
+            return iter(self.loaded)
         assert method == "thread/items/list"
         return iter(self.items[params["turnId"]])
 
@@ -206,6 +210,154 @@ class WorkerTest(unittest.TestCase):
         self.assertIn("interrupted", self.scan()[0])
         self.delivered()
         self.assertEqual([], self.scan())
+
+    def test_reports_a_usage_limit_and_offers_only_a_latest_finished_one_for_a_move(self):
+        limit = {"message": "You've hit your usage limit.", "codexErrorInfo": "usageLimitExceeded"}
+        for turns, moved in [
+            ([{"id": "limited", "status": "failed", "error": limit}], True),
+            ([{"id": "limited", "status": "failed", "error": {"message": "You've hit your usage limit. Try later."}}],
+             True),
+            ([{"id": "later", "status": "inProgress"}, {"id": "limited", "status": "failed", "error": limit}], False),
+            ([{"id": "later", "status": "completed"}, {"id": "limited", "status": "failed", "error": limit}], False),
+            ([{"id": "other", "status": "failed", "error": {"message": "stream disconnected"}}], False),
+            ([{"id": "other", "status": "failed",
+               "error": {"message": "Did not hit your usage limit; connection reset"}}], False),
+            ([{"id": "other", "status": "failed",
+               "error": {"message": "You've hit your usage limit.", "codexErrorInfo": "other"}}], False),
+        ]:
+            with self.subTest(turns=[turn["id"] for turn in turns], moved=moved):
+                for stale in self.state.iterdir():
+                    stale.unlink()
+                self.client.turns = turns
+                self.client.items = {turn["id"]: [] for turn in turns}
+                limited = []
+                events = worker_api.sweep_worker(self.worker, self.state, self.stage, limited)
+                self.assertEqual([self.worker] if moved else [], limited)
+                reported = any(f"failed at the usage limit of {self.worker['codexHome']}" in e for e in events)
+                self.assertEqual(any(turn["id"] == "limited" for turn in turns), reported)
+
+    def test_a_limit_is_offered_again_after_its_report_until_its_move_ran(self):
+        self.client.turns = [{"id": "limited", "status": "failed", "error": {"message": "You've hit your usage limit."}}]
+        self.client.items = {"limited": []}
+        limited = []
+        self.assertTrue(worker_api.sweep_worker(self.worker, self.state, self.stage, limited))
+        self.delivered()
+        limited = []
+        self.assertEqual([], worker_api.sweep_worker(self.worker, self.state, self.stage, limited))
+        self.assertEqual([self.worker], limited)
+        with patch.object(worker_api.time, "time", return_value=10_000):
+            self.worker["codexFailover"] = {"turn": "limited", "at": 10_000 - 60, "moved": False}
+            self.assertFalse(worker_api.failover_due(self.worker, "limited"))
+            self.worker["codexFailover"]["at"] = 10_000 - worker_api.FAILOVER_RETRY_SECONDS
+            self.assertTrue(worker_api.failover_due(self.worker, "limited"))
+            self.worker["codexFailover"]["moved"] = True
+            self.assertFalse(worker_api.failover_due(self.worker, "limited"))
+            self.worker["codexFailover"].update(moved=False, resumed=True)
+            self.assertFalse(worker_api.failover_due(self.worker, "limited"))
+            self.worker["codexFailover"].update(moved=True, resumed=False)
+            limited = []
+            worker_api.sweep_worker(self.worker, self.state, self.stage, limited)
+            self.assertEqual([], limited)
+            self.assertTrue(worker_api.failover_due(self.worker, "a-later-limit"))
+
+    def test_unloaded_waits_for_the_daemon_to_let_go_of_the_thread(self):
+        self.record.write_text(json.dumps(self.worker))
+        self.client.loaded = [self.worker["id"]]
+
+        def unloaded(*extra):
+            with patch.object(worker_api.sys, "argv", ["codex-worker.py", "unloaded", str(self.record), *extra]):
+                return worker_api.main()
+
+        self.assertEqual(3, unloaded())
+        clock = iter([0, 0, 1, 3])
+        with patch.object(worker_api.time, "monotonic", side_effect=lambda: next(clock)), \
+                patch.object(worker_api.time, "sleep", side_effect=lambda _: self.client.loaded.clear()):
+            self.assertEqual(0, unloaded("--wait", "5"))
+
+    def test_loaded_waits_for_a_daemon_to_load_the_thread_even_before_its_socket_answers(self):
+        def loaded(*extra):
+            with patch.object(worker_api.sys, "argv", ["codex-worker.py", "loaded", "/next-home", self.worker["id"], *extra]):
+                return worker_api.main()
+
+        self.assertEqual(3, loaded())
+        answers = iter([OSError("no socket yet"), None])
+
+        def connect(home):
+            answer = next(answers)
+            if answer is not None:
+                raise answer
+            self.client.loaded = [self.worker["id"]]
+            return self.client
+
+        clock = iter([0, 0, 1, 2])
+        with patch.object(worker_api, "Codex", side_effect=connect), \
+                patch.object(worker_api.time, "monotonic", side_effect=lambda: next(clock)), \
+                patch.object(worker_api.time, "sleep"):
+            self.assertEqual(0, loaded("--wait", "5"))
+
+    def test_still_limited_only_while_the_limited_turn_is_latest_and_nothing_follows_it(self):
+        self.record.write_text(json.dumps(self.worker))
+
+        def still(turn):
+            with patch.object(worker_api.sys, "argv", ["codex-worker.py", "still-limited", str(self.record), turn]):
+                return worker_api.main()
+
+        self.client.turns = [{"id": "limited", "status": "failed", "error": {"message": "You've hit your usage limit."}}]
+        self.assertEqual(0, still("limited"))
+        self.client.info["status"] = {"type": "systemError"}
+        self.assertEqual(0, still("limited"))
+        self.client.info["status"] = {"type": "idle"}
+        self.assertEqual(3, still("older"))
+        self.client.queue = [{"id": "direction"}]
+        self.assertEqual(3, still("limited"))
+        self.client.queue = []
+        self.client.info["status"] = {"type": "active"}
+        self.assertEqual(3, still("limited"))
+
+    def test_limited_names_the_turn_and_limit_only_while_the_thread_waits_on_nothing(self):
+        self.record.write_text(json.dumps(self.worker))
+        self.client.turns = [{"id": "limited", "status": "failed",
+                              "error": {"message": "You've hit your usage limit. Try again at 9:00 PM."}}]
+
+        def limited():
+            with contextlib.redirect_stdout(io.StringIO()) as out, \
+                    patch.object(worker_api.sys, "argv", ["codex-worker.py", "limited", str(self.record)]):
+                status = worker_api.main()
+            return status, out.getvalue()
+
+        self.assertEqual((0, "limited\nYou've hit your usage limit. Try again at 9:00 PM.\n"), limited())
+        # A loaded thread whose turn failed stays systemError, with its pane still attached.
+        self.client.info["status"] = {"type": "systemError"}
+        self.assertEqual((0, "limited\nYou've hit your usage limit. Try again at 9:00 PM.\n"), limited())
+        self.client.info["status"] = {"type": "idle"}
+        self.client.queue = [{"id": "direction"}]
+        self.assertEqual((3, ""), limited())
+        self.client.queue = []
+        self.client.info["status"] = {"type": "active"}
+        self.assertEqual((3, ""), limited())
+
+    def test_resume_on_resumes_the_thread_in_its_worktree_and_leaves_the_record_to_the_caller(self):
+        self.record.write_text(json.dumps(self.worker))
+        calls = []
+        original = self.client.call
+        self.client.call = lambda method, params, timeout=None: calls.append((method, params)) or original(method, params)
+
+        def resume_on():
+            with patch.object(worker_api.sys, "argv", ["codex-worker.py", "resume-on", str(self.record), "/next-home"]):
+                return worker_api.main()
+
+        self.assertEqual(0, resume_on())
+        self.assertEqual(("thread/resume", {"threadId": self.worker["id"], "cwd": self.worker["dir"],
+                                            "excludeTurns": True}), calls[0])
+        worker_api.Codex.assert_called_with(Path("/next-home"))
+        self.assertEqual(self.worker["codexHome"], json.loads(self.record.read_text())["codexHome"])
+        self.client.info["cwd"] = "/elsewhere"
+        with self.assertRaisesRegex(ValueError, "identity does not match"):
+            resume_on()
+
+    def test_a_stopped_move_is_due_at_once_on_the_next_sweep(self):
+        self.worker["codexFailover"] = {"turn": "limited", "at": time.time(), "moved": False, "stage": "stopped"}
+        self.assertTrue(worker_api.failover_due(self.worker, "limited"))
 
     def test_launch_uses_first_user_message_of_the_matching_thread(self):
         expected = self.worker["id"]

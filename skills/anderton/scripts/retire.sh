@@ -61,37 +61,6 @@ if [ "$(jq -r '.adopted // false' "$record")" = true ]; then
   exit 0
 fi
 
-# The Codex worker's pane, by the id spawn.sh recorded, wherever it now lives: "present <title>", gone, or unknown. A
-# tmux pane id counts only in the server process it was opened in, since a restarted server reuses ids.
-codex_pane() {
-  local out
-  case $launcher in
-    herdr)
-      out=$(HERDR_SOCKET_PATH="$socket" herdr pane get "$pane" 2>&1) || true
-      printf '%s' "$out" | jq -r 'if .error.code == "pane_not_found" or .error.code == "server_not_running" then "gone"
-        elif (.result.pane.terminal_title | type) == "string" then "present " + .result.pane.terminal_title else "unknown" end' \
-        2>/dev/null || echo unknown
-      ;;
-    tmux)
-      if out=$(tmux -S "$socket" list-panes -a -F '#{pid} #{pane_id} #{pane_title}' 2>&1); then
-        printf '%s\n' "$out" | awk -v p="$server" -v id="$pane" '
-          $1 == p && $2 == id { sub(/^[^ ]* [^ ]* ?/, ""); print "present " $0; f = 1; exit }
-          END { if (!f) print "gone" }'
-      else
-        case $out in *"no server running"* | *"No such file or directory"*) echo gone ;; *) echo unknown ;; esac
-      fi
-      ;;
-    *) echo unknown ;;
-  esac
-}
-# True when codex_pane's answer $1 is the pane titled as Codex titles the recorded thread: its id cut to 29 characters
-# and "...", after "Action Required | " while it waits on the user.
-shows_thread() {
-  [ ${#id} -ge 29 ] || return 1
-  case $1 in "present ${id:0:29}..." | "present "*" | ${id:0:29}...") return 0 ;; esac
-  return 1
-}
-
 mixed_claude_pane() {
   local registry sid pid
   registry=$(live_claude_worker "$record")
@@ -163,27 +132,32 @@ if [ "$launcher" != bg ] && [ "$provider" = codex ]; then
       echo "Codex worker '$name' was recorded without its pane, and $launcher tab $tab still exists, maybe renamed. It may also be an unrelated tab that took the id after a $launcher restart, and closing that would end someone else's work. Its record and worktree are left in place: tell the user." >&2
       exit 1
     fi
-  elif now=$(codex_pane) && [ "$now" != gone ]; then
-    shows_thread "$now" ||
+  elif now=$(codex_pane "$launcher" "$socket" "$pane" "$server") && [ "$now" != gone ]; then
+    shows_thread "$now" "$id" ||
       refuse_pane "its $launcher pane $pane does not show thread ${id:-(none registered)} (another conversation was opened there, Codex left it, or $launcher cannot say)"
     # The check above took time: a direction or a turn that started since stops the close.
     "$scripts/codex-worker.py" inactive "$record" || refuse_pane "thread $id became active while retiring"
     # The last read before the close, after the slow daemon call: only a change made after it goes unseen.
-    now=$(codex_pane)
+    now=$(codex_pane "$launcher" "$socket" "$pane" "$server")
     if [ "$now" != gone ]; then
-      shows_thread "$now" || refuse_pane "its $launcher pane $pane changed while retiring"
+      shows_thread "$now" "$id" || refuse_pane "its $launcher pane $pane changed while retiring"
       case $launcher in
         herdr) HERDR_SOCKET_PATH="$socket" herdr pane close "$pane" >/dev/null 2>&1 || true ;;
         tmux) tmux -S "$socket" kill-pane -t "$pane" >/dev/null 2>&1 || true ;;
       esac
     fi
   fi
-  if { [ -n "$pane" ] && [ "$(codex_pane)" != gone ]; } || ! "$scripts/codex-worker.py" inactive "$record"; then
+  if { [ -n "$pane" ] && [ "$(codex_pane "$launcher" "$socket" "$pane" "$server")" != gone ]; } || ! "$scripts/codex-worker.py" inactive "$record"; then
     echo "Could not confirm '$name' stopped ($launcher pane ${pane:-(none recorded)} in ${socket:-(no server recorded)}); kept its worktree and record." >&2
     exit 1
   fi
+  # The record names one home's daemon; the thread may have been opened on another account's since.
+  if [ -n "$id" ] && held=$(codex_thread_home "$id") && [ "$held" != "$(cd "$(jq -r .codexHome "$record")" 2>/dev/null && pwd -P)" ]; then
+    echo "'$name' (Codex $id) is open on $held's daemon, not the home its record names; kept its worktree and record." >&2
+    exit 1
+  fi
 elif [ "$launcher" != bg ] && [ -n "$mixed" ] && [ -n "$pane" ]; then
-  current=$(codex_pane)
+  current=$(codex_pane "$launcher" "$socket" "$pane" "$server")
   if [ "$current" != gone ]; then
     if ! mixed_claude_pane; then
       echo "Could not verify '$name' still runs in its original pane. Close it directly, then retry." >&2
@@ -194,7 +168,7 @@ elif [ "$launcher" != bg ] && [ -n "$mixed" ] && [ -n "$pane" ]; then
       tmux) tmux -S "$socket" kill-pane -t "$pane" >/dev/null 2>&1 || true ;;
     esac
   fi
-  if [ "$(codex_pane)" != gone ] || ! session_gone "$name" || ! mixed_claude_gone; then
+  if [ "$(codex_pane "$launcher" "$socket" "$pane" "$server")" != gone ] || ! session_gone "$name" || ! mixed_claude_gone; then
     echo "Could not confirm '$name' stopped; kept its worktree and record." >&2
     exit 1
   fi

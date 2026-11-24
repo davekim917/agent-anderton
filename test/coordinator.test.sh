@@ -17,6 +17,8 @@ cleanup() {
 trap cleanup EXIT
 export HOME="$tmp/home" CLAUDE_CONFIG_DIR="$tmp/claude" CODEX_HOME="$tmp/codex"
 export ANDERTON_WORKTREES="$tmp/worktrees" ANDERTON_START_WAIT=1
+# No Codex account helper on this machine's PATH is reached.
+export ANDERTON_CODEX_ACCOUNTS="$tmp/no-codex-accounts"
 export FIXTURE_TMUX_LOG="$tmp/tmux.log"
 export FIXTURE_NOTICE_HOME="$tmp/notices"
 unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID TMUX HERDR_ENV
@@ -36,7 +38,10 @@ cat > "$tmp/scripts/codex-worker.py" <<'STUB'
 case $1 in
   identity) jq -cn --arg id "$3" --arg dir "$FIXTURE_ROOT" '{id:$id, dir:$dir, name:"fixture-codex"}' ;;
   claim-state) if [ -n "${NOT_REACHABLE:-}" ]; then exit 1; fi; echo "${CLAIM_STATE:-live}" ;;
-  start-watch) ;;
+  start-watch) echo "${CODEX_THREAD_ID:-} ${CODEX_HOME:-} $3" >> "$FIXTURE_ROOT/../watch-starts" ;;
+  loaded)
+    while [ -n "${FIXTURE_LOADED_GATE:-}" ] && [ ! -e "$FIXTURE_LOADED_GATE" ]; do sleep 0.1; done
+    echo "$2 $3" >> "$FIXTURE_ROOT/../loaded-checks"; [ -z "${FIXTURE_NOT_LOADED:-}" ] ;;
   launch-matches)
     [ -z "${LAUNCH_LOOKUP_FAIL:-}" ] || exit 1
     [ "$3" = "${MATCHING_LAUNCH:-}" ] || exit 3
@@ -72,7 +77,8 @@ import socket
 import sys
 socket.socket(socket.AF_UNIX).bind(sys.argv[1])
 PY
-sleep 60 &
+# Outlives every check that needs the fixture Claude session; cleanup ends it.
+sleep 600 &
 claimer=$!
 jq -nc --argjson pid "$claimer" --arg cwd "$PWD" '{pid:$pid, sessionId:"fixture-claude", name:"fixture-claude", cwd:$cwd}' > "$CLAUDE_CONFIG_DIR/sessions/$claimer.json"
 
@@ -131,6 +137,106 @@ if grep -q 'DEPLOY: catalog fixture' "$tmp/wake"; then exit 1; fi
 rm -f "$claims/"*.json
 codex_role "$script/claim.sh"
 jq -e --arg thread "$FIXTURE_THREAD" '.provider == "codex" and .sessionId == $thread and .scope == null and (has("pid") | not)' "$root_claim" >/dev/null
+# A Codex Anderton at its usage limit resumes on the next account, whose home reads the same conversation store: the
+# helper marks the old account and names the new home, and the claim names the new home only once its daemon has the
+# thread loaded, after the old home's watch is stopped.
+moved_home="$tmp/codex-moved"
+mkdir -p "$moved_home/app-server-control"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$moved_home/app-server-control/app-server-control.sock"
+cat > "$tmp/accounts" <<STUB
+#!/usr/bin/env bash
+echo "\$CODEX_HOME \$*" >> "$tmp/accounts.log"
+case \$1 in
+  --move-thread) echo "$moved_home" ;;
+  --locate-thread) cat "$tmp/locate" 2>/dev/null || echo "$moved_home" ;;
+  --start-home) echo "\$CODEX_HOME" ;;
+esac
+STUB
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s"\n' "$tmp/codex.args" > "$tmp/bin/codex"
+chmod +x "$tmp/accounts" "$tmp/bin/codex"
+# One thread holds one role whichever account's home it runs on.
+refused_claim codex_role env CODEX_HOME="$moved_home" "$script/claim.sh" --project tools
+grep -q 'already holds the repository role' "$tmp/refused"
+handed_over() { # handed_over <home> [tenths]: waits for the background hand-over to settle the claim on <home>
+  for _ in $(seq 1 "${2:-50}"); do
+    if jq -e --arg home "$1" '.codexHome == $home' "$root_claim" >/dev/null; then return 0; fi
+    sleep 0.1
+  done
+  return 1
+}
+# A new session whose daemon never loads the thread leaves the claim on the old home.
+rm -f "$tmp/loaded-checks"
+codex_role env FIXTURE_NOT_LOADED=1 ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" "$script/codex-anderton.sh" --move "$FIXTURE_THREAD"
+for _ in $(seq 1 50); do [ -s "$tmp/loaded-checks" ] && break; sleep 0.1; done
+sleep 0.5
+grep -qxF "$moved_home $FIXTURE_THREAD" "$tmp/loaded-checks"
+jq -e --arg home "$CODEX_HOME" '.codexHome == $home' "$root_claim" > /dev/null
+if [ -e "$tmp/watch-starts" ] && grep -q "$moved_home" "$tmp/watch-starts"; then exit 1; fi
+: > "$tmp/accounts.log"
+# The old home's watch is stopped before the claim moves: a watch for the same thread would leave on finding it held.
+watcher="$(dirname "$root_claim")/$(basename "$root_claim" .json).watch"
+bash -c 'exec -a watch.sh sleep 60' &
+old_watch=$!
+echo "$old_watch $FIXTURE_THREAD 0" > "$watcher"
+codex_role env ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" "$script/codex-anderton.sh" --move "$FIXTURE_THREAD"
+handed_over "$moved_home"
+grep -qxF "$CODEX_HOME --move-thread $FIXTURE_THREAD -- -c tui.terminal_title=[\"thread-id\"]" "$tmp/accounts.log"
+[ "$(grep -c -- --move-thread "$tmp/accounts.log")" -eq 1 ]
+[ "$(head -n 2 "$tmp/codex.args" | tr '\n' ' ')" = "resume $FIXTURE_THREAD " ]
+grep -qxF "unix://$moved_home/app-server-control/app-server-control.sock" "$tmp/codex.args"
+for _ in $(seq 1 50); do [ -s "$tmp/watch-starts" ] && break; sleep 0.1; done
+tail -n 1 "$tmp/watch-starts" | grep -qxF "$FIXTURE_THREAD $moved_home $root_claim"
+if kill -0 "$old_watch" 2>/dev/null; then exit 1; fi
+[ ! -e "$watcher" ]
+refused_claim codex_role "$script/claim.sh"
+codex_role env CODEX_HOME="$moved_home" "$script/claim.sh"
+# A hand-over that finds the repository lock held past its ten-second wait says so and tries again.
+jq --arg home "$CODEX_HOME" '.codexHome = $home' "$root_claim" > "$root_claim.tmp" && mv "$root_claim.tmp" "$root_claim"
+rm -f "${root_claim%.json}.handover.log"
+# The new daemon reports the thread loaded only once the lock is held here, after the launcher has let go of it.
+codex_role env ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" ANDERTON_HANDOVER_RETRY=1 FIXTURE_LOADED_GATE="$tmp/loaded-gate" \
+  "$script/codex-anderton.sh" --move "$FIXTURE_THREAD"
+# Held past one take's wait, which runs longer than ten seconds where the lock is a directory (macOS).
+printf ': > %q\nsleep 25\n' "$tmp/lock-held" > "$tmp/hold-lock.sh"
+if command -v flock > /dev/null 2>&1; then
+  flock "$root_claim.lock.flock" bash "$tmp/hold-lock.sh" &
+else
+  ( mkdir "$root_claim.lock" && echo $$ > "$root_claim.lock/pid" && bash "$tmp/hold-lock.sh"; rm -rf "$root_claim.lock" ) &
+fi
+lock_holder=$!
+for _ in $(seq 1 50); do [ -e "$tmp/lock-held" ] && break; sleep 0.1; done
+: > "$tmp/loaded-gate"
+handed_over "$moved_home" 600
+wait "$lock_holder" 2> /dev/null || true
+grep -q 'the repository lock is held; try 1 of 10' "${root_claim%.json}.handover.log"
+# A thread that moves back while the hand-over waits on the lock keeps its claim and watch where it now runs.
+jq --arg home "$CODEX_HOME" '.codexHome = $home' "$root_claim" > "$root_claim.tmp" && mv "$root_claim.tmp" "$root_claim"
+rm -f "${root_claim%.json}.handover.log" "$tmp/lock-held" "$tmp/loaded-gate"
+watch_lines=$(wc -l < "$tmp/watch-starts")
+codex_role env ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" ANDERTON_HANDOVER_RETRY=1 FIXTURE_LOADED_GATE="$tmp/loaded-gate" \
+  "$script/codex-anderton.sh" --move "$FIXTURE_THREAD"
+if command -v flock > /dev/null 2>&1; then
+  flock "$root_claim.lock.flock" bash "$tmp/hold-lock.sh" &
+else
+  ( mkdir "$root_claim.lock" && echo $$ > "$root_claim.lock/pid" && bash "$tmp/hold-lock.sh"; rm -rf "$root_claim.lock" ) &
+fi
+lock_holder=$!
+for _ in $(seq 1 50); do [ -e "$tmp/lock-held" ] && break; sleep 0.1; done
+: > "$tmp/loaded-gate"
+for _ in $(seq 1 300); do grep -q 'try 1 of 10' "${root_claim%.json}.handover.log" 2> /dev/null && break; sleep 0.1; done
+echo "$CODEX_HOME" > "$tmp/locate"
+for _ in $(seq 1 600); do grep -q 'dropped' "${root_claim%.json}.handover.log" 2> /dev/null && break; sleep 0.1; done
+wait "$lock_holder" 2> /dev/null || true
+grep -q "dropped: its daemon no longer has the thread open; the claim stays on $CODEX_HOME" "${root_claim%.json}.handover.log"
+jq -e --arg home "$CODEX_HOME" '.codexHome == $home' "$root_claim" > /dev/null
+[ "$(wc -l < "$tmp/watch-starts")" -eq "$watch_lines" ]
+rm -f "$tmp/locate"
+# A claim a hand-over never reached follows its thread to the home that last ran it when that session claims.
+jq --arg home "$CODEX_HOME" '.codexHome = $home' "$root_claim" > "$root_claim.tmp" && mv "$root_claim.tmp" "$root_claim"
+codex_role env CODEX_HOME="$moved_home" ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" "$script/claim.sh"
+jq -e --arg home "$moved_home" '.codexHome == $home' "$root_claim" > /dev/null
+printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/codex"
+jq --arg home "$CODEX_HOME" '.codexHome = $home' "$root_claim" > "$root_claim.tmp" && mv "$root_claim.tmp" "$root_claim"
 refused_claim claude_role "$script/claim.sh"
 NOT_REACHABLE=1 refused_claim claude_role "$script/claim.sh"
 grep -q 'liveness: unknown' "$tmp/refused"
