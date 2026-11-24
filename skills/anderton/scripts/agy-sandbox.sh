@@ -203,7 +203,7 @@ owner_of() {
 # them. agy also loads custom agents from ~/.gemini/config/agents and from each plugin there when it starts, and loads
 # every plugin ~/.gemini/config/plugins.json registers, from anywhere; its entries and inherits are both optional.
 refuse_workspace_config() {
-  local root entry name found plugin manifest="$gemini/config/plugins.json" agent_why="a custom agent there can run its subagent with no hooks, so the guard would not see it."
+  local root entry name found plugin agent_why="a custom agent there can run its subagent with no hooks, so the guard would not see it."
   for root in "$wt/.agents" "$wt/.agent" "$wt/_agents" "$wt/_agent"; do
     [ ! -L "$root" ] || die "$root is a symbolic link, whose target could stay writable; agy reads it as a workspace customization root."
     [ -e "$root" ] || continue
@@ -230,14 +230,8 @@ refuse_workspace_config() {
     done
   done
   refuse_nonempty "$gemini/config/agents" "$agent_why"
-  [ ! -L "$manifest" ] || die "$manifest is a symbolic link, whose target could stay writable; a plugin it registers can carry hooks and custom agents."
-  if [ -e "$manifest" ]; then
-    [ -f "$manifest" ] && [ -r "$manifest" ] || die "$manifest is not a file agy-sandbox can read; a plugin it registers can carry hooks and custom agents."
-    case $(/usr/bin/tr -d '[:space:]' < "$manifest") in
-      '' | '{}') ;;
-      *) die "$manifest registers plugins; a plugin it registers, from anywhere, can carry hooks and custom agents, so it may only be empty or {}." ;;
-    esac
-  fi
+  refuse_registrations "$gemini/config/plugins.json"
+  refuse_registrations "$state/plugins.json"
   if [ -d "$gemini/config/plugins" ]; then
     for plugin in "$gemini/config/plugins"/* "$gemini/config/plugins"/.[!.]* "$gemini/config/plugins"/..?*; do
       if [ -L "$plugin" ]; then
@@ -246,6 +240,19 @@ refuse_workspace_config() {
       [ ! -d "$plugin" ] || refuse_nonempty "$plugin/agents" "$agent_why"
     done
   fi
+}
+
+# refuse_registrations <plugins.json>: missing, empty or {}, never a link, unreadable, or registering a plugin, which
+# can carry hooks and custom agents from anywhere. Inside, a missing state-directory one is the launcher's read-only
+# /dev/null stand-in, a device no one can open there, which agy cannot read either.
+refuse_registrations() {
+  local file=$1 content why="a plugin it registers, from anywhere, can carry hooks and custom agents."
+  [ ! -L "$file" ] || die "$file is a symbolic link, whose target could stay writable; $why"
+  [ -e "$file" ] || return 0
+  if [ -c "$file" ] && [ "$(/usr/bin/stat -c %t:%T "$file")" = 1:3 ]; then return 0; fi
+  [ -f "$file" ] && [ -r "$file" ] || die "$file is not a file agy-sandbox can read; $why"
+  content=$(/usr/bin/tr -d '[:space:]' < "$file") || die "$file is not a file agy-sandbox can read; $why"
+  case $content in '' | '{}') ;; *) die "$file registers plugins; it may only be empty or {}, since $why" ;; esac
 }
 
 # refuse_nonempty <dir> <why>: the directory may be missing or empty, never a link, anything else, or holding an entry.

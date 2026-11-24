@@ -270,9 +270,10 @@ Just before agy starts, it refuses to run unless all of these hold, checked insi
   else there is refused by name: `hooks.json`, `plugins/`, `agents/`, `skills.json` or any other file, and links;
 - `~/.gemini/config/agents`, and the `agents` directory of every plugin in `~/.gemini/config/plugins/`, is missing or
   an empty directory, never a link, and no plugin there is a link;
-- `~/.gemini/config/plugins.json`, which can register a plugin from anywhere, is missing, empty or `{}`, never a link
-  (both of its fields, `entries` and `inherits`, are optional, so `{}` registers nothing). These workspace and user
-  checks also run before `bwrap` starts;
+- `~/.gemini/config/plugins.json` and agy's state-directory `~/.gemini/antigravity-cli/plugins.json`, which can
+  register a plugin from anywhere, are each missing, empty or `{}`, never a link and never unreadable (both of the
+  file's fields, `entries` and `inherits`, are optional, so `{}` registers nothing). These workspace and user checks
+  also run before `bwrap` starts;
 - every protected path is mounted read-only;
 - the guard's policy files are not writable.
 
