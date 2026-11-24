@@ -218,7 +218,9 @@ start that home's daemon if it is not running. When a worker's latest turn faile
 structured `usageLimitExceeded`, or with no structured kind its own "You've hit your usage limit" sentence), the watch
 moves it over sweeps, so no sweep waits:
 
-1. A sweep stops the Codex client in its pane.
+1. A sweep stops the Codex client in its pane. Until the move ends, `codex-workers.sh message` refuses the worker: a
+   turn started then would run on the old account. A loaded thread whose turn failed reads `systemError` until its
+   next turn, and counts as waiting on nothing.
 2. A later sweep, once the old daemon has let go of the thread (about a minute after its last client leaves), asks the
    helper for the next home and resumes the thread on that home's daemon. Then one write points the worker's record
    there and records the steps still owed: reopen the pane there, and tell the worker to continue without repeating
@@ -235,7 +237,9 @@ the helper names another home.
 A Codex Anderton at its limit moves with `codex-anderton.sh --move <thread-id>` after you close its window: it resumes
 the thread on the home the helper names. The claim keeps naming the old home until the new home's daemon has the
 thread loaded. Then, under the repository lock, the old home's watch is stopped, the claim names the new home, and a
-watch for the new home starts. A claim whose hand-over never ran follows its thread when `claim.sh` runs from the home
+watch for the new home starts. A hand-over that finds the lock held past its ten-second wait logs that next to the
+claim (`<claim>.handover.log`) and tries again, ten times. `retire.sh` keeps a worker whose thread a daemon on another
+account's home has open. A claim whose hand-over never ran follows its thread when `claim.sh` runs from the home
 that last ran it.
 
 **How is it different from firstmate?**

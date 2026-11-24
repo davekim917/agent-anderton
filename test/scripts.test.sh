@@ -2629,6 +2629,17 @@ check "or one whose thread starts a turn while retire.sh checks it" eval '[ "$st
 cx_retire cx-tab FAKE_RETITLE_AT=2
 check "or one switched to another conversation during that last daemon call" \
   eval '[ "$status" -eq 1 ] && contains "changed while retiring" && [ ! -s "$FAKE_LOG.killed" ]'
+# Its pane closed and its thread opened by hand on another account's home: the recorded daemon says notLoaded.
+cx_elsewhere=$(cd "$(mktemp -d /tmp/anderton-cx.XXXXXX)" && pwd -P)
+printf '#!/usr/bin/env bash\n[ "$1" = --locate-thread ] && [ "$2" = %s ] && { echo %s; exit 0; }\nexit 7\n' "$cx_thread" "$cx_elsewhere" >"$work/locate-accounts"
+chmod +x "$work/locate-accounts"
+awk '$3 != "%21"' "$FAKE_LOG.panes-open" >"$FAKE_LOG.panes-open.tmp"
+mv "$FAKE_LOG.panes-open.tmp" "$FAKE_LOG.panes-open"
+cx_retire cx-tab ANDERTON_CODEX_ACCOUNTS="$work/locate-accounts"
+check "or one whose thread a daemon on another account's home has open after its pane closed" \
+  eval '[ "$status" -eq 1 ] && contains "is open on $cx_elsewhere" && [ -d "$work/wt-cx-tab" ] && [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/cx-tab.json" ]'
+rm -rf "$cx_elsewhere"
+tmux_pane %21 "$cx_title"
 awk '$3 != "@21"' "$FAKE_LOG.windows-open" >"$FAKE_LOG.windows-open.tmp"
 mv "$FAKE_LOG.windows-open.tmp" "$FAKE_LOG.windows-open"
 tmux_pane %21 "019a0000-9999-7222-8333-44445..."
@@ -2777,7 +2788,7 @@ case $1 in
     printf 'turn-9\nYou%sve hit your usage limit. Try again at 9:00 PM.\n' "'" ;;
   unloaded) echo unloaded >>"$FAKE_LOG.order"; [ -z "${FAKE_STILL_LOADED:-}" ] ;;
   resume-on) echo resume-on >>"$FAKE_LOG.order"; echo "$2 $3" >>"$FAKE_LOG.move" ;;
-  still-limited) [ -z "${FAKE_MOVED_ON:-}" ] ;;
+  still-limited) [ -z "${FAKE_STILL_EXIT:-}" ] || exit "$FAKE_STILL_EXIT"; [ -z "${FAKE_MOVED_ON:-}" ] || exit 3 ;;
   message) [ -z "${FAKE_MESSAGE_FAIL:-}" ] || exit "$FAKE_MESSAGE_FAIL"; printf '%s\n' "$4" >>"$FAKE_LOG.direction" ;;
 esac
 FAKE
@@ -2863,6 +2874,24 @@ cx_owed false true
 cx_sweep FAKE_MOVED_ON=1
 check "no direction to continue goes to a conversation that has moved on past its limited turn" eval \
   '[ ! -e "$FAKE_LOG.direction" ] && contains "has moved on since, so no direction to continue was sent"'
+cx_teardown
+
+cx_owed false true
+cx_sweep FAKE_STILL_EXIT=1
+check "a daemon that does not answer whether the conversation moved on keeps the direction to continue owed" eval \
+  '[ ! -e "$FAKE_LOG.direction" ] && contains "whose daemon did not answer" && [ "$(cx_record .codexFailover.continue)" = true ]'
+cx_sweep
+check "and the next sweep sends it" eval 'grep -q "Check the current state before repeating" "$FAKE_LOG.direction" && [ "$(cx_record .codexFailover.continue)" = false ]'
+cx_teardown
+
+# While its pane shows the placeholder, a direction would start a turn on the old account.
+cx_setup cx-fail '{"turn": "turn-9", "at": 0, "moved": false, "marked": true, "stage": "stopped", "paneStopped": true}'
+set +e
+out=$(cd "$rho" && env CLAUDE_PID="$p_rl" CLAUDE_CODE_SESSION_ID=rl-1 "$fodir/codex-workers.sh" message cx-fail "keep going" 2>&1)
+status=$?
+set -e
+check "a worker moving to another account refuses a direction until the move ends" eval \
+  '[ "$status" -eq 1 ] && contains "is moving to another Codex account" && [ ! -e "$FAKE_LOG.direction" ]'
 cx_teardown
 
 cx_owed true false

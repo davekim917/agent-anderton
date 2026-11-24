@@ -12,24 +12,35 @@ resume=()
 # home's daemon has the thread loaded; then, under the repository lock, the old home's watch is stopped before the
 # claim and a watch for the new home take over.
 adopt_moved_claim() {
-  local claim=$1 thread=$2 from=$3 to=$4 root=$5
+  local claim=$1 thread=$2 from=$3 to=$4 root=$5 attempt status
   "$anderton_scripts/codex-worker.py" loaded "$to" "$thread" --wait 300 || return 0
-  take_repository_lock "$root"
-  jq -e --arg id "$thread" --arg from "$from" '.provider == "codex" and .sessionId == $id and .codexHome == $from' \
-    "$claim" >/dev/null 2>&1 || return 0
-  # One thread holds one role: one it claimed on the new home meanwhile keeps the thread, and this claim is left.
-  while IFS= read -r r; do
-    if [ -n "$r" ] && [ "$r" != "$claim" ] &&
-      jq -e --arg id "$thread" '.provider == "codex" and .sessionId == $id' "$r" >/dev/null 2>&1; then
-      return 0
-    fi
-  done <<EOF
+  # Another claim operation can hold the repository lock past the ten seconds one take waits; the hand-over is said
+  # and tried again rather than dropped, which would leave the claim and its watch on the old home.
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    status=0
+    (
+      take_repository_lock "$root" 75
+      jq -e --arg id "$thread" --arg from "$from" '.provider == "codex" and .sessionId == $id and .codexHome == $from' \
+        "$claim" >/dev/null 2>&1 || exit 0
+      # One thread holds one role: one it claimed on the new home meanwhile keeps the thread, and this claim is left.
+      while IFS= read -r r; do
+        if [ -n "$r" ] && [ "$r" != "$claim" ] &&
+          jq -e --arg id "$thread" '.provider == "codex" and .sessionId == $id' "$r" >/dev/null 2>&1; then
+          exit 0
+        fi
+      done <<EOF
 $(project_holders "$root")
 EOF
-  stop_codex_watch "$claim"
-  set_codex_home "$claim" "$to" || return 0
-  release_repository_lock
-  CODEX_THREAD_ID=$thread CODEX_HOME=$to "$anderton_scripts/codex-worker.py" start-watch "$anderton_scripts/watch.sh" "$claim"
+      stop_codex_watch "$claim"
+      set_codex_home "$claim" "$to" || exit 1
+      release_repository_lock
+      CODEX_THREAD_ID=$thread CODEX_HOME=$to "$anderton_scripts/codex-worker.py" start-watch "$anderton_scripts/watch.sh" "$claim"
+    ) || status=$?
+    [ "$status" -eq 75 ] || return "$status"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) hand-over of thread $thread to $to: the repository lock is held; try $attempt of 10" >&2
+    sleep "${ANDERTON_HANDOVER_RETRY:-30}"
+  done
+  return 1
 }
 if [ "${1:-}" = --move ]; then
   [ $# -ge 2 ] || { echo "usage: codex-anderton.sh --move <thread-id> [codex options]" >&2; exit 2; }
@@ -58,7 +69,7 @@ EOF
   base_home=$to
   resume=(resume "$thread")
   if [ -n "$claim" ]; then
-    (adopt_moved_claim "$claim" "$thread" "$from" "$to" "$root" </dev/null >/dev/null 2>&1) &
+    (adopt_moved_claim "$claim" "$thread" "$from" "$to" "$root" </dev/null >/dev/null 2>>"${claim%.json}.handover.log") &
   fi
 fi
 codex_home=$(codex_start_home "$base_home" "$@")

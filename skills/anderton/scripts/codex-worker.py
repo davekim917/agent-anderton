@@ -274,6 +274,10 @@ def usage_limit(turn):
     return message if USAGE_LIMIT.match(message) else None
 
 
+# A loaded thread whose turn failed on an error stays systemError until its next turn starts; like idle, nothing runs.
+QUIET_AFTER_FAILURE = {"idle", "notLoaded", "systemError"}
+
+
 def failover_due(worker, turn):
     """True when the move of the worker's limited turn has not been tried, or failed long enough ago to retry. A moved
     thread brings its failed turn along, so the new account must not read it as its own limit."""
@@ -295,7 +299,7 @@ def limited_turn(client, worker):
         return None
     if client.call("thread/queue/list", {"threadId": worker["id"], "limit": 1})["data"]:
         return None
-    if read_thread(client, worker)["status"]["type"] not in {"idle", "notLoaded"}:
+    if read_thread(client, worker)["status"]["type"] not in QUIET_AFTER_FAILURE:
         return None
     return turns[0]["id"], usage_limit(turns[0])
 
@@ -782,7 +786,7 @@ def main():
                 return 3
             if client.call("thread/queue/list", {"threadId": worker["id"], "limit": 1})["data"]:
                 return 3
-            return 0 if read_thread(client, worker)["status"]["type"] in {"idle", "notLoaded"} else 3
+            return 0 if read_thread(client, worker)["status"]["type"] in QUIET_AFTER_FAILURE else 3
     elif args.command == "resume-on":
         resume_on(json.loads(args.record.read_text()), args.home)
     elif args.command == "blocker-during-notice":

@@ -214,8 +214,17 @@ EOF
     note="Its pane did not show thread $id, so it was left alone. Open the thread with: CODEX_HOME=$home codex resume $id --remote unix://$(codex_socket "$home")"
   fi
   if [ "$cont" = true ]; then
-    if ! "$scripts/codex-worker.py" still-limited "$record" "$turn" >/dev/null 2>&1; then
+    status=0
+    "$scripts/codex-worker.py" still-limited "$record" "$turn" >/dev/null 2>&1 || status=$?
+    if [ "$status" -eq 3 ]; then
       said="$name (Codex $id) moved from $from to $home, where its conversation has moved on since, so no direction to continue was sent. $note"
+    elif [ "$status" -ne 0 ]; then
+      # The daemon did not answer: nothing is known, so the step stays owed.
+      if [ "$tries" -lt 3 ]; then
+        once "$record" "$name (Codex $id) moved from $from to $home, whose daemon did not answer; telling it to continue is retried next sweep. $note"
+        return 10
+      fi
+      said="$name (Codex $id) moved from $from to $home, whose daemon did not answer, so it was not told to continue. Tell it yourself. $note"
     elif "$scripts/codex-worker.py" message "$record" -- "$continue_text" >/dev/null 2>&1; then
       said="$name (Codex $id) hit the usage limit of $from and continues on $home. $note"
     else
@@ -384,6 +393,11 @@ if [ "$action" = register ]; then
 fi
 if ! jq -e '.id != ""' "$record" >/dev/null; then
   echo "Codex worker '$2' needs to register its thread first." >&2
+  exit 1
+fi
+# Its pane shows a placeholder while the thread moves to another account; a turn started now would run on the old one.
+if [ "$action" = message ] && jq -e '.codexFailover | . != null and .stage == "stopped" and .moved != true' "$record" >/dev/null; then
+  echo "Codex worker '$2' is moving to another Codex account after a usage limit; message it once the watch reports it continues." >&2
   exit 1
 fi
 if [ "$action" = status ]; then

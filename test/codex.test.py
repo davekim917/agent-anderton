@@ -304,6 +304,9 @@ class WorkerTest(unittest.TestCase):
 
         self.client.turns = [{"id": "limited", "status": "failed", "error": {"message": "You've hit your usage limit."}}]
         self.assertEqual(0, still("limited"))
+        self.client.info["status"] = {"type": "systemError"}
+        self.assertEqual(0, still("limited"))
+        self.client.info["status"] = {"type": "idle"}
         self.assertEqual(3, still("older"))
         self.client.queue = [{"id": "direction"}]
         self.assertEqual(3, still("limited"))
@@ -323,6 +326,10 @@ class WorkerTest(unittest.TestCase):
             return status, out.getvalue()
 
         self.assertEqual((0, "limited\nYou've hit your usage limit. Try again at 9:00 PM.\n"), limited())
+        # A loaded thread whose turn failed stays systemError, with its pane still attached.
+        self.client.info["status"] = {"type": "systemError"}
+        self.assertEqual((0, "limited\nYou've hit your usage limit. Try again at 9:00 PM.\n"), limited())
+        self.client.info["status"] = {"type": "idle"}
         self.client.queue = [{"id": "direction"}]
         self.assertEqual((3, ""), limited())
         self.client.queue = []

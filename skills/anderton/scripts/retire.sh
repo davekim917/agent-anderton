@@ -151,6 +151,11 @@ if [ "$launcher" != bg ] && [ "$provider" = codex ]; then
     echo "Could not confirm '$name' stopped ($launcher pane ${pane:-(none recorded)} in ${socket:-(no server recorded)}); kept its worktree and record." >&2
     exit 1
   fi
+  # The record names one home's daemon; the thread may have been opened on another account's since.
+  if [ -n "$id" ] && held=$(codex_thread_home "$id") && [ "$held" != "$(cd "$(jq -r .codexHome "$record")" 2>/dev/null && pwd -P)" ]; then
+    echo "'$name' (Codex $id) is open on $held's daemon, not the home its record names; kept its worktree and record." >&2
+    exit 1
+  fi
 elif [ "$launcher" != bg ] && [ -n "$mixed" ] && [ -n "$pane" ]; then
   current=$(codex_pane "$launcher" "$socket" "$pane" "$server")
   if [ "$current" != gone ]; then

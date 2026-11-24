@@ -39,7 +39,7 @@ case $1 in
   identity) jq -cn --arg id "$3" --arg dir "$FIXTURE_ROOT" '{id:$id, dir:$dir, name:"fixture-codex"}' ;;
   claim-state) if [ -n "${NOT_REACHABLE:-}" ]; then exit 1; fi; echo "${CLAIM_STATE:-live}" ;;
   start-watch) echo "${CODEX_THREAD_ID:-} ${CODEX_HOME:-} $3" >> "$FIXTURE_ROOT/../watch-starts" ;;
-  loaded) echo "$2 $3" >> "$FIXTURE_ROOT/../loaded-checks"; [ -z "${FIXTURE_NOT_LOADED:-}" ] ;;
+  loaded) sleep "${FIXTURE_LOADED_DELAY:-0}"; echo "$2 $3" >> "$FIXTURE_ROOT/../loaded-checks"; [ -z "${FIXTURE_NOT_LOADED:-}" ] ;;
   launch-matches)
     [ -z "${LAUNCH_LOOKUP_FAIL:-}" ] || exit 1
     [ "$3" = "${MATCHING_LAUNCH:-}" ] || exit 3
@@ -154,8 +154,8 @@ chmod +x "$tmp/accounts" "$tmp/bin/codex"
 # One thread holds one role whichever account's home it runs on.
 refused_claim codex_role env CODEX_HOME="$moved_home" "$script/claim.sh" --project tools
 grep -q 'already holds the repository role' "$tmp/refused"
-handed_over() { # handed_over <home>: waits for the background hand-over to settle the claim on <home>
-  for _ in $(seq 1 50); do
+handed_over() { # handed_over <home> [tenths]: waits for the background hand-over to settle the claim on <home>
+  for _ in $(seq 1 "${2:-50}"); do
     if jq -e --arg home "$1" '.codexHome == $home' "$root_claim" >/dev/null; then return 0; fi
     sleep 0.1
   done
@@ -187,6 +187,20 @@ if kill -0 "$old_watch" 2>/dev/null; then exit 1; fi
 [ ! -e "$watcher" ]
 refused_claim codex_role "$script/claim.sh"
 codex_role env CODEX_HOME="$moved_home" "$script/claim.sh"
+# A hand-over that finds the repository lock held past its ten-second wait says so and tries again.
+jq --arg home "$CODEX_HOME" '.codexHome = $home' "$root_claim" > "$root_claim.tmp" && mv "$root_claim.tmp" "$root_claim"
+rm -f "${root_claim%.json}.handover.log"
+codex_role env ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" ANDERTON_HANDOVER_RETRY=1 FIXTURE_LOADED_DELAY=3 \
+  "$script/codex-anderton.sh" --move "$FIXTURE_THREAD"
+if command -v flock > /dev/null 2>&1; then
+  flock "$root_claim.lock.flock" sleep 13 &
+else
+  ( mkdir "$root_claim.lock" && echo $$ > "$root_claim.lock/pid" && sleep 13; rm -rf "$root_claim.lock" ) &
+fi
+lock_holder=$!
+handed_over "$moved_home" 300
+wait "$lock_holder" 2> /dev/null || true
+grep -q 'the repository lock is held; try 1 of 10' "${root_claim%.json}.handover.log"
 # A claim a hand-over never reached follows its thread to the home that last ran it when that session claims.
 jq --arg home "$CODEX_HOME" '.codexHome = $home' "$root_claim" > "$root_claim.tmp" && mv "$root_claim.tmp" "$root_claim"
 codex_role env CODEX_HOME="$moved_home" ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" "$script/claim.sh"
