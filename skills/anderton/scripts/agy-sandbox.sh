@@ -225,7 +225,7 @@ if [ "${1:-}" = --anderton-launch-file ]; then
   shift 2
 fi
 
-writable=()
+writable=() restored_links=()
 add_rw() { # add_rw <path> [<source>]: <path> writable, backed by <source> when one is given
   local path=$1 source=${2:-$1}
   [ -e "$source" ] || return 0
@@ -252,12 +252,17 @@ add_cache() {
       mkdir -p "$path"
     else
       case $top in "$HOME"/?*) ;; *) die "$top is not yours to write, so the worker's cache $path cannot be made." ;; esac
+      [ -r "$top" ] && [ -x "$top" ] ||
+        die "$top cannot be listed, so a tmpfs over it would hide what it holds; make it readable, or create $path."
       args+=(--tmpfs "$top")
-      if [ -r "$top" ] && [ -x "$top" ]; then
-        while IFS= read -r -d '' entry; do
-          if [ -L "$entry" ]; then args+=(--symlink "$(readlink "$entry")" "$entry"); else args+=(--ro-bind "$entry" "$entry"); fi
-        done < <(find "$top" -mindepth 1 -maxdepth 1 -print0)
-      fi
+      while IFS= read -r -d '' entry; do
+        if [ -L "$entry" ]; then
+          args+=(--symlink "$(readlink "$entry")" "$entry")
+          restored_links+=("$entry")
+        else
+          args+=(--ro-bind "$entry" "$entry")
+        fi
+      done < <(find "$top" -mindepth 1 -maxdepth 1 -print0)
       add_rw "$path" "$2"
       args+=(--remount-ro "$top")
       return 0
@@ -384,15 +389,21 @@ if [ -f "$conf" ]; then
     case $kind in rw) add_rw "$path" ;; esac
   done < "$conf"
 fi
+# A link add_cache bound back that resolves into a writable root would put a directory the worker writes where the host
+# has none, on PATH for ~/.bun/bin.
+for path in ${restored_links[@]+"${restored_links[@]}"}; do
+  ! inside_writable "$(readlink -m "$path")" || die "$path links into a directory agy can write; remove the link, or create $(readlink -m "$path")."
+done
 # Outside those parts, the repository's git directory must not be writable at all.
 ! inside_writable "$common" || die "$common, the repository's git directory, is inside a directory agy can write."
 
-# What the hook runs must stay as installed while agy runs: every directory above the hook, the guard and the bun is
+# What agy and its hook run must stay as installed while agy runs: the release, the hook, the guard, the bun and every
+# directory above each is
 # root's (the installing user's, for a test install), and none is writable by anyone else or inside a writable root.
 owner_ok() {
   case $(stat -c %u "$1") in 0) return 0 ;; "$(id -u)") [ -e "$base/etc/user-owned-test-install" ] ;; *) return 1 ;; esac
 }
-for path in "$base/libexec/agy-guard-hook" "$(pinned guard)/agy-guard.sh" "$base/hookbin/bun"; do
+for path in "$agy" "$base/libexec/agy-guard-hook" "$(pinned guard)/agy-guard.sh" "$base/hookbin/bun"; do
   [ -e "$path" ] || die "$path is missing; rerun install-agy.sh."
   check=$path
   while :; do

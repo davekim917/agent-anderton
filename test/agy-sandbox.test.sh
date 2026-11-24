@@ -330,16 +330,17 @@ for line in example-bun-tool "wrote bun-cache" "denied bun-home"; do
 done
 [ "$(ls -A "$home/.bun")" = bin ] || fail "the launcher or worker wrote under an unwritable ~/.bun: $(ls -A "$home/.bun")"
 ls "$home"/.cache/anderton-agy/*/bun/example-package >/dev/null 2>&1 || fail "the worker's bun cache under an unwritable ~/.bun is not its private one"
-# One whose entries cannot be listed (0711) would lose them under the tmpfs, so the launcher refuses it; so it does an
+# One whose entries cannot be listed (0111 here; 0711, root's) would lose them under the tmpfs, so the launcher refuses it; so it does an
 # entry that is a link into the private cache, which would put a directory the worker writes where the host has none.
 cache_refusal() { # cache_refusal <description> <expected text>
   if got=$(run true 2>&1); then fail "the launcher started with $1"; else
     case $got in *"$2"*) ;; *) fail "the launcher refused $1 for another reason: $got" ;; esac
   fi
 }
-chmod 0711 "$home/.bun"
+chmod 0111 "$home/.bun"
 cache_refusal "a ~/.bun it cannot list" "cannot be listed"
 chmod 0755 "$home/.bun"
+rm -rf "$home/.bun/install"
 ln -s install/cache/bin "$home/.bun/example-link"
 chmod 0555 "$home/.bun"
 cache_refusal "a ~/.bun entry that links into the private cache" "links into a directory agy can write"

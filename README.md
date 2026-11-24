@@ -205,6 +205,10 @@ cannot replace the guard registration.
    migration's `antigravity-cli/hooks.json` link to `config/hooks.json`; a link there to anything else is refused. When
    `~/.gemini/config/hooks.json` holds other hooks (anything but `{}` or nothing), it stops until you pass
    `--replace-hooks`.
+
+   **Known limit:** a process that saves a regular `antigravity-cli/hooks.json` after `register-agy` has checked the
+   migration link, and before it renames `{}` over that name, loses what it saved. This is accepted because
+   `register-agy` runs once, by hand, right after the login, when nothing else should write there.
 4. **Verify:** `cmp /opt/agy/etc/hooks.json ~/.gemini/config/hooks.json` succeeds, and `/opt/agy/bin/agy` started from a
    linked worktree opens agy instead of refusing with a reason.
 
@@ -237,7 +241,8 @@ pinned `bwrap`, with this view:
 - **Private:** `~/.cache`, `~/.npm`, `~/.bun/install/cache` and `~/.local/share/pnpm` are this worktree's own, kept under
   `~/.cache/anderton-agy/`, never the caches host tools run from. The launcher creates a missing one only inside a
   directory the worker user owns and can write; under one it cannot (a `~/.bun` root installed bun into), the sandbox
-  gets it in a read-only tmpfs over that directory, with the directory's own entries bound back read-only.
+  gets it in a read-only tmpfs over that directory, with the directory's own entries bound back read-only. It refuses
+  such a directory it cannot list, and one holding a link that resolves into a writable root.
 - **Read-only even inside those:** every hook and plugin location agy reads, and this worktree's `config.worktree`,
   `commondir` and `.git` pointer, which host git reads.
 - **Hidden:** credential stores (every entry of the home whose name starts with `.claude` or `.codex`, a backup or second
@@ -264,7 +269,8 @@ Before that it also refuses:
 - a `core.hooksPath`, `core.fsmonitor` or `filter.*.clean`/`smudge`/`process` command that resolves inside a writable
   root. A relative path counts as relative to the worktree, so a repository that sets `core.hooksPath` to a tracked
   directory (husky's `.husky`, a `.githooks`) cannot run agy workers;
-- a hook, guard or bun with any directory above it not owned by root, writable by others, or inside a writable root.
+- an agy release, hook, guard or bun with any directory above it not owned by root, writable by others, or inside a
+  writable root.
   The installer checks the prefix's directories the same way.
 
 Inside, it also checks that `hookbin/` holds only the pinned bun, byte for byte, read-only, at a release no older than

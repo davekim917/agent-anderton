@@ -96,7 +96,8 @@ if not migrated:
 state = subdirectory(gemini, "antigravity-cli", home + "/.gemini/antigravity-cli")
 
 # agy's migration leaves a link at antigravity-cli/hooks.json to config/hooks.json, which would make the guard
-# registration a second hook file there; any other link could point where someone else writes.
+# registration a second hook file there; any other link could point where someone else writes. Where the link resolves
+# decides, since its text can pass through other links.
 legacy_shown = home + "/.gemini/antigravity-cli/hooks.json"
 legacy_link = False
 try:
@@ -105,7 +106,7 @@ except FileNotFoundError:
     legacy = None
 if legacy is not None and stat.S_ISLNK(legacy.st_mode):
     target = os.readlink("hooks.json", dir_fd=state)
-    if os.path.normpath(os.path.join(home + "/.gemini/antigravity-cli", target)) != home + "/.gemini/config/hooks.json":
+    if os.path.realpath(home + "/.gemini/antigravity-cli/hooks.json") != home + "/.gemini/config/hooks.json":
         die(legacy_shown + " is a link to " + target + ", not agy's migration link to " + home
             + "/.gemini/config/hooks.json; review it and remove it, then rerun.")
     legacy_link = True
