@@ -31,18 +31,18 @@ chmod +x "$work/release/antigravity"
 tar -czf "$work/release.tar.gz" -C "$work/release" antigravity
 printf 'version=0.0.0-test\nurl=https://example.invalid/agy.tar.gz\nsha256=%s\n' \
   "$(sha256sum "$work/release.tar.gz" | cut -d' ' -f1)" > "$work/agy.pin"
-printf '#!/usr/bin/env bash\nWATCHDOG_SECONDS=3630\necho example guard\n' > "$work/guard/agy-guard.sh"
+printf '#!/usr/bin/env bash\necho example guard\n' > "$work/guard/agy-guard.sh"
 printf 'export {};\n' > "$work/guard/agy-guard.ts"
-printf 'export {};\n' > "$work/guard/guard-reply.ts"
+printf 'export const WATCHDOG_SECONDS = 3630;\n' > "$work/guard/agy-supervisor.ts"
 mkdir "$work/scope"
 home="$work/home"
 "$scripts/install-agy.sh" --user "$(id -un)" --home "$home" --guard "$work/guard" --scope-dir "$work/scope" \
   --prefix "$work/opt" --pin "$work/agy.pin" --tarball "$work/release.tar.gz" >/dev/null
 
-# The registration outlasts the wrapper's watchdog and names the files that tighten the guard, which the installed
+# The registration outlasts the supervisor's deadline and names the files that tighten the guard, which the installed
 # copy cannot find; the dev and lab scopes, which only exempt commands from approval, are set empty so none is read.
 hook=$(jq -r '.["agent-anderton-agy-guard"].PreToolUse[0].hooks[0]' "$home/.gemini/config/hooks.json")
-[ "$(jq '.timeout' <<<"$hook")" -gt 3630 ] || fail "the hook timeout does not outlast the guard's watchdog"
+[ "$(jq '.timeout' <<<"$hook")" -ge 3640 ] || fail "the hook timeout does not outlast the supervisor's deadline by 10 seconds"
 hook_words=" $(jq -r '.command' <<<"$hook") "
 for want in "BOOTSTRAP_MERGE_SCOPE_FILE=$work/scope/merge-scope.local.json" \
   "BOOTSTRAP_RESPONSE_SECRETS_FILE=$work/scope/response-secrets.local.json" BOOTSTRAP_DEV_SCOPE_FILE= BOOTSTRAP_LAB_SCOPE_FILE=; do
@@ -51,15 +51,31 @@ for want in "BOOTSTRAP_MERGE_SCOPE_FILE=$work/scope/merge-scope.local.json" \
     *) fail "the hook command does not set $want" ;;
   esac
 done
-[ -f "$(sed -n 's/^guard=//p' "$work/opt/agy/etc/pin")/guard-reply.ts" ] || fail "the installed guard has no guard-reply.ts"
+[ -f "$(sed -n 's/^guard=//p' "$work/opt/agy/etc/pin")/agy-supervisor.ts" ] || fail "the installed guard has no agy-supervisor.ts"
 
-# The install refuses a guard checkout without the reply check its wrapper runs.
+# The install refuses a guard checkout without the supervisor its wrapper execs, or whose deadline falls outside the
+# approval wait and the hook timeout.
+install_refusal() { # install_refusal <description> <guard dir> <expected text>
+  local got
+  if got=$("$scripts/install-agy.sh" --user "$(id -un)" --home "$home" --guard "$2" --scope-dir "$work/scope" \
+    --prefix "$work/other" --pin "$work/agy.pin" --tarball "$work/release.tar.gz" 2>&1); then
+    fail "install accepted $1"
+  else
+    case $got in *"$3"*) ;; *) fail "install refused $1 for another reason: $got" ;; esac
+  fi
+}
 cp -a "$work/guard" "$work/guard-incomplete"
-rm "$work/guard-incomplete/guard-reply.ts"
-if "$scripts/install-agy.sh" --user "$(id -un)" --home "$home" --guard "$work/guard-incomplete" --scope-dir "$work/scope" \
-  --prefix "$work/other" --pin "$work/agy.pin" --tarball "$work/release.tar.gz" >/dev/null 2>&1; then
-  fail "install accepted a guard without guard-reply.ts"
-fi
+rm "$work/guard-incomplete/agy-supervisor.ts"
+install_refusal "a guard without agy-supervisor.ts" "$work/guard-incomplete" "has no agy-supervisor.ts"
+for deadline in "" 3600 3651; do
+  if [ -n "$deadline" ]; then
+    printf 'export const WATCHDOG_SECONDS = %s;\n' "$deadline" > "$work/guard-incomplete/agy-supervisor.ts"
+    install_refusal "a supervisor deadline of $deadline seconds" "$work/guard-incomplete" "is not between"
+  else
+    printf 'export const OTHER = 1;\n' > "$work/guard-incomplete/agy-supervisor.ts"
+    install_refusal "a supervisor that sets no deadline" "$work/guard-incomplete" "sets no WATCHDOG_SECONDS"
+  fi
+done
 touch "$work/opt/agy/etc/user-owned-test-install"
 agy="$work/opt/agy/bin/agy"
 

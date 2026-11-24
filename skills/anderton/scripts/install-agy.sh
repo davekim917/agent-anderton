@@ -41,13 +41,16 @@ while [ $# -gt 0 ]; do
 done
 [ "$(uname -s)" = Linux ] || die "Linux only."
 [ -n "$user" ] && [ -n "$guard" ] || die "usage: install-agy.sh --user NAME --guard DIR [--home DIR] [--scope-dir DIR] [--prefix DIR] [--pin FILE] [--tarball FILE] [--replace-hooks]"
-for file in agy-guard.sh agy-guard.ts guard-reply.ts; do
+for file in agy-guard.sh agy-guard.ts agy-supervisor.ts; do
   [ -f "$guard/$file" ] || die "$guard has no $file."
 done
-# The hook must outlast the wrapper's watchdog, or agy cuts the wrapper off before it can deny.
-watchdog=$(sed -n 's/^WATCHDOG_SECONDS=\([0-9][0-9]*\)$/\1/p' "$guard/agy-guard.sh" | head -n 1)
-[ -n "$watchdog" ] || die "$guard/agy-guard.sh sets no WATCHDOG_SECONDS."
-hook_timeout=$((watchdog + 30))
+# agy cuts a hook off at this timeout, with no deny. The supervisor's deadline must fall after the guard's one-hour
+# approval wait and early enough before this timeout to print its own deny.
+hook_timeout=3660
+watchdog=$(sed -n 's/^export const WATCHDOG_SECONDS = \([0-9][0-9]*\);$/\1/p' "$guard/agy-supervisor.ts" | head -n 1)
+[ -n "$watchdog" ] || die "$guard/agy-supervisor.ts sets no WATCHDOG_SECONDS."
+[ "$watchdog" -gt 3600 ] && [ "$watchdog" -le $((hook_timeout - 10)) ] ||
+  die "the supervisor's deadline, $watchdog seconds, is not between the 3600-second approval wait and $((hook_timeout - 10)) (10 seconds under the hook timeout)."
 [ -n "$scope" ] || scope="$guard/../../.."
 [ -d "$scope" ] || die "no scope directory $scope."
 scope=$(cd "$scope" && pwd -P)
