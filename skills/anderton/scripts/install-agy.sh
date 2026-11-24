@@ -21,6 +21,8 @@
 # Linux only. Leaves AGY_CLI_DISABLE_AUTO_UPDATE to the launcher, and the install root-owned so agy cannot update it.
 set -euo pipefail
 
+# What this creates is root's alone, whatever umask it was started with.
+umask 022
 here=$(cd "$(dirname "$0")" && pwd -P)
 prefix=/opt user="" home="" guard="" scope="" bun=/usr/local/bin/bun bwrap="" nanoclaw="" pin="$here/agy.pin" tarball=""
 die() {
@@ -84,6 +86,7 @@ done
 # refuses a scope file inside one.
 for root in /tmp "$home/.gemini" "$home/.cache" "$home/.npm" "$home/.bun" "$home/.local/share/pnpm"; do
   case $scope/ in "$root"/*) die "the scope directory $scope is inside $root, which agy workers can write." ;; esac
+  case $prefix/ in "$root"/*) die "the prefix $prefix is inside $root, which agy workers can write." ;; esac
 done
 
 # A trusted executable is one whose file and every parent directory belong to root, or to the installing user when that
@@ -106,6 +109,17 @@ trusted_executable() {
   done
 }
 trusted_executable "$bun"
+# The same holds for every directory above the prefix: the hook, the guard and the bun installed under it must stay as
+# installed while agy runs, and the launcher checks it again, against the directories agy can write.
+dir=$prefix
+while :; do
+  case $(stat -c %u "$dir") in 0 | "$(id -u)") ;; *) die "$dir is not owned by root$([ "$(id -u)" = 0 ] || echo " or by you"), so what is installed under $prefix could be replaced." ;; esac
+  if [ $((0$(stat -c %a "$dir") & 022)) -ne 0 ] && [ ! -k "$dir" ]; then
+    die "$dir is writable by others, so what is installed under $prefix could be replaced."
+  fi
+  [ "$dir" = / ] && break
+  dir=$(dirname "$dir")
+done
 [ -n "$bwrap" ] || bwrap=$(command -v bwrap) || die "bwrap is not installed; pass --bwrap."
 bwrap=$(readlink -f "$bwrap")
 trusted_executable "$bwrap"
@@ -190,10 +204,11 @@ install -m 0644 "$work/hooks.json" "$root/etc/hooks.json"
 if [ -f "$root/etc/sandbox.conf" ]; then cp "$root/etc/sandbox.conf" "$work/sandbox.conf"; else
   {
     echo '# Paths agy workers do not see, besides the launcher'"'"'s built-in credential masks. One per line:'
-    echo '#   mask <path> (the rest of the line), rw <path> <reason>, gh-token-file <path>. "~" and globs expand.'
+    echo '#   mask <path> (the rest of the line, taken literally), rw <path> <reason>, gh-token-file <path>. A leading'
+    echo '#   "~/" is the home. ~/.codex and every ~/.codex-* are masked by the launcher itself.'
   } > "$work/sandbox.conf"
 fi
-for line in 'mask ~/.git-credentials' 'mask ~/.netrc' 'mask ~/.config/gh' 'mask ~/.claude' 'mask ~/.codex*' \
+for line in 'mask ~/.git-credentials' 'mask ~/.netrc' 'mask ~/.config/gh' 'mask ~/.claude' \
   ${nanoclaw:+"mask $nanoclaw/data"} ${nanoclaw:+"mask $nanoclaw/.env"}; do
   grep -qxF -- "$line" "$work/sandbox.conf" || echo "$line" >> "$work/sandbox.conf"
 done

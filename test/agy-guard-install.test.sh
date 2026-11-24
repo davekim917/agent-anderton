@@ -22,6 +22,10 @@ work=$(cd "$work" && pwd -P)
 bundir=$(mktemp -d /tmp/agy-guard-install-bun.XXXXXX)
 trap 'rm -rf "$work" "$bundir"' EXIT
 install -m 0755 "$(readlink -f "$(command -v bun)")" "$bundir/bun"
+# The prefix must sit where no one else can write any directory above it: a directory of this user's own home.
+prefixroot=$(mktemp -d "$HOME/.agy-guard-install-prefix.XXXXXX")
+chmod 0755 "$prefixroot"
+trap 'rm -rf "$work" "$bundir" "$prefixroot"' EXIT
 failures=0
 fail() {
   echo "FAIL: $1"
@@ -37,10 +41,10 @@ tar -czf "$work/release.tar.gz" -C "$work/release" antigravity
 printf 'version=0.0.0-test\nurl=https://example.invalid/agy.tar.gz\nsha256=%s\n' \
   "$(sha256sum "$work/release.tar.gz" | cut -d' ' -f1)" > "$work/agy.pin"
 "$scripts/install-agy.sh" --user "$(id -un)" --home "$home" --guard "$AGY_GUARD_CHECKOUT/plugins/workflow-agents/hooks" \
-  --scope-dir "$work/scope" --bun "$bundir/bun" --prefix "$work/opt" --pin "$work/agy.pin" --tarball "$work/release.tar.gz" >/dev/null
-HOME="$home" "$scripts/register-agy.sh" --prefix "$work/opt" >/dev/null
+  --scope-dir "$work/scope" --bun "$bundir/bun" --prefix "$prefixroot/opt" --pin "$work/agy.pin" --tarball "$work/release.tar.gz" >/dev/null
+HOME="$home" "$scripts/register-agy.sh" --prefix "$prefixroot/opt" >/dev/null
 
-installed=$(sed -n 's/^guard=//p' "$work/opt/agy/etc/pin")
+installed=$(sed -n 's/^guard=//p' "$prefixroot/opt/agy/etc/pin")
 for file in agy-guard.sh agy-guard.ts agy-supervisor.ts guard-policy.ts; do
   cmp -s "$AGY_GUARD_CHECKOUT/plugins/workflow-agents/hooks/$file" "$installed/$file" || fail "the installed $file differs from the checkout's"
 done

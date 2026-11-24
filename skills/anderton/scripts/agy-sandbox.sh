@@ -36,15 +36,20 @@ state="$gemini/antigravity-cli"
 # agy reads these from its state directory; a worker that could write one could add hooks, plugins or agents.
 customizations="agents agents.json plugins plugins.json rules rules.json skills skills.json workflows hooks.json secplugins"
 
-# Every path the view below binds read-only, in bind order, for the check inside too. Host git reads the repository's
-# config, config.worktree, hooks and info, and this worktree's config.worktree, commondir and .git pointer, so a worker
-# that could write one could have host git run a command of its choosing.
+# Every path the view below binds read-only inside a writable root, in bind order, for the check inside too. Host git
+# reads this worktree's config.worktree, commondir and .git pointer, so a worker that could write one could have host
+# git run a command of its choosing. The repository's own git directory is read-only as a whole, apart from the parts
+# commits and fetches write (common_writable).
 read_only_paths() {
-  local wt=$1 common=$2 gitdir=$3 entry
-  printf '%s\n' "$wt/.agents" "$common/hooks" "$common/config" "$common/config.worktree" "$common/info" \
-    "$gemini/config" "$gemini/hooks.json"
-  if [ "$gitdir" != "$common" ]; then printf '%s\n' "$gitdir/config.worktree" "$gitdir/commondir" "$wt/.git"; fi
+  local wt=$1 gitdir=$2 entry
+  printf '%s\n' "$wt/.agents" "$gemini/config" "$gemini/hooks.json" "$gitdir/config.worktree" "$gitdir/commondir" "$wt/.git"
   for entry in $customizations; do printf '%s\n' "$state/$entry"; done
+}
+
+# The parts of the repository's git directory a worker writes to commit, fetch and push: object and ref storage, which
+# git reads as data, never as configuration.
+common_writable() {
+  printf '%s\n' "$1/objects" "$1/refs" "$1/logs" "$1/packed-refs" "$1/FETCH_HEAD"
 }
 
 # The files the guard reads its merge and response-secret policy from. They sit outside every writable root, so the
@@ -56,7 +61,7 @@ scope_files() {
 }
 
 inside() {
-  local wt common gitdir path options
+  local wt common gitdir path options bun bun_version
   # The caller's PATH chose nothing so far; every tool below is named by its path.
   [ "$(/usr/bin/tr -d '\0' < /proc/1/comm 2>/dev/null)" = bwrap ] || die "--inside runs only as bwrap's child."
   case ,$(/usr/bin/findmnt -rn -o OPTIONS --mountpoint / | /usr/bin/head -n 1), in *,ro,*) ;; *) die "/ is not read-only here." ;; esac
@@ -69,6 +74,20 @@ inside() {
     die "$gemini/config/hooks.json is not the guard registration install-agy.sh wrote."
   [ "$(sha256 "$base/libexec/agy-guard-hook")" = "$(pinned hook_sha256)" ] ||
     die "$base/libexec/agy-guard-hook is not the hook install-agy.sh wrote."
+  # The guard wrapper runs "bun" from the hook's PATH, whose first directory must hold only the pinned copy, where the
+  # worker cannot replace it.
+  bun="$base/hookbin/bun"
+  [ "$(/usr/bin/ls -A "$base/hookbin" 2>/dev/null)" = bun ] || die "$base/hookbin does not hold the pinned bun alone."
+  [ "$(sha256 "$bun")" = "$(pinned bun_sha256)" ] || die "$bun is not the bun install-agy.sh pinned."
+  case ,$(/usr/bin/findmnt -rn -o OPTIONS -T "$bun" | /usr/bin/head -n 1), in
+    *,ro,*) ;;
+    *) die "the guard hook's bun ($bun) is writable inside the sandbox." ;;
+  esac
+  bun_version=$(/usr/bin/env -i "$bun" --version 2>/dev/null) || bun_version=""
+  if ! [[ $bun_version =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] ||
+    [ $(( 10#${BASH_REMATCH[1]} * 1000000 + 10#${BASH_REMATCH[2]} * 1000 + 10#${BASH_REMATCH[3]} )) -lt 1003003 ]; then
+    die "the guard hook's bun (${bun_version:-missing}) is not a release at or above 1.3.3, so it would deny every call."
+  fi
   for path in "$gemini/hooks.json" "$state/hooks.json"; do
     case $(/usr/bin/tr -d '[:space:]' < "$path") in '' | '{}') ;; *) die "$path defines hooks; only $gemini/config/hooks.json may." ;; esac
   done
@@ -78,8 +97,12 @@ inside() {
     options=$(/usr/bin/findmnt -rn -o OPTIONS --mountpoint "$path" 2>/dev/null | /usr/bin/head -n 1) || options=""
     case ,$options, in *,ro,*) ;; *) die "$path is not mounted read-only; refusing to start agy outside its sandbox." ;; esac
   done <<EOF
-$(read_only_paths "$wt" "$common" "$gitdir"; [ "$gitdir" = "$common" ] || echo "$common/worktrees")
+$(read_only_paths "$wt" "$gitdir")
 EOF
+  # The repository's git directory, and what host git reads from it, stay read-only here.
+  for path in "$common" "$common/config" "$common/config.worktree" "$common/hooks" "$common/info" "$common/worktrees"; do
+    [ ! -e "$path" ] || [ ! -w "$path" ] || die "$path is writable here; refusing to start agy outside its sandbox."
+  done
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     for check in "$path" "$(/usr/bin/dirname "$path")"; do
@@ -123,6 +146,9 @@ wt=$(cd "$wt" && pwd -P)
 [ "$(pwd -P)" = "$wt" ] || die "run it from the worktree's top level ($wt)."
 common=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
 gitdir=$(cd "$(git rev-parse --absolute-git-dir)" && pwd -P)
+# A linked worktree keeps its index and HEAD in a git directory of its own, which can stay writable while the
+# repository's stays read-only; the main checkout keeps them in the repository's.
+[ "$gitdir" != "$common" ] || die "run it from a linked worktree (git worktree add), not the repository's main checkout."
 [ -f "$gemini/config/hooks.json" ] || die "$gemini/config/hooks.json is missing; run register-agy.sh."
 
 args=(--ro-bind / / --dev /dev --proc /proc --unshare-pid --die-with-parent)
@@ -159,7 +185,13 @@ add_mask() {
 # Writable roots, each with the reason it is writable.
 add_rw /tmp                          # shared scratch; scripts/test-safe.sh-style host-wide locks live here
 add_rw "$wt"                         # the worker's own checkout
-add_rw "$common"                     # commits, refs and fetches of that checkout
+while IFS= read -r path; do          # commits, refs and fetches of that checkout
+  case $path in */packed-refs | */FETCH_HEAD) [ -e "$path" ] || : > "$path" ;; *) mkdir -p "$path" ;; esac
+  add_rw "$path"
+done <<EOF
+$(common_writable "$common")
+EOF
+add_rw "$gitdir"                     # this worktree's own HEAD, index and logs
 add_rw "$state"                      # agy's conversations, logs and caches
 # Tool caches are this worktree's own, never the host's: host tools run what they cache (pre-commit's hook
 # environments, packages pnpm hard-links into node_modules), so a shared cache would run worker code outside.
@@ -177,6 +209,55 @@ if [ -f "$conf" ]; then
     case $kind in rw) add_rw "$path" ;; esac
   done < "$conf"
 fi
+# Outside those parts, the repository's git directory must not be writable at all.
+! inside_writable "$common" || die "$common, the repository's git directory, is inside a directory agy can write."
+
+# What the hook runs must stay as installed while agy runs: every directory above the hook, the guard and the bun is
+# root's (the installing user's, for a test install), and none is writable by anyone else or inside a writable root.
+owner_ok() {
+  case $(stat -c %u "$1") in 0) return 0 ;; "$(id -u)") [ -e "$base/etc/user-owned-test-install" ] ;; *) return 1 ;; esac
+}
+for path in "$base/libexec/agy-guard-hook" "$(pinned guard)/agy-guard.sh" "$base/hookbin/bun"; do
+  [ -e "$path" ] || die "$path is missing; rerun install-agy.sh."
+  check=$path
+  while :; do
+    owner_ok "$check" || die "$check is not owned by root, so $path could be replaced while agy runs."
+    if [ $((0$(stat -c %a "$check") & 022)) -ne 0 ] && { [ "$check" = "$path" ] || [ ! -k "$check" ]; }; then
+      die "$check is writable by others, so $path could be replaced while agy runs."
+    fi
+    ! inside_writable "$check" || die "$check is inside a directory agy can write, so $path could be replaced while agy runs."
+    [ "$check" = / ] && break
+    check=$(dirname "$check")
+  done
+done
+
+# Git configuration may include other files; one inside a writable root would let the worker give host git a setting.
+# Every include from the system, global and repository configuration is followed, conditional ones too.
+include_targets() { # include_targets <config file> <depth>
+  local file=$1 depth=$2 value target
+  [ -f "$file" ] && [ "$depth" -lt 10 ] || return 0
+  while IFS= read -r value; do
+    [ -n "$value" ] || continue
+    case $value in
+      \~/*) target="$HOME/${value#\~/}" ;;
+      /*) target=$value ;;
+      *) target="$(dirname "$file")/$value" ;;
+    esac
+    printf '%s\n' "$target"
+    include_targets "$target" $((depth + 1))
+  done <<EOF
+$(git config --file "$file" --get-regexp '^include(if\..*)?\.path$' 2>/dev/null | cut -d' ' -f2-)
+EOF
+}
+while IFS= read -r path; do
+  [ -n "$path" ] || continue
+  for check in "$path" "$(readlink -f "$path")"; do
+    ! inside_writable "$check" || die "git configuration includes $path, which is inside a directory agy can write."
+  done
+done <<EOF
+$(for file in /etc/gitconfig "$HOME/.gitconfig" "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" "$common/config" \
+  "$common/config.worktree" "$gitdir/config.worktree"; do include_targets "$file" 0; done)
+EOF
 
 refuse_workspace_config
 # The guard's policy files, and their directory, may not sit where the worker can write them, nor be links that could.
@@ -190,19 +271,14 @@ done <<EOF
 $(scope_files)
 EOF
 
-# Hook and plugin config agy reads stays read-only, inside the writable roots too. The worktree's own git directory
-# stays writable, the repository's list of worktrees around it does not.
-mkdir -p "$wt/.agents" "$common/hooks" "$common/info"
-if [ "$gitdir" != "$common" ]; then
-  add_ro "$common/worktrees"
-  args+=(--bind "$gitdir" "$gitdir")
-fi
+# Hook and plugin config agy reads stays read-only, inside the writable roots too.
+mkdir -p "$wt/.agents"
 for path in "$gemini/hooks.json" "$state/hooks.json"; do
   [ -f "$path" ] || die "$path is missing; run install-agy.sh."
 done
 for entry in agents plugins rules skills workflows secplugins; do mkdir -p "$state/$entry"; done
 while IFS= read -r path; do add_ro "$path"; done <<EOF
-$(read_only_paths "$wt" "$common" "$gitdir")
+$(read_only_paths "$wt" "$gitdir")
 EOF
 # A second hard link to any protected file, made before launch inside a writable root, would write it past the bind.
 while IFS= read -r path; do
@@ -210,7 +286,8 @@ while IFS= read -r path; do
   alias=$(find "$path" -type f -links +1 -print -quit) || die "could not check $path for hard links."
   [ -z "$alias" ] || die "$alias has another hard link; remove it before starting agy."
 done <<EOF
-$(read_only_paths "$wt" "$common" "$gitdir"; scope_files; echo "$base/libexec/agy-guard-hook")
+$(read_only_paths "$wt" "$gitdir"; printf '%s\n' "$common/config" "$common/config.worktree" "$common/hooks" "$common/info"
+  scope_files; echo "$base/libexec/agy-guard-hook")
 EOF
 
 # Credential stores, and sockets of processes that would run a command outside the sandbox.
@@ -238,12 +315,7 @@ if [ -f "$conf" ]; then
   while read -r kind path; do
     path=${path/#\~/$HOME}
     case $kind in
-      mask)
-        # A glob such as ~/.codex* names every match; one that matches nothing hides nothing.
-        while IFS= read -r match; do [ -z "$match" ] || add_mask "$match"; done <<EOF
-$(compgen -G "$path" || true)
-EOF
-        ;;
+      mask) add_mask "$path" ;; # literal: brackets, "*" and "?" in a path are its own characters
       gh-token-file) token_file=$path ;;
     esac
   done < "$conf"

@@ -178,13 +178,15 @@ hook's replies, run both by a shell and as split words. CI runs it.
 pinned `bwrap`, with this view:
 
 - **Read-only:** the host.
-- **Writable:** the worktree, its repository's `.git`, agy's state directory and `/tmp`. The launcher gives each its
-  reason, and refuses any writable root that is the home or contains it.
+- **Writable:** the worktree; of its repository's git directory only `objects/`, `refs/`, `logs/`, `packed-refs`,
+  `FETCH_HEAD` and this worktree's own `worktrees/<name>/`; agy's state directory; and `/tmp`. The launcher gives each its
+  reason, and refuses any writable root that is the home or contains it. It runs only in a linked worktree, never the
+  repository's main checkout. With the repository's git directory read-only otherwise, a worker cannot add a worktree,
+  rewrite `packed-refs` in place (deleting a packed branch, `pack-refs`), or write submodule or LFS state.
 - **Private:** `~/.cache`, `~/.npm`, `~/.bun/install/cache` and `~/.local/share/pnpm` are this worktree's own, kept under
   `~/.cache/anderton-agy/`, never the caches host tools run from.
-- **Read-only even inside those:** every hook and plugin location agy reads, and what host git reads: the repository's
-  `config`, `config.worktree`, `hooks/`, `info/` and other worktrees, and this worktree's `config.worktree`,
-  `commondir` and `.git` pointer. So a worker cannot add a worktree of its own.
+- **Read-only even inside those:** every hook and plugin location agy reads, and this worktree's `config.worktree`,
+  `commondir` and `.git` pointer, which host git reads.
 - **Hidden:** credential stores (`~/.claude`, `~/.codex*`, `~/.config/gh`, `~/.ssh`, `~/.git-credentials`, `~/.netrc` and
   more) and the sockets of processes that would run a command for the worker.
 
@@ -196,10 +198,20 @@ Just before agy starts, it refuses to run unless all of these hold, checked insi
 - every protected path is mounted read-only;
 - the guard's policy files are not writable.
 
-Before that it also refuses a policy file inside a writable root, and a second hard link to any protected file.
+Before that it also refuses:
+- a policy file inside a writable root;
+- a second hard link to any protected file;
+- a git configuration include (plain or conditional, from the system, global or repository config, followed
+  recursively) of a file inside a writable root;
+- a hook, guard or bun with any directory above it not owned by root, writable by others, or inside a writable root.
+  The installer checks the prefix's directories the same way.
+
+Inside, it also checks that `hookbin/` holds only the pinned bun, byte for byte, read-only, at a release no older than
+1.3.3.
 
 `/opt/agy/etc/sandbox.conf` starts with masks for the credential stores and, with `--nanoclaw`, that install's `data/` and
-`.env`. Add lines, owned by root; `~` and shell globs expand:
+`.env`. Add lines, owned by root. A leading `~/` is the home; every other character, brackets and `*` and `?` included,
+is taken literally:
 
 - `rw <path> <reason>` makes a path writable;
 - `mask <path>` hides one;
