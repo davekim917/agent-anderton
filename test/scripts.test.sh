@@ -47,22 +47,73 @@ case "$1 $2" in
   "tab create")
     printf '%s\n' "$@" > "$FAKE_LOG.tab"
     if [ -n "${FAKE_HERDR_CREATE_FAIL:-}" ]; then echo '{"error":{"code":"workspace_not_found"}}'; exit 1; fi
-    label=""
+    label="" cwd=""
     while [ $# -gt 0 ]; do
       if [ "$1" = --label ]; then label=$2; fi
+      if [ "$1" = --cwd ]; then cwd=$2; fi
       shift
     done
     tab=${FAKE_HERDR_TAB:-w9:t5}
     echo "$sock $tab $label" >> "$FAKE_LOG.tabs-open"
+    printf '%s\n' "$cwd" > "$FAKE_LOG.tab-cwd"
     printf '{"id":"cli:tab:create","result":{"root_pane":{"pane_id":"w9:p5","tab_id":"%s"},"tab":{"tab_id":"%s"},"type":"tab_created"}}\n' "$tab" "$tab"
     ;;
   "agent start")
     printf '%s\n' "$@" > "$FAKE_LOG.start"
+    # The sandbox's own init ignores SIGTERM, so the fake ends it with SIGKILL wherever a pane closes or agy exits.
+    # agy through the launcher: in the tab's directory and in pane $7 (by HERDR_PANE_ID, which herdr sets), the real
+    # bwrap sandboxing a sleep, its pid in the launch file. With $FAKE_AGY_FOREIGN some other agy answers and writes
+    # nothing; $FAKE_AGY_KIND=script runs a shell script named bwrap instead, =same-ns a process whose child shares its
+    # mount namespace; $FAKE_AGY_PANE names another pane in its environment, and $FAKE_AGY_NOTE adds a variable.
+    # $FAKE_AGY_WRITE is a script run in the tab's directory first, for what the worker writes there. While the file
+    # $FAKE_AGY_UNSTARTED_ONCE is missing, the start makes it and fails as a launcher that set up no sandbox does.
+    if [ "$5" = agy ] && [ "${11:-}" = --anderton-launch-file ] && [ -z "${FAKE_AGY_FOREIGN:-}" ]; then
+      launch_file=${12} agy_pane=$7 agent_name=$3
+      if [ -n "${FAKE_AGY_UNSTARTED_ONCE:-}" ] && [ ! -e "$FAKE_AGY_UNSTARTED_ONCE" ]; then
+        : > "$FAKE_AGY_UNSTARTED_ONCE"
+        (set -C && echo unstarted > "$launch_file")
+        echo '{"error":{"code":"agent_exited"}}'
+        exit 1
+      fi
+      if [ -n "${FAKE_AGY_WRITE:-}" ]; then (cd "$(cat "$FAKE_LOG.tab-cwd")" && sh "$FAKE_AGY_WRITE"); fi
+      echo "$agy_pane" >> "$FAKE_LOG.sandboxes"
+      case ${FAKE_AGY_KIND:-sandbox} in
+        sandbox) set -- "$FAKE_BWRAP" --ro-bind / / --dev /dev --proc /proc --unshare-pid -- sleep 600 ;;
+        script) set -- "$FAKE_SCRIPT_BWRAP" ;;
+        same-ns) set -- python3 -c 'import subprocess, time; subprocess.Popen(["python3", "-c", "import time; time.sleep(600)"]); time.sleep(600)' ;;
+      esac
+      note=()
+      if [ -n "${FAKE_AGY_NOTE:-}" ]; then note=("AGY_NOTE=$FAKE_AGY_NOTE"); fi
+      (cd "$(cat "$FAKE_LOG.tab-cwd")" && exec env HERDR_PANE_ID="${FAKE_AGY_PANE:-$agy_pane}" HERDR_SOCKET_PATH="$sock" "${note[@]}" "$@") \
+        >/dev/null 2>&1 </dev/null &
+      (set -C && echo "$!" > "$launch_file")
+      echo "$!" > "$FAKE_LOG.agy-pid.$agy_pane"
+      sleep 0.3
+      set -- agent start "$agent_name"
+    fi
     if [ -n "${FAKE_HERDR_START_LIVE:-}" ]; then printf '[{"kind":"interactive","name":"%s","id":null}]\n' "$3" > "$FAKE_AGENTS"; fi
     if [ -n "${FAKE_HERDR_START_FAIL:-}" ]; then echo '{"error":{"code":"agent_not_ready"}}'; exit 1; fi
     ;;
-  "agent prompt") printf '%s' "$4" > "$FAKE_LOG.prompt"; printf '%s\n' "$3" > "$FAKE_LOG.prompt-target" ;;
+  "agent prompt") printf '%s' "$4" > "$FAKE_LOG.prompt"; printf '%s\n' "$3" > "$FAKE_LOG.prompt-target"; echo "$3" >> "$FAKE_LOG.prompts" ;;
   "agent list") cat "$FAKE_LOG.herdr-agents" 2>/dev/null || echo '{"result":{"agents":[]}}' ;;
+  "agent get")
+    # The agent in pane $3 of this server: a "<server socket> <json>" line in $FAKE_LOG.agent-get.<pane>, or agent_not_found.
+    # A <pane>.then file replaces that answer after this one, and a <pane>.kill file also ends the pane's agy, as if
+    # agy exited and something else took the pane between two reads.
+    get=$FAKE_LOG.agent-get.$3
+    awk -v s="$sock" '$1 == s { sub(/^[^ ]* /, ""); print; f = 1 } END { exit !f }' "$get" 2>/dev/null ||
+      { echo '{"error":{"code":"agent_not_found"}}'; exit 1; }
+    if [ -f "$get.then" ]; then
+      mv "$get.then" "$get"
+      if [ -f "$get.kill" ]; then
+        rm "$get.kill"
+        kill -STOP "$(cat "$FAKE_LOG.agy-pid.$3")" 2>/dev/null || true # so it starts no child once its children are gone
+        pkill -KILL -P "$(cat "$FAKE_LOG.agy-pid.$3")" 2>/dev/null || true
+        kill -KILL "$(cat "$FAKE_LOG.agy-pid.$3")" 2>/dev/null || true
+        sleep 0.3
+      fi
+    fi
+    ;;
   "agent read")
     if [ -n "${FAKE_SCREEN:-}" ]; then
       if [ -e "$FAKE_LOG.read-broken" ]; then exit 1; fi
@@ -82,6 +133,13 @@ case "$1 $2" in
     ;;
   "pane close")
     echo "pane $3" >> "$FAKE_LOG.closed"
+    if [ -n "${FAKE_HERDR_CLOSE_FAIL:-}" ]; then exit 1; fi
+    if [ -f "$FAKE_LOG.agy-pid.$3" ]; then
+      kill -STOP "$(cat "$FAKE_LOG.agy-pid.$3")" 2>/dev/null || true
+      pkill -KILL -P "$(cat "$FAKE_LOG.agy-pid.$3")" 2>/dev/null || true
+      kill -KILL "$(cat "$FAKE_LOG.agy-pid.$3")" 2>/dev/null || true
+      sleep 0.3
+    fi
     awk -v s="$sock" -v p="$3" '!($1 == s && $2 == p)' "$FAKE_LOG.herdr-panes" > "$FAKE_LOG.herdr-panes.tmp" 2>/dev/null || true
     mv "$FAKE_LOG.herdr-panes.tmp" "$FAKE_LOG.herdr-panes"
     ;;
@@ -3006,6 +3064,376 @@ check "and the format character in its start directory" [ "$(grep -A1 -x -- -c "
 check "while the worktree is made at the literal path" [ -d "$work/hash#{session_name}/wt-semi-worker" ]
 run env FAKE_TMUX_KILL_ENDS=1 "$scripts/retire.sh" semi-worker
 check "which retire.sh retires" [ "$status" -eq 0 ]
+
+# agy workers start only in herdr, through the launcher install-agy.sh put in place, and only with its guard
+# registration and a stored login. spawn.sh proves the sandbox before it sends the brief; status, screen, directions
+# and retirement go through the launcher process it proved and the agy instance it saw in the pane.
+agyroot="$work/agyroot"
+agyhome="$work/agyhome"
+mkdir -p "$agyroot/bin" "$agyroot/etc" "$agyhome/.gemini/config" "$agyhome/.gemini/antigravity-cli" "$work/fakebwrap"
+# The real launcher: spawn.sh only checks it is there, and retire.sh has it inspect a worktree inside its sandbox.
+cp "$scripts/agy-sandbox.sh" "$agyroot/bin/agy"
+chmod +x "$agyroot/bin/agy"
+# A shell script named bwrap, which the sandbox check must not take for the sandbox.
+printf '#!/bin/sh\nwhile :; do sleep 1; done\n' > "$work/fakebwrap/bwrap"
+chmod +x "$work/fakebwrap/bwrap"
+printf '{"example-guard":{}}' > "$agyhome/.gemini/config/hooks.json"
+# Resolved only where it is used: off Linux, readlink may have no -f.
+real_bwrap=""
+[ "$(uname -s)" != Linux ] || ! command -v bwrap >/dev/null 2>&1 || real_bwrap=$(readlink -f "$(command -v bwrap)")
+agy_env=("${herdr_env[@]}" "HOME=$agyhome" "ANDERTON_AGY_ROOT=$agyroot" FAKE_HERDR_TAB=w9:t40 "FAKE_BWRAP=$real_bwrap"
+  "FAKE_SCRIPT_BWRAP=$work/fakebwrap/bwrap")
+(cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project tabs >/dev/null)
+agy_spawn() { # agy_spawn <env...> -- <spawn args...>: as the lead session, with a one-line brief
+  local envs=()
+  while [ "$1" != -- ]; do envs+=("$1"); shift; done
+  shift
+  run env "${envs[@]}" "$scripts/spawn.sh" "$@" <<'BRIEF'
+Tidy the example module.
+BRIEF
+}
+agy_refused() { # agy_refused <description> <status> <text>
+  check "$1" eval "[ \"\$status\" -eq $2 ] && contains \"$3\" && [ ! -e \"$work/wt-agy-refused\" ] &&
+    [ ! -e \"$CLAUDE_CONFIG_DIR/anderton/workers/agy-refused.json\" ]"
+}
+agy_pin() { # agy_pin <bwrap>: the pin spawn.sh reads
+  printf 'version=0.0.0-test\nhooks_sha256=%s\nbwrap=%s\n' "$(sha256sum "$agyhome/.gemini/config/hooks.json" | cut -d' ' -f1)" "$1" \
+    > "$agyroot/etc/pin"
+}
+agy_agent() { # agy_agent <agent> [status] [cwd] [file suffix] [session]: what herdr's agent get shows in pane w9:p5
+  jq -nc --arg kind "$1" --arg status "${2:-idle}" --arg cwd "${3:-$work/wt-agy-worker}" --arg session "${5:-agy-session-1}" \
+    '{result: {agent: {agent: $kind, agent_status: $status, pane_id: "w9:p5", cwd: $cwd, name: "agy-worker",
+    agent_session: {agent: $kind, kind: "id", value: $session}}}}' | sed "s|^|$work/herdr.sock |" > "$FAKE_LOG.agent-get.w9:p5${4:-}"
+}
+if [ "$(uname -s)" != Linux ]; then
+  agy_spawn "${agy_env[@]}" -- --provider agy --effort high agy-refused
+  agy_refused "an agy worker is refused off Linux" 1 "Linux only"
+elif ! bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid true 2>/dev/null; then
+  echo "skip agy workers: bwrap with unprivileged user namespaces is not available here"
+else
+  agy_pin "$real_bwrap"
+  echo example-token > "$agyhome/.gemini/antigravity-cli/antigravity-oauth-token"
+
+  agy_spawn "${tmux_env[@]}" "HOME=$agyhome" "ANDERTON_AGY_ROOT=$agyroot" -- --provider agy --effort high agy-refused
+  agy_refused "an agy worker outside herdr is refused" 2 "only inside herdr"
+  agy_spawn "${agy_env[@]}" -- --provider agy --effort high --mode default agy-refused
+  agy_refused "an agy worker with a permission mode is refused" 2 "Omit --mode"
+  agy_spawn "${agy_env[@]}" -- --provider agy --effort max agy-refused
+  agy_refused "an agy worker at max effort is refused" 2 "stop at xhigh"
+  agy_spawn "${herdr_env[@]}" "HOME=$agyhome" "ANDERTON_AGY_ROOT=$work/no-agy" -- --provider agy --effort high agy-refused
+  agy_refused "an agy worker without an install is refused" 1 "not installed"
+  cp "$agyhome/.gemini/config/hooks.json" "$work/agy-hooks.saved"
+  printf '{}' > "$agyhome/.gemini/config/hooks.json"
+  agy_spawn "${agy_env[@]}" -- --provider agy --effort high agy-refused
+  agy_refused "an agy worker whose guard registration changed is refused" 1 "is not the guard registration"
+  cp "$work/agy-hooks.saved" "$agyhome/.gemini/config/hooks.json"
+  mv "$agyhome/.gemini/antigravity-cli/antigravity-oauth-token" "$work/agy-token.saved"
+  agy_spawn "${agy_env[@]}" -- --provider agy --effort high agy-refused
+  agy_refused "an agy worker without a stored login is refused" 1 "no stored login"
+  mv "$work/agy-token.saved" "$agyhome/.gemini/antigravity-cli/antigravity-oauth-token"
+
+  # retire.sh, worker.sh and waiting.sh find the launcher where spawn.sh did.
+  export ANDERTON_AGY_ROOT="$agyroot"
+  # The sandbox check: each case fails one of its three tests and passes the others, and gets no brief.
+  rm -f "$FAKE_LOG.prompt"
+  : > "$FAKE_LOG.closed"
+  agy_spawn "${agy_env[@]}" FAKE_AGY_FOREIGN=1 -- --provider agy --effort high agy-refused
+  check "an agy that did not start through the launcher gets no brief" eval '[ "$status" -eq 1 ] &&
+    contains "is not the sandbox launcher" && [ ! -e "$FAKE_LOG.prompt" ]'
+  check "and its pane is closed, the worktree and record removed" eval 'grep -qx "pane w9:p5" "$FAKE_LOG.closed" &&
+    [ ! -e "$work/wt-agy-refused" ] && [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/agy-refused.json" ]'
+  agy_spawn "${agy_env[@]}" FAKE_AGY_KIND=script -- --provider agy --effort high agy-refused
+  check "a shell script named bwrap, in the pane and the worktree, is not the sandbox" eval '[ "$status" -eq 1 ] &&
+    contains "is not the pinned bwrap" && [ ! -e "$FAKE_LOG.prompt" ]'
+  : > "$FAKE_LOG.sandboxes"
+  agy_spawn "${agy_env[@]}" FAKE_AGY_PANE=w9:p99 -- --provider agy --effort high agy-refused
+  check "the pinned bwrap started from another pane is not this worker's sandbox" eval '[ "$status" -eq 1 ] &&
+    contains "is not the pinned bwrap" && [ ! -e "$FAKE_LOG.prompt" ]'
+  check "and a start that ran something is not tried again" [ "$(wc -l < "$FAKE_LOG.sandboxes")" -eq 1 ]
+  agy_pin "$(readlink -f "$(command -v python3)")"
+  agy_spawn "${agy_env[@]}" FAKE_AGY_KIND=same-ns -- --provider agy --effort high agy-refused
+  check "the pinned executable with no child in a mount namespace of its own is not the sandbox" eval '[ "$status" -eq 1 ] &&
+    contains "is not the pinned bwrap" && [ ! -e "$FAKE_LOG.prompt" ]'
+  check "and its worktree is kept, since what is pinned as bwrap cannot sandbox git reading it" eval '
+    contains "Kept $work/wt-agy-refused" && [ -d "$work/wt-agy-refused" ]'
+  agy_pin "$real_bwrap"
+  run "$scripts/retire.sh" agy-refused
+  check "which retire.sh removes once the pinned bwrap can" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-refused" ]'
+  agy_spawn "${agy_env[@]}" FAKE_AGY_PANE=w9:p99 "FAKE_AGY_NOTE=$(printf 'a note\nHERDR_PANE_ID=w9:p5')" -- --provider agy --effort high agy-noted
+  check "a variable whose value holds a line HERDR_PANE_ID=<this pane> does not put another pane's sandbox in it" eval '[ "$status" -eq 1 ] &&
+    contains "is not the pinned bwrap" && [ ! -e "$FAKE_LOG.prompt" ]'
+  # herdr's agent session is what binds later directions to this agy; without one the brief is never sent.
+  printf '%s {"result":{"agent":{"agent":"agy","agent_status":"idle","pane_id":"w9:p5","cwd":"%s","agent_session":null}}}\n' \
+    "$work/herdr.sock" "$work/wt-agy-unbound" > "$FAKE_LOG.agent-get.w9:p5"
+  : > "$FAKE_LOG.closed"
+  agy_spawn "${agy_env[@]}" -- --provider agy --effort high agy-unbound
+  check "an agy with no herdr agent session gets no brief" eval '[ "$status" -eq 1 ] && contains "no agent session" &&
+    [ ! -e "$FAKE_LOG.prompt" ] && grep -qx "pane w9:p5" "$FAKE_LOG.closed" && [ ! -e "$work/wt-agy-unbound" ]'
+  # What a worker can write in its worktree: a .gitattributes naming as a clean filter the formatter the repository's
+  # config runs from the checkout, a staged file whose stat then changes, so git status runs the filter, and then
+  # the formatter itself, which leaves a mark outside the worktree. Only the read-only sandbox may run it.
+  git -C "$alpha" config filter.example-fmt.clean "sh ./fmt.sh"
+  cat > "$work/agy-writes.sh" <<WRITES
+printf '#!/bin/sh\\ncat\\n' > fmt.sh
+printf '*.txt filter=example-fmt\\n' > .gitattributes
+echo example > notes.txt
+git add fmt.sh .gitattributes notes.txt
+printf '#!/bin/sh\\ntouch "%s" 2>/dev/null\\ncat\\n' "$work/filter-ran" > fmt.sh
+touch -d 2001-01-01 notes.txt
+WRITES
+  agy_spawn "${agy_env[@]}" FAKE_AGY_PANE=w9:p99 "FAKE_AGY_WRITE=$work/agy-writes.sh" -- --provider agy --effort high agy-filtered
+  check "a failed agy spawn runs no clean filter its worktree names outside the sandbox" eval '[ "$status" -eq 1 ] &&
+    [ ! -e "$work/filter-ran" ] && contains "Kept $work/wt-agy-filtered"'
+  git -C "$work/wt-agy-filtered" reset -q && git -C "$work/wt-agy-filtered" clean -qfd
+  run "$scripts/retire.sh" agy-filtered
+  check "and retire.sh then removes its clean worktree" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-filtered" ] &&
+    [ ! -e "$work/filter-ran" ]'
+  rm -f "$work/filter-ran"
+
+  agy_agent agy
+  agy_spawn "${agy_env[@]}" -- --provider agy --effort xhigh --model gemini-example agy-worker
+  agy_record="$CLAUDE_CONFIG_DIR/anderton/workers/agy-worker.json"
+  agy_launch="$CLAUDE_CONFIG_DIR/anderton/workers/agy-worker.agy-launch"
+  check "spawn.sh starts an agy worker in herdr, in the pinned bwrap's sandbox" [ "$status" -eq 0 ]
+  check "with the launcher's directory first on its tab's PATH" grep -q -- "^PATH=$agyroot/bin:" "$FAKE_LOG.tab"
+  check "running herdr's agy kind in that tab's pane, naming the launch file, with the effort and model" \
+    [ "$(tr '\n' ' ' < "$FAKE_LOG.start")" = "agent start agy-worker --kind agy --pane w9:p5 --timeout 120000 -- --anderton-launch-file $agy_launch --effort xhigh --model gemini-example " ]
+  check "given the brief, with milestones in its replies" eval 'grep -qF "Tidy the example module." "$FAKE_LOG.prompt" &&
+    grep -qF "Put each milestone in your final reply" "$FAKE_LOG.prompt"'
+  check "recording it as an agy worker in that pane, with the launcher, the agy instance and its repository" \
+    [ "$(jq -r '"\(.provider) \(.pane) \(.agyPid) \(.agyInstance) \(.agyCommon)"' "$agy_record")" = "agy w9:p5 $(cat "$agy_launch") agy-session-1 $(cd "$(git -C "$(jq -r .root "$agy_record")" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)" ]
+  # The same worker as a Codex record, so the sweep's own selection is what keeps the agy one out.
+  jq -c '.name = "cx-control" | .provider = "codex"' "$agy_record" > "$CLAUDE_CONFIG_DIR/anderton/workers/cx-control.json"
+  run "$scripts/waiting.sh" --codex-workers
+  check "the Codex worker sweep reads its own workers but not the agy worker" eval '[ "$status" -eq 0 ] &&
+    contains "cx-control.json" && ! contains "agy-worker"'
+  rm "$CLAUDE_CONFIG_DIR/anderton/workers/cx-control.json"
+
+  echo "$work/herdr.sock w9:p5 agy" >> "$FAKE_LOG.herdr-panes"
+  agy_agent agy
+  run "$scripts/worker.sh" status agy-worker
+  check "worker.sh status reads the agy worker's launcher and pane" eval '[ "$status" -eq 0 ] &&
+    [ "$(jq -r "[.worker, .status] | join(\" \")" <<<"$out")" = "running idle" ]'
+  echo "RESULT: example finished" > "$work/agy-screen"
+  run env FAKE_SCREEN="$work/agy-screen" "$scripts/worker.sh" output agy-worker
+  check "worker.sh output reads its screen, labelled as one" eval '[ "$status" -eq 0 ] && contains "Screen read of herdr pane w9:p5" &&
+    contains "RESULT: example finished"'
+  rm -f "$FAKE_LOG.prompt" "$FAKE_LOG.prompt-target"
+  run "$scripts/worker.sh" message agy-worker "Rebase on main."
+  check "worker.sh message prompts its pane" eval '[ "$status" -eq 0 ] && [ "$(cat "$FAKE_LOG.prompt-target")" = w9:p5 ] &&
+    [ "$(cat "$FAKE_LOG.prompt")" = "Rebase on main." ]'
+  agy_agent claude
+  rm -f "$FAKE_LOG.prompt"
+  run "$scripts/worker.sh" message agy-worker "Rebase on main."
+  check "but not once the pane runs something else" eval '[ "$status" -eq 1 ] && [ ! -e "$FAKE_LOG.prompt" ]'
+  # Another agy in the same pane and worktree, while the verified launcher still runs, is not the worker either.
+  agy_agent agy idle "$work/wt-agy-worker" "" agy-session-2
+  run "$scripts/worker.sh" message agy-worker "Rebase on main."
+  check "nor while it shows another agy instance" eval '[ "$status" -eq 1 ] && [ ! -e "$FAKE_LOG.prompt" ]'
+  # A record that saved no instance binds to none: neither script acts on whatever agy the pane shows.
+  agy_agent agy
+  jq -c '.agyInstance = ""' "$agy_record" > "$agy_record.tmp" && mv "$agy_record.tmp" "$agy_record"
+  run "$scripts/worker.sh" message agy-worker "Rebase on main."
+  check "nor for a record that saved no agy instance" eval '[ "$status" -eq 1 ] && [ ! -e "$FAKE_LOG.prompt" ]'
+  : > "$FAKE_LOG.closed"
+  run "$scripts/retire.sh" agy-worker
+  check "and retire.sh leaves that pane and worktree alone" eval '[ "$status" -eq 1 ] && ! grep -qx "pane w9:p5" "$FAKE_LOG.closed" &&
+    [ -d "$work/wt-agy-worker" ]'
+  jq -c '.agyInstance = "agy-session-1"' "$agy_record" > "$agy_record.tmp" && mv "$agy_record.tmp" "$agy_record"
+  agy_agent agy idle "$work/wt-agy-worker" "" agy-session-2
+  : > "$FAKE_LOG.closed"
+  run "$scripts/retire.sh" agy-worker
+  check "and retire.sh leaves that instance's pane open" eval '[ "$status" -eq 1 ] && ! grep -qx "pane w9:p5" "$FAKE_LOG.closed"'
+  : > "$FAKE_LOG.closed"
+  run "$scripts/retire.sh" agy-worker
+  check "retire.sh keeps an agy worker whose launcher runs but not in its pane" eval '[ "$status" -eq 1 ] &&
+    [ -d "$work/wt-agy-worker" ] && ! grep -qx "pane w9:p5" "$FAKE_LOG.closed"'
+  agy_agent agy working
+  run "$scripts/retire.sh" agy-worker
+  check "or that herdr reports working" eval '[ "$status" -eq 1 ] && contains "not idle" && [ -d "$work/wt-agy-worker" ]'
+
+  # Host git reads the worktree the worker wrote with none of the repository's helpers, and only while its .git still
+  # points into the repository it started from.
+  agy_root_repo=$(jq -r .root "$agy_record")
+  printf '#!/bin/sh\ntouch "%s"\n' "$work/fsmonitor-ran" > "$work/fsmonitor.sh"
+  chmod +x "$work/fsmonitor.sh"
+  git init -q "$work/elsewhere-repo"
+  git -C "$work/elsewhere-repo" config core.fsmonitor "$work/fsmonitor.sh"
+  cp "$work/wt-agy-worker/.git" "$work/agy-pointer.saved"
+  printf 'gitdir: %s\n' "$work/elsewhere-repo/.git" > "$work/wt-agy-worker/.git"
+  agy_agent agy
+  run "$scripts/retire.sh" agy-worker
+  check "retire.sh refuses an agy worktree whose .git points elsewhere, running nothing there" eval '[ "$status" -eq 1 ] &&
+    contains "no longer points into the repository" && [ ! -e "$work/fsmonitor-ran" ] && [ -d "$work/wt-agy-worker" ]'
+  cp "$work/agy-pointer.saved" "$work/wt-agy-worker/.git"
+  git -C "$agy_root_repo" config extensions.worktreeConfig true
+  git -C "$work/wt-agy-worker" config --worktree core.fsmonitor "$work/fsmonitor.sh"
+  git -C "$work/wt-agy-worker" config --worktree core.hooksPath "$work/hooks-elsewhere"
+  : > "$FAKE_LOG.closed"
+  run "$scripts/retire.sh" agy-worker
+  check "and retires it by closing its pane once idle, after its launcher exits" eval '[ "$status" -eq 0 ] &&
+    grep -qx "pane w9:p5" "$FAKE_LOG.closed"'
+  check "running no fsmonitor the worktree's config names" [ ! -e "$work/fsmonitor-ran" ]
+  check "removing its worktree, record and launch file" eval '[ ! -e "$work/wt-agy-worker" ] && [ ! -e "$agy_record" ] &&
+    [ ! -e "$agy_launch" ]'
+  git -C "$agy_root_repo" config --unset extensions.worktreeConfig
+
+  # The same writes in a running worker's worktree: retiring it reads them only in the sandbox.
+  agy_agent agy
+  agy_spawn "${agy_env[@]}" "FAKE_AGY_WRITE=$work/agy-writes.sh" -- --provider agy --effort high agy-worker
+  check "an agy worker starts, and writes a formatter its repository runs as a clean filter" [ "$status" -eq 0 ]
+  run "$scripts/retire.sh" agy-worker
+  check "retire.sh keeps that worktree's staged work, running no clean filter outside the sandbox" eval '[ "$status" -eq 3 ] &&
+    contains "uncommitted changes" && [ ! -e "$work/filter-ran" ] && [ -d "$work/wt-agy-worker" ]'
+  git -C "$work/wt-agy-worker" reset -q && git -C "$work/wt-agy-worker" clean -qfd
+  rm -f "$FAKE_LOG.agent-get.w9:p5"
+  run "$scripts/retire.sh" agy-worker
+  check "and retires it once that work is gone" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-worker" ] && [ ! -e "$work/filter-ran" ]'
+  # Clean but for the formatter, which the repository ignores: the sandbox's status runs the filter and finds nothing to
+  # keep, and the removal that follows reads nothing in the worktree, so the filter never runs on the host.
+  printf '#!/bin/sh\ncat\n' > "$alpha/fmt.sh"
+  printf 'fmt.sh\n' > "$alpha/.gitignore"
+  printf '*.txt filter=example-fmt\n' > "$alpha/.gitattributes"
+  echo example > "$alpha/notes.txt"
+  git -C "$alpha" add .gitignore .gitattributes notes.txt
+  git -C "$alpha" -c user.name=t -c user.email=t@example.invalid commit -q -m "an example formatter, run as a clean filter"
+  printf 'printf '"'"'#!/bin/sh\\ntouch "%%s" 2>/dev/null\\ncat\\n'"'"' "%s" > fmt.sh\ntouch -d 2001-01-01 notes.txt\n' "$work/filter-ran" \
+    > "$work/agy-writes-clean.sh"
+  agy_agent agy
+  agy_spawn "${agy_env[@]}" "FAKE_AGY_WRITE=$work/agy-writes-clean.sh" -- --provider agy --effort high agy-worker
+  run "$scripts/retire.sh" agy-worker
+  check "retire.sh removes a worktree the sandbox finds clean, running its clean filter nowhere outside it" eval '
+    [ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-worker" ] && [ ! -e "$work/filter-ran" ]'
+
+  # A pane whose agy exits and that something else takes between two reads: nothing acts on what took it.
+  agy_agent agy
+  agy_spawn "${agy_env[@]}" -- --provider agy --effort high agy-worker
+  check "a second agy worker starts" [ "$status" -eq 0 ]
+  agy_agent claude idle "$work/wt-agy-worker" .then
+  touch "$FAKE_LOG.agent-get.w9:p5.kill"
+  rm -f "$FAKE_LOG.prompt"
+  run "$scripts/worker.sh" message agy-worker "Rebase on main."
+  check "worker.sh message sends nothing when agy exits after the pane read" eval '[ "$status" -eq 1 ] && [ ! -e "$FAKE_LOG.prompt" ]'
+  run "$scripts/retire.sh" agy-worker
+  check "retire.sh keeps the worktree while the pane's new agent works in it" eval '[ "$status" -eq 1 ] &&
+    contains "now runs claude" && [ -d "$work/wt-agy-worker" ]'
+  agy_agent claude idle /
+  run "$scripts/retire.sh" agy-worker
+  check "and retires the stopped worker once nothing in the pane is in its worktree" eval '[ "$status" -eq 0 ] &&
+    [ ! -e "$work/wt-agy-worker" ] && [ ! -e "$agy_record" ]'
+  : > "$FAKE_LOG.closed"
+  agy_agent agy
+  agy_spawn "${agy_env[@]}" -- --provider agy --effort high agy-worker
+  agy_agent claude idle "$work/wt-agy-worker" .then
+  touch "$FAKE_LOG.agent-get.w9:p5.kill"
+  run "$scripts/retire.sh" agy-worker
+  check "retire.sh does not close a pane whose agy exited after the pane read" eval '[ "$status" -eq 1 ] &&
+    ! grep -qx "pane w9:p5" "$FAKE_LOG.closed" && [ -d "$work/wt-agy-worker" ]'
+  agy_agent claude idle /
+  run "$scripts/retire.sh" agy-worker
+  check "and retires it once that pane is no longer in its worktree" [ "$status" -eq 0 ]
+
+  # The pane's agy exits and leaves a plain shell in the worktree, which herdr does not report as an agent.
+  agy_agent agy
+  agy_spawn "${agy_env[@]}" -- --provider agy --effort high agy-worker
+  (cd "$work/wt-agy-worker" && exec sleep 600) </dev/null >/dev/null 2>&1 &
+  agy_shell=$!
+  kill -STOP "$(cat "$agy_launch")" 2>/dev/null || true
+  pkill -KILL -P "$(cat "$agy_launch")" 2>/dev/null || true
+  kill -KILL "$(cat "$agy_launch")" 2>/dev/null || true
+  sleep 0.3
+  rm -f "$FAKE_LOG.agent-get.w9:p5"
+  run "$scripts/retire.sh" agy-worker
+  check "retire.sh keeps a stopped worker's worktree while a plain shell herdr shows no agent for sits in it" eval '[ "$status" -eq 1 ] &&
+    [ -d "$work/wt-agy-worker" ] && [ -f "$agy_record" ]'
+  kill "$agy_shell" 2>/dev/null || true
+  wait "$agy_shell" 2>/dev/null || true
+  run "$scripts/retire.sh" agy-worker
+  check "and retires it once nothing has its directory there" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-worker" ]'
+
+  # A launch that set up no sandbox started nothing, so spawn.sh starts agy in the pane again, up to two more times:
+  # the brief goes out once, to the one agy that started.
+  : > "$FAKE_LOG.sandboxes"
+  : > "$FAKE_LOG.prompts"
+  agy_agent agy idle "$work/wt-agy-retried"
+  agy_spawn "${agy_env[@]}" "FAKE_AGY_UNSTARTED_ONCE=$work/agy-unstarted-once" -- --provider agy --effort high agy-retried
+  check "spawn.sh starts agy again after a launch that set up no sandbox" eval '[ "$status" -eq 0 ] &&
+    [ -e "$work/agy-unstarted-once" ]'
+  check "sending the brief once, to the one agy that started" eval '[ "$(wc -l < "$FAKE_LOG.prompts")" -eq 1 ] &&
+    [ "$(wc -l < "$FAKE_LOG.sandboxes")" -eq 1 ]'
+  # An inspection that answers nothing at all is not a clean worktree.
+  mv "$agyroot/bin/agy" "$agyroot/bin/agy.real"
+  printf '#!/bin/sh\nexit 0\n' > "$agyroot/bin/agy"
+  chmod +x "$agyroot/bin/agy"
+  run "$scripts/retire.sh" agy-retried
+  check "retire.sh keeps a worktree whose inspection exits 0 with no answer" eval '[ "$status" -eq 3 ] &&
+    contains "could not read its status" && [ -d "$work/wt-agy-retried" ]'
+  mv "$agyroot/bin/agy.real" "$agyroot/bin/agy"
+  rm -f "$FAKE_LOG.agent-get.w9:p5"
+  run "$scripts/retire.sh" agy-retried
+  check "which retires" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-retried" ]'
+
+  # The sandbox proof says what started; the brief goes only to a pane herdr reports agy in.
+  : > "$FAKE_LOG.closed"
+  rm -f "$FAKE_LOG.prompt"
+  agy_agent claude idle "$work/wt-agy-kind" "" claude-session-1
+  agy_spawn "${agy_env[@]}" -- --provider agy --effort high agy-kind
+  check "spawn.sh sends no brief when herdr reports another agent in the pane" eval '[ "$status" -eq 1 ] &&
+    contains "not agy" && [ ! -e "$FAKE_LOG.prompt" ] && grep -qx "pane w9:p5" "$FAKE_LOG.closed" &&
+    [ ! -e "$work/wt-agy-kind" ]'
+
+  # waiting.sh reads an agy worktree's refs only inside the sandbox: a git first on PATH that logs where it runs is never
+  # run in or on the worktree, and the ready list still finds the worker's landed commit.
+  agy_agent agy idle "$work/wt-agy-landed"
+  agy_spawn "${agy_env[@]}" -- --provider agy --effort high agy-landed
+  check "an agy worker starts, to land a commit" [ "$status" -eq 0 ]
+  git -C "$alpha" config --unset filter.example-fmt.clean
+  git init -q --bare "$work/alpha-origin.git"
+  git -C "$alpha" remote add origin "$work/alpha-origin.git"
+  git -C "$work/wt-agy-landed" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "example change"
+  git -C "$work/wt-agy-landed" push -q origin HEAD:refs/heads/main 2>/dev/null
+  git -C "$alpha" fetch -q origin
+  mkdir -p "$work/logging-git"
+  printf '#!/bin/sh\nprintf "%%s %%s\\n" "$PWD" "$*" >> "%s"\nexec %s "$@"\n' "$work/host-git.log" "$(command -v git)" \
+    > "$work/logging-git/git"
+  chmod +x "$work/logging-git/git"
+  run env PATH="$work/logging-git:$PATH" "$scripts/waiting.sh"
+  check "waiting.sh lists the agy worker's landed commit" contains "- agy-landed: branch merged into origin/main"
+  check "running host git neither in nor on its worktree" eval '[ -s "$work/host-git.log" ] &&
+    ! grep -qF "$work/wt-agy-landed" "$work/host-git.log"'
+  # A launcher start that sets up no sandbox once (75), as when a socket it listed to mask closes before bwrap mounts it.
+  mv "$agyroot/bin/agy" "$agyroot/bin/agy.real"
+  printf '#!/bin/sh\nif [ ! -e "%s" ]; then : > "%s"; exit 75; fi\nexec "%s" "$@"\n' "$work/agy-failed-once" "$work/agy-failed-once" \
+    "$agyroot/bin/agy.real" > "$agyroot/bin/agy"
+  chmod +x "$agyroot/bin/agy"
+  run "$scripts/retire.sh" agy-landed
+  check "and retire.sh retires it, trying again a sandbox start that set up nothing" eval '[ "$status" -eq 0 ] &&
+    [ ! -e "$work/wt-agy-landed" ] && [ -e "$work/agy-failed-once" ]'
+  mv "$agyroot/bin/agy.real" "$agyroot/bin/agy"
+  git -C "$alpha" remote remove origin
+
+  # A start that timed out, whose pane would not close: the record has no launcher. Once the pane is gone it retires.
+  awk '$2 != "w9:p5"' "$FAKE_LOG.herdr-panes" > "$FAKE_LOG.herdr-panes.tmp"
+  mv "$FAKE_LOG.herdr-panes.tmp" "$FAKE_LOG.herdr-panes"
+  echo "$work/herdr.sock w9:p5 agy" >> "$FAKE_LOG.herdr-panes"
+  rm -f "$FAKE_LOG.agent-get.w9:p5"
+  agy_spawn "${agy_env[@]}" FAKE_AGY_FOREIGN=1 FAKE_HERDR_CLOSE_FAIL=1 -- --provider agy --effort high agy-worker
+  check "a launch whose pane would not close keeps a record with no launcher" eval '[ "$status" -eq 1 ] &&
+    [ -f "$agy_record" ] && [ "$(jq -r ".agyPid // \"none\"" "$agy_record")" = none ]'
+  run "$scripts/retire.sh" agy-worker
+  check "retire.sh keeps it while its pane is there" eval '[ "$status" -eq 1 ] && [ -f "$agy_record" ]'
+  awk '$2 != "w9:p5"' "$FAKE_LOG.herdr-panes" > "$FAKE_LOG.herdr-panes.tmp"
+  mv "$FAKE_LOG.herdr-panes.tmp" "$FAKE_LOG.herdr-panes"
+  run "$scripts/retire.sh" agy-worker
+  check "and retires it once the pane is gone" eval '[ "$status" -eq 0 ] && [ ! -e "$agy_record" ] && [ ! -e "$work/wt-agy-worker" ]'
+  rm -f "$FAKE_LOG.agent-get.w9:p5"
+  for leftover in "$FAKE_LOG".agy-pid.*; do
+    [ -f "$leftover" ] || continue
+    kill -STOP "$(cat "$leftover")" 2>/dev/null || true
+    pkill -KILL -P "$(cat "$leftover")" 2>/dev/null || true
+    kill -KILL "$(cat "$leftover")" 2>/dev/null || true
+  done
+fi
 
 [ "$failures" -eq 0 ] || { echo "$failures check(s) failed"; exit 1; }
 echo "all checks passed"

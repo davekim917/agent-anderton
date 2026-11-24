@@ -65,6 +65,8 @@ install_root "$prefixroot/opt" >/dev/null || fail "the root stage failed with th
 chmod 0755 "$home"
 [ -z "$(ls -A "$home")" ] || fail "the root stage wrote in the home: $(ls -A "$home")"
 HOME="$home" "$scripts/register-agy.sh" --prefix "$prefixroot/opt" >/dev/null
+# The owner's login leaves this file; the launcher refuses to start agy without it.
+echo example-token > "$home/.gemini/antigravity-cli/antigravity-oauth-token"
 
 # The registration outlasts the supervisor's deadline and runs a hook that names the files that tighten the guard, which
 # the installed copy cannot find; the dev and lab scopes, which only exempt commands from approval, are set empty so
@@ -175,6 +177,10 @@ mkdir -p "$work/glob*dir?" "$work/globXdirY"
 echo canary-value > "$work/glob*dir?/canary"
 echo canary-value > "$work/globXdirY/canary"
 echo "mask $work/glob*dir?" >> "$prefixroot/opt/agy/etc/sandbox.conf"
+# A GitHub token file reaches the worker only as GH_TOKEN; the file itself is hidden, with no mask line for it.
+mkdir -p "$work/tokens"
+echo example-token > "$work/tokens/github.token"
+echo "gh-token-file $work/tokens/github.token" >> "$prefixroot/opt/agy/etc/sandbox.conf"
 
 # Descriptor 9, a directory opened outside, stands in for one a launching shell leaks into the sandbox.
 run() {
@@ -204,6 +210,8 @@ w read-codex-glob       "grep -q canary-value \"$HOME\"/.codex-example/canary"
 w read-codex-backup     "grep -q canary-value \"$HOME\"/.codex.backup/auth.json"
 w read-claude-prefix    "grep -q canary-value \"$HOME\"/.claude-example/canary"
 w read-claude-json      "grep -q canary-value \"$HOME\"/.claude.json"
+w read-token-file       "grep -q example-token '"$work"'/tokens/github.token"
+w token-in-env          "[ \"\$GH_TOKEN\" = example-token ]"
 w read-git-credentials  "grep -q canary-value \"$HOME\"/.git-credentials"
 w read-netrc            "grep -q canary-value \"$HOME\"/.netrc"
 w read-nanoclaw-data    "grep -q canary-value '"$work"'/NanoClaw\ \[dev\]/data/canary"
@@ -229,18 +237,82 @@ w tmp-file              "echo x > /tmp/agy-sandbox-example-$$"
 out=$(run "$attempts" 2>&1) || fail "the launcher did not start: $out"
 for denied in worktree-agents worktree-agents-mv global-hooks gemini-hooks state-hooks state-plugins state-agents-json \
   gemini-moved git-hooks git-config home-rc python-write unshare-umount inherited-fd read-claude-canary read-codex-glob \
-  read-codex-backup read-claude-prefix read-claude-json \
+  read-codex-backup read-claude-prefix read-claude-json read-token-file \
   read-git-credentials read-netrc read-nanoclaw-data read-nanoclaw-env git-config-worktree git-info own-config-worktree \
   own-commondir git-pointer other-worktree git-config-local git-config-cond git-common-new read-glob-literal; do
   printf '%s\n' "$out" | grep -qx "denied $denied" || fail "$denied was not denied: $(printf '%s\n' "$out" | grep " $denied\$")"
 done
-for wrote in worktree-file python-control git-commit state-file cache-file tmp-file host-cache read-glob-sibling; do
+for wrote in worktree-file python-control git-commit state-file cache-file tmp-file host-cache read-glob-sibling token-in-env; do
   printf '%s\n' "$out" | grep -qx "wrote $wrote" || fail "$wrote should be writable: $(printf '%s\n' "$out" | grep " $wrote\$")"
 done
 # The worker's cache is its own: what it writes there never reaches the cache host tools read and run from.
 [ ! -e "$home/.cache/example" ] && [ ! -e "$home/.cache/pre-commit-example" ] ||
   fail "a write to the worker's ~/.cache reached the host's"
 ls "$home"/.cache/anderton-agy/*/cache/pre-commit-example >/dev/null 2>&1 || fail "the worker's private cache kept nothing"
+
+# The pid the launcher writes to the file spawn.sh names is its bwrap, with the sandbox in a child of it, started from
+# the pane herdr placed it in: what spawn.sh proves before it sends a brief.
+launch="$work/launch.pid"
+# shellcheck disable=SC2016 # expanded by the inner bash
+(cd "$work/wt-example" && env -i HOME="$home" PATH=/usr/bin:/bin HERDR_PANE_ID=w9:p5 HERDR_SOCKET_PATH="$work/herdr.sock" \
+  bash -c '"$0" --anderton-launch-file "$1" "sleep 30"; true' "$agy" "$launch") >/dev/null 2>&1 &
+launcher=$!
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [ -s "$launch" ] && [ -n "$(cat "/proc/$(cat "$launch")/task/"*/children 2>/dev/null)" ] && break
+  sleep 0.25
+done
+pinned_bwrap=$(sed -n 's/^bwrap=//p' "$prefixroot/opt/agy/etc/pin")
+# shellcheck disable=SC1091 # the script under test, sourced at run time
+proven() { (. "$scripts/session-lib.sh" && agy_sandbox_proven "$(cat "$launch")" "$pinned_bwrap" "$1" "$work/herdr.sock"); }
+proven w9:p5 || fail "the launcher's recorded pid is not proven to be its sandbox in its pane"
+if proven w9:p6; then fail "the launcher's sandbox was proven for a pane it did not start in"; fi
+kill "$launcher" 2>/dev/null || true
+wait "$launcher" 2>/dev/null || true
+# A start whose view cannot be set up (a pinned bwrap that fails once, as one does when a socket it masks closes as it
+# starts) ends with 75 and "unstarted" in the launch file, having run nothing; the next start runs.
+printf '#!/bin/sh\nif [ ! -e "%s" ]; then : > "%s"; exit 1; fi\nexec "%s" "$@"\n' "$work/bwrap-failed" "$work/bwrap-failed" \
+  "$pinned_bwrap" > "$work/bwrap-once"
+chmod 0755 "$work/bwrap-once"
+cp "$prefixroot/opt/agy/etc/pin" "$work/pin.saved"
+sed -i "s|^bwrap=.*|bwrap=$work/bwrap-once|" "$prefixroot/opt/agy/etc/pin"
+start_once() { # start_once <launch file>: the launcher, from the worktree, running a command that leaves a mark there
+  (cd "$work/wt-example" && env -i HOME="$home" PATH=/usr/bin:/bin "$agy" --anderton-launch-file "$1" "echo ran > agy-ran")
+}
+status=0
+start_once "$work/launch-once.pid" >/dev/null 2>&1 || status=$?
+[ "$status" -eq 75 ] && [ "$(cat "$work/launch-once.pid")" = unstarted ] && [ ! -e "$work/wt-example/agy-ran" ] ||
+  fail "a start whose sandbox could not be set up did not end with 75 and 'unstarted', having run nothing (status $status)"
+rm -f "$work/launch-once.pid"
+start_once "$work/launch-once.pid" >/dev/null 2>&1 || fail "the start after one that set up no sandbox did not run"
+[ -e "$work/wt-example/agy-ran" ] || fail "the start after one that set up no sandbox ran nothing"
+rm -f "$work/launch-once.pid" "$work/wt-example/agy-ran"
+cp "$work/pin.saved" "$prefixroot/opt/agy/etc/pin"
+
+# The inspection sandbox hides the token file too. A required clean filter, which runs there, fails when it reads the
+# token's contents, and then git status, so the inspection, fails. The same inspection with no gh-token-file configured,
+# so nothing masked, must fail: that proves the filter runs.
+printf '#!/bin/sh\nif grep -q example-token "%s" 2>/dev/null; then exit 1; fi\ncat\n' "$work/tokens/github.token" > "$work/token-filter.sh"
+chmod 0755 "$work/token-filter.sh"
+printf '*.tok filter=tokcheck\n' > "$work/wt-example/.gitattributes"
+echo example > "$work/wt-example/notes.tok"
+git -C "$work/wt-example" add .gitattributes notes.tok
+git -C "$work/wt-example" -c user.name=example -c user.email=example@example.invalid commit -qm "a filtered file"
+git -C "$work/repo" config filter.tokcheck.clean "$work/token-filter.sh"
+git -C "$work/repo" config filter.tokcheck.required true
+inspect() { # inspect <day>: the inspection's answer for wt-example, after a stat change that makes git status run the filter
+  touch -d "2001-01-0$1" "$work/wt-example/notes.tok"
+  (cd "$work/wt-example" && env -i HOME="$home" PATH=/usr/bin:/bin "$agy" --anderton-worktree-work "$(git rev-parse HEAD)" 2>&1) ||
+    echo "exit $?"
+}
+cp "$prefixroot/opt/agy/etc/sandbox.conf" "$work/conf.with-token"
+grep -v '^gh-token-file ' "$work/conf.with-token" > "$prefixroot/opt/agy/etc/sandbox.conf"
+inspected=$(inspect 1)
+[ "$inspected" = unreadable ] || fail "with the token file unmasked, the inspection's filter did not fail on reading it: $inspected"
+cp "$work/conf.with-token" "$prefixroot/opt/agy/etc/sandbox.conf"
+inspected=$(inspect 2)
+case $inspected in uncommitted | unpushed | clean) ;; *) fail "the inspection sandbox let the filter read the token file: $inspected" ;; esac
+git -C "$work/repo" config --unset filter.tokcheck.clean
+git -C "$work/repo" config --unset filter.tokcheck.required
 
 # The checks inside the namespace refuse to start agy when the guard could be off.
 refuses() {
@@ -410,6 +482,18 @@ for old in 1.3.2 1.3.3-canary.1 v1.4.2; do
 done
 cp "$work/bun.saved" "$prefixroot/opt/agy/hookbin/bun"
 cp "$work/pin.saved" "$prefixroot/opt/agy/etc/pin"
+installed_guard=$(sed -n 's/^guard=//p' "$prefixroot/opt/agy/etc/pin")
+cp "$installed_guard/agy-supervisor.ts" "$work/supervisor.saved"
+rm "$installed_guard/agy-supervisor.ts"
+refuses "the installed guard lacks the supervisor its wrapper execs" "agy-supervisor.ts is missing"
+printf 'export const WATCHDOG_SECONDS = 3655;\n' > "$installed_guard/agy-supervisor.ts"
+refuses "the installed supervisor's deadline is too close to the hook timeout" "is not above the 3600-second approval wait"
+cp "$work/supervisor.saved" "$installed_guard/agy-supervisor.ts"
+mv "$home/.gemini/antigravity-cli/antigravity-oauth-token" "$work/token.saved"
+refuses "agy has no stored login" "no stored login"
+: > "$home/.gemini/antigravity-cli/antigravity-oauth-token"
+refuses "agy's stored login is empty" "no stored login"
+mv "$work/token.saved" "$home/.gemini/antigravity-cli/antigravity-oauth-token"
 run true >/dev/null 2>&1 || fail "the launcher did not start again once the hook config was restored"
 
 # A listening socket outside the usual places, standing in for a tmux or herdr server on a custom path.

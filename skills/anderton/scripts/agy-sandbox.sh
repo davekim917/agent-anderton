@@ -27,9 +27,22 @@ sha256() {
 }
 
 [ -f "$pin" ] || die "no $pin; run install-agy.sh first."
+# --anderton-worktree-work <base commit>: tell what in this worktree retiring it would lose (worktree_work's answer),
+# by running git inside a read-only sandbox with no network, so nothing the worker wrote runs outside one.
+# --anderton-worktree-refs <base commit>: the same, for what waiting.sh's finished reads (worktree_refs's answer).
+inspect="" inspect_base=""
+case ${1:-} in
+  --anderton-worktree-work | --anderton-worktree-refs)
+    [ $# -ge 2 ] || die "$1 needs the worktree's base commit."
+    inspect=${1#--anderton-worktree-} inspect_base=$2
+    ;;
+esac
 version=$(pinned version)
 agy="$base/$version/antigravity"
-[ -n "$version" ] && [ -x "$agy" ] || die "the pinned agy $version is not installed under $base."
+case ${1:-} in
+  --anderton-worktree-work | --anderton-worktree-refs | --inspect-inside) ;;
+  *) [ -n "$version" ] && [ -x "$agy" ] || die "the pinned agy $version is not installed under $base." ;;
+esac
 [ -n "${HOME:-}" ] && [ -d "$HOME" ] || die "HOME is not set."
 gemini="$HOME/.gemini"
 state="$gemini/antigravity-cli"
@@ -61,7 +74,7 @@ scope_files() {
 }
 
 inside() {
-  local wt common gitdir path options bun bun_version
+  local wt common gitdir path options guard bun bun_version deadline hook_timeout
   # The caller's PATH chose nothing so far; every tool below is named by its path.
   [ "$(/usr/bin/tr -d '\0' < /proc/1/comm 2>/dev/null)" = bwrap ] || die "--inside runs only as bwrap's child."
   case ,$(/usr/bin/findmnt -rn -o OPTIONS --mountpoint / | /usr/bin/head -n 1), in *,ro,*) ;; *) die "/ is not read-only here." ;; esac
@@ -74,6 +87,17 @@ inside() {
     die "$gemini/config/hooks.json is not the guard registration install-agy.sh wrote."
   [ "$(sha256 "$base/libexec/agy-guard-hook")" = "$(pinned hook_sha256)" ] ||
     die "$base/libexec/agy-guard-hook is not the hook install-agy.sh wrote."
+  # The hook can decide only with all of these; without one, the wrapper denies every call or agy never runs it.
+  guard=$(pinned guard)
+  for path in /bin/bash "$guard/.complete" "$guard/agy-guard.sh" "$guard/agy-guard.ts" "$guard/agy-supervisor.ts"; do
+    [ -f "$path" ] || die "$path is missing, so the guard hook cannot decide; rerun install-agy.sh."
+  done
+  # agy cuts the hook off at its registered timeout with no deny, so the supervisor's deadline must come first, with
+  # room to print its own. The registration's bytes were checked above.
+  deadline=$(/usr/bin/sed -n 's/^export const WATCHDOG_SECONDS = \([0-9][0-9]*\);$/\1/p' "$guard/agy-supervisor.ts" | /usr/bin/head -n 1)
+  hook_timeout=$(/usr/bin/sed -n 's/.*"timeout":\([0-9][0-9]*\).*/\1/p' "$gemini/config/hooks.json" | /usr/bin/head -n 1)
+  [ -n "$deadline" ] && [ -n "$hook_timeout" ] && [ "$deadline" -gt 3600 ] && [ "$deadline" -le $((hook_timeout - 10)) ] ||
+    die "the guard supervisor's deadline (${deadline:-none}) is not above the 3600-second approval wait and 10 seconds under the hook timeout (${hook_timeout:-none})."
   # The guard wrapper runs "bun" from the hook's PATH, whose first directory must hold only the pinned copy, where the
   # worker cannot replace it.
   bun="$base/hookbin/bun"
@@ -88,6 +112,8 @@ inside() {
     [ $(( 10#${BASH_REMATCH[1]} * 1000000 + 10#${BASH_REMATCH[2]} * 1000 + 10#${BASH_REMATCH[3]} )) -lt 1003003 ]; then
     die "the guard hook's bun (${bun_version:-missing}) is not a release at or above 1.3.3, so it would deny every call."
   fi
+  # Without a stored login agy starts its own sign-in, which only the owner may complete.
+  [ -s "$state/antigravity-oauth-token" ] || die "agy has no stored login ($state/antigravity-oauth-token); the owner signs in first."
   for path in "$gemini/hooks.json" "$state/hooks.json"; do
     case $(/usr/bin/tr -d '[:space:]' < "$path") in '' | '{}') ;; *) die "$path defines hooks; only $gemini/config/hooks.json may." ;; esac
   done
@@ -115,6 +141,46 @@ EOF
   exec "$agy" --dangerously-skip-permissions "$@"
 }
 
+# worktree_work (session-lib.sh) inside the inspecting sandbox: prints uncommitted, flagged, unpushed, unreadable or,
+# only when every check found nothing to keep, clean. git takes no lock and starts no helper it can be talked out of; one it cannot (a clean filter) runs here.
+inspect_inside() {
+  local out git
+  [ "$(/usr/bin/tr -d '\0' < /proc/1/comm 2>/dev/null)" = bwrap ] || die "--inspect-inside runs only as bwrap's child."
+  case ,$(/usr/bin/findmnt -rn -o OPTIONS --mountpoint / | /usr/bin/head -n 1), in *,ro,*) ;; *) die "/ is not read-only here." ;; esac
+  git=(/usr/bin/git --no-optional-locks -c core.fsmonitor= -c core.hooksPath=/dev/null -c core.untrackedCache=false
+    -c log.showSignature=false)
+  if [ "$1" = refs ]; then refs_inside "$2"; fi
+  shift
+  out=$("${git[@]}" status --porcelain --untracked-files=normal 2>/dev/null) || { echo unreadable; exit 0; }
+  if [ -n "$out" ]; then echo uncommitted; exit 0; fi
+  out=$(set -o pipefail; "${git[@]}" ls-files -v 2>/dev/null | /usr/bin/cut -c1 | LC_ALL=C /usr/bin/sort -u) || { echo unreadable; exit 0; }
+  case $out in *[abcdefghijklmnopqrstuvwxyzS]*) echo flagged; exit 0 ;; esac
+  out=$("${git[@]}" rev-list -1 HEAD --not --remotes "$1" 2>/dev/null) || { echo unreadable; exit 0; }
+  if [ -n "$out" ]; then echo unpushed; else echo clean; fi
+  exit 0
+}
+
+# waiting.sh's finished inside the inspecting sandbox, with inspect_inside's git: HEAD, the remote branch work lands on,
+# the checked-out branch, 1 when HEAD (moved off base $1) is in that remote branch, and when it landed there (epoch),
+# separated by 0x1f, since any of the last four may be empty.
+refs_inside() {
+  local head ref branch land landed="" at=""
+  head=$("${git[@]}" rev-parse -q --verify HEAD 2>/dev/null) || exit 1
+  for ref in "$("${git[@]}" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)" origin/main origin/master; do
+    if [ -n "$ref" ] && "${git[@]}" rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1; then break; fi
+    ref=""
+  done
+  branch=$("${git[@]}" symbolic-ref -q --short HEAD 2>/dev/null || true)
+  if [ -n "$ref" ] && [ "$head" != "$1" ] && "${git[@]}" merge-base --is-ancestor "$head" "$ref" 2>/dev/null; then
+    landed=1
+    land=$("${git[@]}" rev-list --first-parent --ancestry-path "$head..$ref" 2>/dev/null | /usr/bin/tail -n 1)
+    if [ -z "$land" ] || [ "$("${git[@]}" rev-parse -q --verify "$land^1" 2>/dev/null)" = "$head" ]; then land=$head; fi
+    at=$("${git[@]}" log -1 --format=%ct "$land" 2>/dev/null || true)
+  fi
+  printf '%s\037%s\037%s\037%s\037%s\n' "$head" "$ref" "$branch" "$landed" "$at"
+  exit 0
+}
+
 owner_of() {
   /usr/bin/stat -c %u "$1"
 }
@@ -137,21 +203,19 @@ if [ "${1:-}" = --inside ]; then
   shift
   inside "$@"
 fi
+if [ "${1:-}" = --inspect-inside ]; then
+  inspect_inside "$2" "$3"
+fi
 
-[ "$(uname -s)" = Linux ] || die "Linux only."
-bwrap=$(pinned bwrap)
-[ -n "$bwrap" ] && [ -x "$bwrap" ] || die "the bwrap install-agy.sh pinned (${bwrap:-none}) is not installed."
-wt=$(git rev-parse --show-toplevel 2>/dev/null) || die "run it from the worker's git worktree."
-wt=$(cd "$wt" && pwd -P)
-[ "$(pwd -P)" = "$wt" ] || die "run it from the worktree's top level ($wt)."
-common=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
-gitdir=$(cd "$(git rev-parse --absolute-git-dir)" && pwd -P)
-# A linked worktree keeps its index and HEAD in a git directory of its own, which can stay writable while the
-# repository's stays read-only; the main checkout keeps them in the repository's.
-[ "$gitdir" != "$common" ] || die "run it from a linked worktree (git worktree add), not the repository's main checkout."
-[ -f "$gemini/config/hooks.json" ] || die "$gemini/config/hooks.json is missing; run register-agy.sh."
+# spawn.sh names a new file for this launcher to create with its pid, which exec keeps through to bwrap: with the pane's
+# process tree and bwrap's namespace, it proves to spawn.sh that this launcher, not some other agy on PATH, started.
+launch_file=""
+if [ "${1:-}" = --anderton-launch-file ]; then
+  [ $# -ge 2 ] || die "--anderton-launch-file needs a path."
+  launch_file=$2
+  shift 2
+fi
 
-args=(--ro-bind / / --dev /dev --proc /proc --unshare-pid --die-with-parent)
 writable=()
 add_rw() { # add_rw <path> [<source>]: <path> writable, backed by <source> when one is given
   local path=$1 source=${2:-$1}
@@ -181,6 +245,83 @@ add_mask() {
   path=$(readlink -f "$1")
   if [ -d "$path" ]; then args+=(--tmpfs "$path"); else args+=(--ro-bind /dev/null "$path"); fi
 }
+
+# Credential stores, and sockets of processes that would run a command outside the sandbox, hidden from both the
+# worker's sandbox and the read-only one that inspects its worktree.
+add_credential_masks() {
+  local path kind name
+  # The worker's sandbox lasts; a store created while it runs would not be masked. An inspection does not.
+  [ -n "$inspect" ] || for path in "$HOME/.claude" "$HOME/.codex" "$HOME/.config/gh" "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.aws" \
+    "$HOME/.config/gcloud" "$HOME/.docker"; do
+    mkdir -p "$path"
+  done
+  # Every entry of the home whose name starts with .codex or .claude (a backup, a second account), by a literal prefix.
+  while IFS= read -r -d '' path; do
+    name=${path##*/}
+    if [ "${name#.codex}" != "$name" ] || [ "${name#.claude}" != "$name" ]; then add_mask "$path"; fi
+  done < <(find "$HOME" -mindepth 1 -maxdepth 1 -print0)
+  for path in "$HOME/.config/gh" "$HOME/.ssh" "$HOME/.gnupg" \
+    "$HOME/.aws" "$HOME/.config/gcloud" "$HOME/.docker" "$HOME/.config/herdr" "$HOME/.config/pairfob" \
+    "$HOME/.git-credentials" "$HOME/.netrc" \
+    "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" "/tmp/tmux-$(id -u)" /var/run/docker.sock "${HERDR_SOCKET_PATH:-}"; do
+    [ -z "$path" ] || add_mask "$path"
+  done
+  # Every listening Unix socket with a path, wherever it lives: a tmux or herdr server on a custom socket would run a
+  # command for the worker outside the sandbox. One opened after launch is not covered.
+  while read -r path; do
+    case $path in /*) [ -S "$path" ] && add_mask "$path" ;; esac
+  done <<EOF
+$(ss -xlnH 2>/dev/null | awk '{ print $5 }')
+EOF
+  token_file=""
+  if [ -f "$conf" ]; then
+    # A mask or token file is the rest of its line, so a path may hold spaces.
+    while read -r kind path; do
+      path=${path/#\~/$HOME}
+      case $kind in
+        mask) add_mask "$path" ;; # literal: brackets, "*" and "?" in a path are its own characters
+        gh-token-file) token_file=$path ;;
+      esac
+    done < "$conf"
+  fi
+  # The token reaches a worker only as GH_TOKEN; the file itself is hidden from every sandbox, a mask line or not.
+  [ -z "$token_file" ] || add_mask "$token_file"
+}
+
+# bwrap mounts the whole view before it runs anything, and fails when a path it was given to mask has gone by then (a
+# socket that closed after it was listed). A dry run of the same view, running only true, tells that apart from a start
+# that ran something: the launcher then exits 75, having started nothing, and the caller may try again.
+unstarted=75
+view_sets_up() { # view_sets_up <bwrap args...>
+  env -i PATH=/usr/bin:/bin "$bwrap" "$@" -- /bin/true >/dev/null 2>&1
+}
+
+[ "$(uname -s)" = Linux ] || die "Linux only."
+bwrap=$(pinned bwrap)
+[ -n "$bwrap" ] && [ -x "$bwrap" ] || die "the bwrap install-agy.sh pinned (${bwrap:-none}) is not installed."
+if [ -n "$inspect" ]; then
+  # Host git never reads the worktree, not even to find it: the caller runs this from its top level. Read-only
+  # everywhere, no network, and the credential masks, so a helper the worktree names can run here and reach nothing.
+  args=(--ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-net --die-with-parent)
+  add_credential_masks
+  if ! view_sets_up "${args[@]}" --chdir "$(pwd -P)"; then
+    echo "agy-sandbox: the sandbox could not be set up; nothing started." >&2
+    exit "$unstarted"
+  fi
+  exec python3 -I -c 'import os, sys; os.closerange(3, 1 << 30); os.execvp(sys.argv[1], sys.argv[1:])' \
+    env -i HOME="$HOME" PATH=/usr/bin:/bin "$bwrap" "${args[@]}" --chdir "$(pwd -P)" -- "$self" --inspect-inside "$inspect" "$inspect_base"
+fi
+wt=$(git rev-parse --show-toplevel 2>/dev/null) || die "run it from the worker's git worktree."
+wt=$(cd "$wt" && pwd -P)
+[ "$(pwd -P)" = "$wt" ] || die "run it from the worktree's top level ($wt)."
+common=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
+gitdir=$(cd "$(git rev-parse --absolute-git-dir)" && pwd -P)
+# A linked worktree keeps its index and HEAD in a git directory of its own, which can stay writable while the
+# repository's stays read-only; the main checkout keeps them in the repository's.
+[ "$gitdir" != "$common" ] || die "run it from a linked worktree (git worktree add), not the repository's main checkout."
+[ -f "$gemini/config/hooks.json" ] || die "$gemini/config/hooks.json is missing; run register-agy.sh."
+
+args=(--ro-bind / / --dev /dev --proc /proc --unshare-pid --die-with-parent)
 
 # Writable roots, each with the reason it is writable.
 add_rw /tmp                          # shared scratch; scripts/test-safe.sh-style host-wide locks live here
@@ -328,41 +469,7 @@ $(read_only_paths "$wt" "$gitdir"; printf '%s\n' "$common/config" "$common/confi
   scope_files; echo "$base/libexec/agy-guard-hook")
 EOF
 
-# Credential stores, and sockets of processes that would run a command outside the sandbox.
-# A store created after launch would not be masked, so the usual ones are masked even while empty.
-for path in "$HOME/.claude" "$HOME/.codex" "$HOME/.config/gh" "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.aws" \
-  "$HOME/.config/gcloud" "$HOME/.docker"; do
-  mkdir -p "$path"
-done
-# Every entry of the home whose name starts with .codex or .claude (a backup, a second account), by a literal prefix.
-while IFS= read -r -d '' path; do
-  name=${path##*/}
-  if [ "${name#.codex}" != "$name" ] || [ "${name#.claude}" != "$name" ]; then add_mask "$path"; fi
-done < <(find "$HOME" -mindepth 1 -maxdepth 1 -print0)
-for path in "$HOME/.config/gh" "$HOME/.ssh" "$HOME/.gnupg" \
-  "$HOME/.aws" "$HOME/.config/gcloud" "$HOME/.docker" "$HOME/.config/herdr" "$HOME/.config/pairfob" \
-  "$HOME/.git-credentials" "$HOME/.netrc" \
-  "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" "/tmp/tmux-$(id -u)" /var/run/docker.sock "${HERDR_SOCKET_PATH:-}"; do
-  [ -z "$path" ] || add_mask "$path"
-done
-# Every listening Unix socket with a path, wherever it lives: a tmux or herdr server on a custom socket would run a
-# command for the worker outside the sandbox. One opened after launch is not covered.
-while read -r path; do
-  case $path in /*) [ -S "$path" ] && add_mask "$path" ;; esac
-done <<EOF
-$(ss -xlnH 2>/dev/null | awk '{ print $5 }')
-EOF
-token_file=""
-if [ -f "$conf" ]; then
-  # A mask or token file is the rest of its line, so a path may hold spaces.
-  while read -r kind path; do
-    path=${path/#\~/$HOME}
-    case $kind in
-      mask) add_mask "$path" ;; # literal: brackets, "*" and "?" in a path are its own characters
-      gh-token-file) token_file=$path ;;
-    esac
-  done < "$conf"
-fi
+add_credential_masks
 
 env=(HOME="$HOME" USER="${USER:-$(id -un)}" LOGNAME="${LOGNAME:-$(id -un)}" TERM="${TERM:-xterm-256color}"
   PATH="$base/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.bun/bin" AGY_CLI_DISABLE_AUTO_UPDATE=true)
@@ -373,6 +480,15 @@ if [ -n "$token_file" ] && [ -r "$token_file" ]; then
   env+=("GH_TOKEN=$(tr -d '[:space:]' < "$token_file")")
 fi
 
+# The launch file says which happened: this pid, which is about to become bwrap, or "unstarted".
+if ! view_sets_up "${args[@]}" --chdir "$wt"; then
+  [ -z "$launch_file" ] || (set -C && echo unstarted > "$launch_file") 2>/dev/null || true
+  echo "agy-sandbox: the sandbox could not be set up (a path it masks changed as it started); nothing started." >&2
+  exit "$unstarted"
+fi
+if [ -n "$launch_file" ]; then
+  (set -C && printf '%s\n' "$$" > "$launch_file") 2>/dev/null || die "could not create $launch_file; it may belong to an earlier launch."
+fi
 # A directory descriptor inherited from outside would reach the host's writable view of a protected path, so every
 # descriptor above stderr is closed in the process that becomes bwrap. bash cannot do it itself: it keeps the script open.
 exec python3 -I -c 'import os, sys; os.closerange(3, 1 << 30); os.execvp(sys.argv[1], sys.argv[1:])' \

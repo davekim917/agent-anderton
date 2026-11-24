@@ -20,6 +20,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Structure
         run: /bin/bash test/structure.test.sh
+      - name: bubblewrap
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y -q bubblewrap
+          # Ubuntu runners refuse unprivileged user namespaces through AppArmor; bwrap needs them.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Scripts
         run: /bin/bash test/scripts.test.sh
       - name: Mixed-provider coordination
@@ -30,11 +36,7 @@ jobs:
         run: python3 -B test/codex.test.py
       - name: agy sandbox
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get install -y -q bubblewrap
-          # Ubuntu runners refuse unprivileged user namespaces through AppArmor; bwrap needs them.
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          /bin/bash test/agy-sandbox.test.sh
+        run: /bin/bash test/agy-sandbox.test.sh
       - name: agy guard commit
         if: runner.os == 'Linux'
         id: agy-guard

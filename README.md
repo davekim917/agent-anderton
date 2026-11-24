@@ -133,7 +133,7 @@ the operator to review.
 
 The repository Anderton sets the default worker provider for all of its projects.
 An inherited Codex default uses the daemon home of the repository Anderton.
-Use `--provider claude` or `--provider codex` to choose explicitly.
+Use `--provider claude`, `--provider codex` or `--provider agy` to choose explicitly.
 `worker.sh message <name> "<direction>"` appends directions to a Codex worker's
 queue in order. If `message` exits 4, run `worker.sh status <name>` and resend
 only when status reports `never arrived` for the direction ID.
@@ -143,8 +143,41 @@ loaded and end a turn to receive those directions.
 
 ### Prepare agy workers (Linux)
 
-agy workers (Antigravity CLI) do not exist yet: `spawn.sh --provider agy` arrives in a later change. This change ships
-what they run inside. Installing takes two steps, so root never writes inside a user's home.
+`spawn.sh --provider agy` starts an agy (Antigravity CLI) worker, on Linux and inside herdr only. It opens the worker's
+tab with `/opt/agy/bin` first on its PATH, so herdr's `agy` kind runs the sandbox launcher below, and passes
+`--effort` (low to xhigh; agy's models have no max) and `--model` when given. It refuses `--mode`, a missing install, a
+changed guard registration and a missing login, since agy starts its own sign-in without one.
+
+Before it sends the brief, `spawn.sh` proves the sandbox. The launcher writes its pid to a file `spawn.sh` names, and
+then becomes `bwrap`. That process must run the bwrap `install-agy.sh` pinned, must have a child of it in a mount
+namespace of its own, and must descend from the worker's herdr pane (by the `HERDR_PANE_ID` entry of its environment).
+herdr must also report the agy's agent session, which binds every later step to that instance. An agy that fails any
+of these gets no brief, and only its pane is closed.
+
+agy keeps no transcript these scripts read yet, so `worker.sh status`, `output` (a screen read) and `message` go
+through the worker's herdr pane. Each acts only on one herdr snapshot that shows the agy instance `spawn.sh` saw in that
+pane, in the worker's worktree, and only after a last check that the proven launcher is still alive. No sweep reads agy
+workers.
+
+`retire.sh` closes that pane only once herdr reports the worker idle. It removes the worktree only on positive evidence
+that nothing uses it: the launcher has exited (or, for a record with no launcher, herdr reports the pane gone), and no
+process has its directory there, a plain shell included. Host git never runs on an agy worktree: the launcher works out
+what retiring would lose (`--anderton-worktree-work`) and what `waiting.sh` reads of its commits
+(`--anderton-worktree-refs`) inside a read-only sandbox with no network, so a clean filter or other helper the worktree
+names runs only there. `gh` starts in the repository's checkout instead, and `git worktree remove --force`, run on the
+repository, deletes the worktree without reading it. All of this happens only while the worktree's `.git` and `commondir` still lead to the repository it
+started from; the same holds when a failed spawn cleans up. `ANDERTON_AGY_ROOT` names another install root.
+
+The launcher dry-runs its sandbox view before it starts anything. When the view cannot be set up, because a socket it
+masks closed as it started, it exits 75 having started nothing. `spawn.sh` and the worktree inspection then try again, up
+to three starts in all. A start that ran something is never repeated, and neither is one its 120-second timeout ended.
+
+**Known limit, updates:** `retire.sh` and `waiting.sh` ask the installed launcher (`/opt/agy/bin/agy`) to inspect a worktree. If
+the plugin's scripts are updated before the launcher is reinstalled, a launcher that gives no `clean` answer makes a clean
+retirement exit 3 and keep the worktree. That is safe; reinstall the launcher (`install-agy.sh`) together with the
+plugin.
+
+Installing takes two steps, so root never writes inside a user's home.
 
 1. **As root,** `skills/anderton/scripts/install-agy.sh` writes only under the prefix (`/opt`):
    - the release pinned in `agy.pin`, checked against its sha256, root-owned under `/opt/agy`;
@@ -200,6 +233,10 @@ Just before agy starts, it refuses to run unless all of these hold, checked insi
 
 - the guard registration and the hook script are byte for byte what the install wrote;
 - no other hook file defines hooks;
+- the installed guard, its supervisor and `/bin/bash` are present;
+- the supervisor's deadline is above the one-hour approval wait and at least 10 seconds under the registered hook
+  timeout;
+- agy has a non-empty stored login;
 - no `.agents/hooks.json` sits above the worktree;
 - every protected path is mounted read-only;
 - the guard's policy files are not writable.
@@ -432,7 +469,7 @@ worktree leaves its own at its base. Idle time runs from the newest transcript e
 that may be it, else from when it was started. A line notes uncommitted work, or commits no remote branch has, which `retire.sh`
 would keep. `--blocked` leaves this section out.
 
-**`spawn.sh --effort LEVEL [--provider claude|codex] [--model M] [--mode MODE] [--base REF] <name> [brief-file]`**
+**`spawn.sh --effort LEVEL [--provider claude|codex|agy] [--model M] [--mode MODE] [--base REF] <name> [brief-file]`**
 starts a full Claude Code or Codex worker labelled `<name>` in a new git worktree at
 `$ANDERTON_WORKTREES/wt-<name>` (default: the folder that holds the repository). The base is
 `origin/HEAD`, else `origin/main`, `origin/master` or `HEAD`.
