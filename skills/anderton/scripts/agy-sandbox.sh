@@ -46,8 +46,9 @@ esac
 [ -n "${HOME:-}" ] && [ -d "$HOME" ] || die "HOME is not set."
 gemini="$HOME/.gemini"
 state="$gemini/antigravity-cli"
-# agy reads these from its state directory; a worker that could write one could add hooks, plugins or agents.
-customizations="agents agents.json plugins plugins.json rules rules.json skills skills.json workflows hooks.json secplugins"
+# agy reads these from its state directory; a worker that could write one could add hooks, plugins or agents. builtin
+# holds the plugins and skills agy ships, the enabled swarm plugin among them.
+customizations="agents agents.json plugins plugins.json rules rules.json skills skills.json workflows hooks.json secplugins builtin"
 
 # Every path the view below binds read-only inside a writable root, in bind order, for the check inside too. Host git
 # reads this worktree's config.worktree, commondir and .git pointer, so a worker that could write one could have host
@@ -196,14 +197,30 @@ owner_of() {
 
 # agy loads hooks and plugins from the .agents directory of the worktree, which it treats as the workspace root. A
 # hooks.json there would load; a link there, even a dangling one, could point at a file the worker can still write.
+# agy also loads custom agent definitions from .agents/agents and ~/.gemini/config/agents when it starts, and one with
+# inheritCustomizations: false, or inheritScopes none or repo_and_org, runs its subagent with no hooks at all.
 refuse_workspace_config() {
-  local entry
+  local entry agents="$gemini/config/agents"
   for entry in hooks.json plugins plugins.json plugins.txt; do
     if [ "$entry" = hooks.json ] && { [ -e "$wt/.agents/$entry" ] || [ -L "$wt/.agents/$entry" ]; }; then
       die "$wt/.agents/hooks.json exists; workspace hooks can switch the guard off."
     fi
     if [ -L "$wt/.agents/$entry" ]; then
       die "$wt/.agents/$entry is a symbolic link; its target could stay writable."
+    fi
+  done
+  if [ -e "$wt/.agents/agents" ] || [ -L "$wt/.agents/agents" ]; then
+    die "$wt/.agents/agents exists; a custom agent defined there can run its subagent with no hooks, so the guard would not see it."
+  fi
+  if [ -L "$agents" ]; then
+    die "$agents is a symbolic link; its target could stay writable, and a custom agent there can run its subagent with no hooks."
+  fi
+  [ -e "$agents" ] || return 0
+  [ -d "$agents" ] && [ -r "$agents" ] && [ -x "$agents" ] ||
+    die "$agents is not a directory agy-sandbox can list; a custom agent there can run its subagent with no hooks."
+  for entry in "$agents"/* "$agents"/.[!.]* "$agents"/..?*; do
+    if [ -e "$entry" ] || [ -L "$entry" ]; then
+      die "$agents is not empty ($entry); a custom agent there can run its subagent with no hooks, so the guard would not see it."
     fi
   done
 }
@@ -500,7 +517,7 @@ mkdir -p "$wt/.agents"
 for path in "$gemini/hooks.json" "$state/hooks.json"; do
   [ -f "$path" ] || die "$path is missing; run install-agy.sh."
 done
-for entry in agents plugins rules skills workflows secplugins; do mkdir -p "$state/$entry"; done
+for entry in agents plugins rules skills workflows secplugins builtin; do mkdir -p "$state/$entry"; done
 while IFS= read -r path; do add_ro "$path"; done <<EOF
 $(read_only_paths "$wt" "$gitdir")
 EOF

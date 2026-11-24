@@ -243,8 +243,9 @@ pinned `bwrap`, with this view:
   directory the worker user owns and can write; under one it cannot (a `~/.bun` root installed bun into), the sandbox
   gets it in a read-only tmpfs over that directory, with the directory's own entries bound back read-only. It refuses
   such a directory it cannot list, and one holding a link that resolves into a writable root.
-- **Read-only even inside those:** every hook and plugin location agy reads, and this worktree's `config.worktree`,
-  `commondir` and `.git` pointer, which host git reads.
+- **Read-only even inside those:** every hook, plugin and agent location agy reads, agy's built-in plugins and skills
+  (`~/.gemini/antigravity-cli/builtin`), and this worktree's `config.worktree`, `commondir` and `.git` pointer, which
+  host git reads.
 - **Hidden:** credential stores (every entry of the home whose name starts with `.claude` or `.codex`, a backup or second
   account included; `~/.config/gh`, `~/.ssh`, `~/.git-credentials`, `~/.netrc` and more) and the sockets of processes
   that would run a command for the worker.
@@ -258,6 +259,8 @@ Just before agy starts, it refuses to run unless all of these hold, checked insi
   timeout;
 - agy has a non-empty stored login;
 - no `.agents/hooks.json` sits above the worktree;
+- the worktree has no `.agents/agents` at all (directory, file or link), and `~/.gemini/config/agents` is missing or an
+  empty directory, never a link;
 - every protected path is mounted read-only;
 - the guard's policy files are not writable.
 
@@ -275,6 +278,13 @@ Before that it also refuses:
 
 Inside, it also checks that `hookbin/` holds only the pinned bun, byte for byte, read-only, at a release no older than
 1.3.3.
+
+**Agent definitions.** agy loads custom agent definitions (`<name>.md` or `<name>/agent.md`) from the worktree's
+`.agents/agents/` and from `~/.gemini/config/agents/`. One whose frontmatter sets `inheritCustomizations: false`, or
+`inheritScopes` to `none` or `repo_and_org`, runs its subagent with no hooks, so the guard never sees what that subagent
+does. Both directories are read-only inside the sandbox, but a repository can ship `.agents/agents`, and a worker can
+commit one for a later worktree to check out, so the launcher refuses to start instead. A repository that ships agent
+definitions cannot run agy workers.
 
 `/opt/agy/etc/sandbox.conf` starts with masks for the credential stores and, with `--nanoclaw`, that install's `data/` and
 `.env`. Add lines, owned by root. A leading `~/` is the home; every other character, brackets and `*` and `?` included,

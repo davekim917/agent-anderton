@@ -223,6 +223,9 @@ git -C "$work/repo" -c user.name=example -c user.email=example@example.invalid c
 git -C "$work/repo" worktree add -q --detach "$work/wt-example" HEAD
 git -C "$work/repo" worktree add -q --detach "$work/wt-other" HEAD
 printf 'import sys\nopen(sys.argv[1], "w").write("x")\n' > "$work/wt-example/write.py"
+# agy's built-in plugins, as its first start unpacks them.
+mkdir -p "$home/.gemini/antigravity-cli/builtin/plugins/swarm"
+echo '{}' > "$home/.gemini/antigravity-cli/builtin/plugins/swarm/plugin.json"
 mkdir -p "$home/.claude" "$home/.codex-example" "$home/.codex.backup" "$home/.claude-example" "$home/.cache"
 for canary in "$home/.claude/canary" "$home/.codex-example/canary" "$home/.codex.backup/auth.json" \
   "$home/.claude-example/canary" "$home/.claude.json" "$home/.git-credentials" "$home/.netrc" \
@@ -259,6 +262,8 @@ w gemini-hooks          "echo {} > \"$HOME\"/.gemini/hooks.json"
 w state-hooks           "echo {} > \"$HOME\"/.gemini/antigravity-cli/hooks.json"
 w state-plugins         "mkdir \"$HOME\"/.gemini/antigravity-cli/plugins/example"
 w state-agents-json     "echo [] > \"$HOME\"/.gemini/antigravity-cli/agents.json"
+w state-builtin         "echo {} > \"$HOME\"/.gemini/antigravity-cli/builtin/plugins/swarm/plugin.json"
+w state-builtin-new     "mkdir \"$HOME\"/.gemini/antigravity-cli/builtin/plugins/example"
 w gemini-moved          "mv \"$HOME\"/.gemini \"$HOME\"/gemini-moved"
 w git-hooks             "echo x > $(git rev-parse --git-common-dir)/hooks/post-checkout"
 w git-config            "git config --file $(git rev-parse --git-common-dir)/config core.hooksPath /tmp"
@@ -298,6 +303,7 @@ w tmp-file              "echo x > /tmp/agy-sandbox-example-$$"
 '
 out=$(run "$attempts" 2>&1) || fail "the launcher did not start: $out"
 for denied in worktree-agents worktree-agents-mv global-hooks gemini-hooks state-hooks state-plugins state-agents-json \
+  state-builtin state-builtin-new \
   gemini-moved git-hooks git-config home-rc python-write unshare-umount inherited-fd read-claude-canary read-codex-glob \
   read-codex-backup read-claude-prefix read-claude-json read-token-file \
   read-git-credentials read-netrc read-nanoclaw-data read-nanoclaw-env git-config-worktree git-info own-config-worktree \
@@ -433,6 +439,27 @@ rm "$work/wt-example/.agents/hooks.json"
 ln -s ../plugins-elsewhere "$work/wt-example/.agents/plugins"
 refuses "a workspace plugin location is a link" "is a symbolic link"
 rm "$work/wt-example/.agents/plugins"
+# A custom agent definition can turn hooks off for its subagent, so the worktree may hold none, in any form.
+mkdir -p "$work/wt-example/.agents/agents"
+refuses "the worktree has a custom agent directory" ".agents/agents exists"
+rmdir "$work/wt-example/.agents/agents"
+: > "$work/wt-example/.agents/agents"
+refuses "the worktree has a file where custom agents load" ".agents/agents exists"
+rm "$work/wt-example/.agents/agents"
+ln -s ../agents-elsewhere "$work/wt-example/.agents/agents"
+refuses "the worktree has a dangling link where custom agents load" ".agents/agents exists"
+rm "$work/wt-example/.agents/agents"
+# The user's agent directory may exist only empty, and never as a link.
+mkdir "$home/.gemini/config/agents"
+run true >/dev/null 2>&1 || fail "the launcher refused an empty ~/.gemini/config/agents: $(run true 2>&1)"
+printf -- '---\nname: example-agent\n---\n' > "$home/.gemini/config/agents/example-agent.md"
+refuses "the user's config/agents holds a definition" "config/agents is not empty"
+rm "$home/.gemini/config/agents/example-agent.md"
+rmdir "$home/.gemini/config/agents"
+mkdir "$work/agents-target"
+ln -s "$work/agents-target" "$home/.gemini/config/agents"
+refuses "the user's config/agents is a link to an empty directory" "config/agents is a symbolic link"
+rm "$home/.gemini/config/agents"
 ln -s ../outside-hooks.json "$work/wt-example/.agents/hooks.json"
 rm "$work/wt-example/.agents/hooks.json"
 mv "$home/.cache" "$home/cache-target"
