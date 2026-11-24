@@ -147,7 +147,7 @@ fi
 mkdir -p "$home/.cache/scope"
 install_refusal "a scope directory agy workers can write" "$work/guard" "which agy workers can write" "$home/.cache/scope"
 rmdir "$home/.cache/scope"
-touch "$prefixroot/opt/agy/etc/user-owned-test-install"
+(umask 022 && touch "$prefixroot/opt/agy/etc/user-owned-test-install")
 agy="$prefixroot/opt/agy/bin/agy"
 
 # The install refuses a release that does not match its pin.
@@ -159,8 +159,9 @@ git -C "$work/repo" -c user.name=example -c user.email=example@example.invalid c
 git -C "$work/repo" worktree add -q --detach "$work/wt-example" HEAD
 git -C "$work/repo" worktree add -q --detach "$work/wt-other" HEAD
 printf 'import sys\nopen(sys.argv[1], "w").write("x")\n' > "$work/wt-example/write.py"
-mkdir -p "$home/.claude" "$home/.codex-example" "$home/.cache"
-for canary in "$home/.claude/canary" "$home/.codex-example/canary" "$home/.git-credentials" "$home/.netrc" \
+mkdir -p "$home/.claude" "$home/.codex-example" "$home/.codex.backup" "$home/.claude-example" "$home/.cache"
+for canary in "$home/.claude/canary" "$home/.codex-example/canary" "$home/.codex.backup/auth.json" \
+  "$home/.claude-example/canary" "$home/.claude.json" "$home/.git-credentials" "$home/.netrc" \
   "$work/NanoClaw [dev]/data/canary" "$work/NanoClaw [dev]/.env"; do
   echo canary-value > "$canary"
 done
@@ -200,6 +201,9 @@ w unshare-umount        "unshare -Urm sh -c \"umount .agents && echo x > .agents
 w inherited-fd          "echo x > /proc/self/fd/9/.agents/hooks.json"
 w read-claude-canary    "grep -q canary-value \"$HOME\"/.claude/canary"
 w read-codex-glob       "grep -q canary-value \"$HOME\"/.codex-example/canary"
+w read-codex-backup     "grep -q canary-value \"$HOME\"/.codex.backup/auth.json"
+w read-claude-prefix    "grep -q canary-value \"$HOME\"/.claude-example/canary"
+w read-claude-json      "grep -q canary-value \"$HOME\"/.claude.json"
 w read-git-credentials  "grep -q canary-value \"$HOME\"/.git-credentials"
 w read-netrc            "grep -q canary-value \"$HOME\"/.netrc"
 w read-nanoclaw-data    "grep -q canary-value '"$work"'/NanoClaw\ \[dev\]/data/canary"
@@ -225,6 +229,7 @@ w tmp-file              "echo x > /tmp/agy-sandbox-example-$$"
 out=$(run "$attempts" 2>&1) || fail "the launcher did not start: $out"
 for denied in worktree-agents worktree-agents-mv global-hooks gemini-hooks state-hooks state-plugins state-agents-json \
   gemini-moved git-hooks git-config home-rc python-write unshare-umount inherited-fd read-claude-canary read-codex-glob \
+  read-codex-backup read-claude-prefix read-claude-json \
   read-git-credentials read-netrc read-nanoclaw-data read-nanoclaw-env git-config-worktree git-info own-config-worktree \
   own-commondir git-pointer other-worktree git-config-local git-config-cond git-common-new read-glob-literal; do
   printf '%s\n' "$out" | grep -qx "denied $denied" || fail "$denied was not denied: $(printf '%s\n' "$out" | grep " $denied\$")"
@@ -306,7 +311,21 @@ for line in 'mask ~/.netrc' 'mask ~/.example-operator-line' "mask $work/NanoClaw
   grep -qxF -- "$line" "$prefixroot/opt/agy/etc/sandbox.conf" ||
     fail "a reinstall did not merge '$line' into the existing sandbox.conf: $(cat "$prefixroot/opt/agy/etc/sandbox.conf")"
 done
-touch "$prefixroot/opt/agy/etc/user-owned-test-install"
+# What an earlier install left under the prefix is read back only while no one else can have written it.
+cp "$prefixroot/opt/agy/etc/sandbox.conf" "$work/conf.installed"
+chmod g+w "$prefixroot/opt/agy/etc/sandbox.conf"
+if got=$(install_root "$prefixroot/opt" 2>&1); then fail "install read back a group-writable sandbox.conf"; else
+  case $got in *"is writable by others"*) ;; *) fail "install refused a group-writable sandbox.conf for another reason: $got" ;; esac
+fi
+chmod g-w "$prefixroot/opt/agy/etc/sandbox.conf"
+mv "$prefixroot/opt/agy/etc/sandbox.conf" "$work/conf.elsewhere"
+ln -s "$work/conf.elsewhere" "$prefixroot/opt/agy/etc/sandbox.conf"
+if got=$(install_root "$prefixroot/opt" 2>&1); then fail "install read back a linked sandbox.conf"; else
+  case $got in *"symbolic link"* | *"is writable by others"*) ;; *) fail "install refused a linked sandbox.conf for another reason: $got" ;; esac
+fi
+rm "$prefixroot/opt/agy/etc/sandbox.conf"
+cp "$work/conf.installed" "$prefixroot/opt/agy/etc/sandbox.conf"
+(umask 022 && touch "$prefixroot/opt/agy/etc/user-owned-test-install")
 cp "$prefixroot/opt/agy/libexec/agy-guard-hook" "$work/hook.saved"
 echo "# changed" >> "$prefixroot/opt/agy/libexec/agy-guard-hook"
 refuses "the guard hook script was changed" "is not the hook install-agy.sh wrote"
@@ -315,6 +334,30 @@ cp "$work/hook.saved" "$prefixroot/opt/agy/libexec/agy-guard-hook"
 git -C "$work/repo" config --add include.path "$work/wt-example/planted.config"
 refuses "git configuration includes a file inside the worktree" "inside a directory agy can write"
 git -C "$work/repo" config --unset include.path "$work/wt-example/planted.config"
+# The same through a conditional include whose condition holds a space, which a split on spaces would cut short.
+git -C "$work/repo" config "includeIf.gitdir:/srv/My Project/.git/.path" "$work/wt-example/planted.config"
+refuses "a conditional include with a space in its condition names a file inside the worktree" "inside a directory agy can write"
+git -C "$work/repo" config --unset "includeIf.gitdir:/srv/My Project/.git/.path"
+# An included file with a second hard link inside the worktree, made before launch, stays writable through that link.
+echo '[example]' > "$common/config.local"
+ln "$common/config.local" "$work/wt-example/config-local-alias"
+refuses "an included git configuration file has another hard link" "another hard link"
+rm "$work/wt-example/config-local-alias" "$common/config.local"
+# Commands git would run from a writable root: a hook directory, an fsmonitor and a filter, relative or not.
+for setting in "core.hooksPath .githooks" "core.hooksPath $work/wt-example/hooks" "core.fsmonitor ./fsmonitor.sh" \
+  "filter.example.clean sh ./fmt.sh" "filter.example.process $home/.cache/example-filter"; do
+  key=${setting%% *}
+  git -C "$work/repo" config "$key" "${setting#* }"
+  echo x > "$work/wt-example/fmt.sh"
+  refuses "git configuration sets $setting" "inside a directory agy can write"
+  git -C "$work/repo" config --unset "$key"
+  rm "$work/wt-example/fmt.sh"
+done
+git -C "$work/repo" config filter.example.process "git-lfs filter-process"
+git -C "$work/repo" config core.fsmonitor false
+run true >/dev/null 2>&1 || fail "the launcher refused a filter run from PATH and core.fsmonitor false"
+git -C "$work/repo" config --unset filter.example.process
+git -C "$work/repo" config --unset core.fsmonitor
 # Everything above the hook, the guard and the bun must be the installer's own and writable by no one else, and
 # outside every writable root.
 chmod g+w "$prefixroot/opt/agy/libexec"

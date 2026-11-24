@@ -187,8 +187,9 @@ pinned `bwrap`, with this view:
   `~/.cache/anderton-agy/`, never the caches host tools run from.
 - **Read-only even inside those:** every hook and plugin location agy reads, and this worktree's `config.worktree`,
   `commondir` and `.git` pointer, which host git reads.
-- **Hidden:** credential stores (`~/.claude`, `~/.codex*`, `~/.config/gh`, `~/.ssh`, `~/.git-credentials`, `~/.netrc` and
-  more) and the sockets of processes that would run a command for the worker.
+- **Hidden:** credential stores (every entry of the home whose name starts with `.claude` or `.codex`, a backup or second
+  account included; `~/.config/gh`, `~/.ssh`, `~/.git-credentials`, `~/.netrc` and more) and the sockets of processes
+  that would run a command for the worker.
 
 Just before agy starts, it refuses to run unless all of these hold, checked inside the sandbox:
 
@@ -202,7 +203,10 @@ Before that it also refuses:
 - a policy file inside a writable root;
 - a second hard link to any protected file;
 - a git configuration include (plain or conditional, from the system, global or repository config, followed
-  recursively) of a file inside a writable root;
+  recursively) of a file inside a writable root, and any git configuration file with a second hard link;
+- a `core.hooksPath`, `core.fsmonitor` or `filter.*.clean`/`smudge`/`process` command that resolves inside a writable
+  root. A relative path counts as relative to the worktree, so a repository that sets `core.hooksPath` to a tracked
+  directory (husky's `.husky`, a `.githooks`) cannot run agy workers;
 - a hook, guard or bun with any directory above it not owned by root, writable by others, or inside a writable root.
   The installer checks the prefix's directories the same way.
 
@@ -221,6 +225,16 @@ is taken literally:
 **What the sandbox does not cover.** Workers share the host's network namespace. They can reach loopback services,
 abstract Unix sockets, and a pathname socket opened after launch, as host Claude and Codex workers can. Phase 1's fleet
 provider runs agy in containers instead. `/tmp` stays shared for host-wide locks.
+
+**Host git must never run in an agy worktree.** A worker writes everything git reads there apart from the protected
+files, so host git in it could run the worker's code with none of the sandbox around it. `spawn.sh`, `retire.sh` and
+`waiting.sh` (#42) read an agy worktree only through the launcher, inside a read-only sandbox; run nothing else there.
+
+**Git inside the sandbox, known limits.** The repository's own config stays read-only, so `git push -u` publishes the
+branch but cannot record its upstream: push with `git push origin <branch>`, and the Anderton opens the PR from the pushed
+ref. `git fetch --deepen` or `--unshallow` in a shallow clone cannot work: git rewrites the repository's `shallow` file
+through a lock file it creates beside it, and the directory holding both stays read-only. Start agy workers from a full
+clone.
 
 `test/agy-sandbox.test.sh` checks the view, and each refusal, against a throwaway install.
 

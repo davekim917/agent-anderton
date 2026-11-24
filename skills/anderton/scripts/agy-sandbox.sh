@@ -231,33 +231,72 @@ for path in "$base/libexec/agy-guard-hook" "$(pinned guard)/agy-guard.sh" "$base
   done
 done
 
-# Git configuration may include other files; one inside a writable root would let the worker give host git a setting.
-# Every include from the system, global and repository configuration is followed, conditional ones too.
-include_targets() { # include_targets <config file> <depth>
+# Git configuration may include other files; one inside a writable root, or with a second hard link the worker could
+# have made in one, would let the worker give git a setting. Every include from the system, global and repository
+# configuration is followed, conditional ones too. git's NUL-separated output keeps a key or path with spaces whole.
+config_values() { # config_values <config file> <key regex>: each value, NUL-terminated
+  local entry
+  while IFS= read -r -d '' entry; do
+    case $entry in *$'\n'*) printf '%s\0' "${entry#*$'\n'}" ;; esac
+  done < <(git config --file "$1" --null --get-regexp "$2" 2>/dev/null)
+}
+include_targets() { # include_targets <config file> <depth>: every file it includes, there yet or not, NUL-terminated
   local file=$1 depth=$2 value target
   [ -f "$file" ] && [ "$depth" -lt 10 ] || return 0
-  while IFS= read -r value; do
+  while IFS= read -r -d '' value; do
     [ -n "$value" ] || continue
     case $value in
       \~/*) target="$HOME/${value#\~/}" ;;
       /*) target=$value ;;
       *) target="$(dirname "$file")/$value" ;;
     esac
-    printf '%s\n' "$target"
+    printf '%s\0' "$target"
     include_targets "$target" $((depth + 1))
-  done <<EOF
-$(git config --file "$file" --get-regexp '^include(if\..*)?\.path$' 2>/dev/null | cut -d' ' -f2-)
-EOF
+  done < <(config_values "$file" '^include(if\..*)?\.path$')
 }
-while IFS= read -r path; do
-  [ -n "$path" ] || continue
+config_files=() included=()
+for path in /etc/gitconfig "$HOME/.gitconfig" "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" "$common/config" \
+  "$common/config.worktree" "$gitdir/config.worktree"; do
+  [ ! -f "$path" ] || config_files+=("$path")
+done
+while IFS= read -r -d '' path; do included+=("$path"); done < <(
+  for file in "${config_files[@]}"; do include_targets "$file" 0; done)
+for path in "${included[@]}"; do [ ! -f "$path" ] || config_files+=("$path"); done
+for path in "${config_files[@]}"; do
+  [ "$(stat -c %h "$path")" -le 1 ] || die "git configuration file $path has another hard link; remove it before starting agy."
+done
+for path in "${included[@]}"; do
   for check in "$path" "$(readlink -f "$path")"; do
     ! inside_writable "$check" || die "git configuration includes $path, which is inside a directory agy can write."
   done
-done <<EOF
-$(for file in /etc/gitconfig "$HOME/.gitconfig" "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" "$common/config" \
-  "$common/config.worktree" "$gitdir/config.worktree"; do include_targets "$file" 0; done)
-EOF
+done
+# A hook directory, fsmonitor or filter command git would run from a writable root runs the worker's code, for host
+# git most of all; host git must never run in an agy worktree (spawn.sh and retire.sh read it only inside a sandbox),
+# and no setting may point it there either. A relative path is relative to the worktree git runs in.
+resolves_writable() { # resolves_writable <path as configured>
+  local path=$1
+  case $path in \~/*) path="$HOME/${path#\~/}" ;; /*) ;; *) path="$wt/$path" ;; esac
+  inside_writable "$path" || inside_writable "$(readlink -m "$path")"
+}
+for path in "${config_files[@]}"; do
+  while IFS= read -r -d '' value; do
+    resolves_writable "$value" && die "git configuration sets core.hooksPath $value, inside a directory agy can write."
+  done < <(config_values "$path" '^core\.hookspath$')
+  while IFS= read -r -d '' value; do
+    case $(printf '%s' "$value" | tr '[:upper:]' '[:lower:]') in true | false | yes | no | on | off | 1 | 0 | '') continue ;; esac
+    resolves_writable "${value%% *}" && die "git configuration sets core.fsmonitor $value, inside a directory agy can write."
+  done < <(config_values "$path" '^core\.fsmonitor$')
+  while IFS= read -r -d '' value; do
+    read -r -a words <<<"$value"
+    for word in "${words[@]}"; do
+      case $word in
+        */*) resolves_writable "$word" || continue ;;
+        *) [ -e "$wt/$word" ] || continue ;;
+      esac
+      die "git configuration runs the filter command '$value', which names $word inside a directory agy can write."
+    done
+  done < <(config_values "$path" '^filter\..*\.(clean|smudge|process)$')
+done
 
 refuse_workspace_config
 # The guard's policy files, and their directory, may not sit where the worker can write them, nor be links that could.
@@ -296,7 +335,12 @@ for path in "$HOME/.claude" "$HOME/.codex" "$HOME/.config/gh" "$HOME/.ssh" "$HOM
   "$HOME/.config/gcloud" "$HOME/.docker"; do
   mkdir -p "$path"
 done
-for path in "$HOME/.claude" "$HOME/.codex" "$HOME"/.codex-* "$HOME/.config/gh" "$HOME/.ssh" "$HOME/.gnupg" \
+# Every entry of the home whose name starts with .codex or .claude (a backup, a second account), by a literal prefix.
+while IFS= read -r -d '' path; do
+  name=${path##*/}
+  if [ "${name#.codex}" != "$name" ] || [ "${name#.claude}" != "$name" ]; then add_mask "$path"; fi
+done < <(find "$HOME" -mindepth 1 -maxdepth 1 -print0)
+for path in "$HOME/.config/gh" "$HOME/.ssh" "$HOME/.gnupg" \
   "$HOME/.aws" "$HOME/.config/gcloud" "$HOME/.docker" "$HOME/.config/herdr" "$HOME/.config/pairfob" \
   "$HOME/.git-credentials" "$HOME/.netrc" \
   "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" "/tmp/tmux-$(id -u)" /var/run/docker.sock "${HERDR_SOCKET_PATH:-}"; do

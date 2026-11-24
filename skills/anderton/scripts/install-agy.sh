@@ -120,6 +120,16 @@ while :; do
   [ "$dir" = / ] && break
   dir=$(dirname "$dir")
 done
+# What an earlier install left under the prefix is read back (sandbox.conf) or kept (a complete guard copy), so all of
+# it must be the installer's own too: owned by root (or by you, when not root), writable by no one else, no file a link.
+for top in "$prefix/agy" "$prefix/agy-guard"; do
+  [ -e "$top" ] || [ -L "$top" ] || continue
+  bad=$(find "$top" \( ! -user "$(id -u)" -o \( ! -type l -perm /022 \) \) -print -quit) || die "could not check $top."
+  [ -z "$bad" ] || die "$bad, under the prefix, is not owned by $(id -un) or is writable by others; remove it, then rerun."
+done
+for path in "$prefix/agy/etc/sandbox.conf" "$prefix/agy/etc"; do
+  [ ! -L "$path" ] || die "$path is a symbolic link; remove it, then rerun."
+done
 [ -n "$bwrap" ] || bwrap=$(command -v bwrap) || die "bwrap is not installed; pass --bwrap."
 bwrap=$(readlink -f "$bwrap")
 trusted_executable "$bwrap"
@@ -205,7 +215,7 @@ if [ -f "$root/etc/sandbox.conf" ]; then cp "$root/etc/sandbox.conf" "$work/sand
   {
     echo '# Paths agy workers do not see, besides the launcher'"'"'s built-in credential masks. One per line:'
     echo '#   mask <path> (the rest of the line, taken literally), rw <path> <reason>, gh-token-file <path>. A leading'
-    echo '#   "~/" is the home. ~/.codex and every ~/.codex-* are masked by the launcher itself.'
+    echo '#   "~/" is the home. Every entry of the home named .codex* or .claude* is masked by the launcher itself.'
   } > "$work/sandbox.conf"
 fi
 for line in 'mask ~/.git-credentials' 'mask ~/.netrc' 'mask ~/.config/gh' 'mask ~/.claude' \
