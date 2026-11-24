@@ -53,10 +53,7 @@ jobs:
           bun-version: 1.4.2
       - name: agy guard install
         if: runner.os == 'Linux'
-        run: |
-          # The registration runs the hook with PATH=/usr/local/bin:/usr/bin:/bin, as on the host.
-          sudo ln -sf "$(command -v bun)" /usr/local/bin/bun
-          AGY_GUARD_CHECKOUT="$PWD/.bootstrap" /bin/bash test/agy-guard-install.test.sh
+        run: AGY_GUARD_CHECKOUT="$PWD/.bootstrap" /bin/bash test/agy-guard-install.test.sh
       - name: shellcheck
         if: runner.os == 'Linux'
         run: shellcheck skills/anderton/scripts/*.sh test/*.sh

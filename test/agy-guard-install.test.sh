@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # install-agy.sh against a real bootstrap checkout at the commit in test/agy-guard.commit, the guard this repository was
 # verified with: the installed hook must answer agy as the guard does, through the registration it wrote.
-# Runs: AGY_GUARD_CHECKOUT=<bootstrap checkout> bash test/agy-guard-install.test.sh (Linux, bun 1.3.3 or newer as
-# /usr/local/bin/bun, the PATH the registration gives the hook). Without AGY_GUARD_CHECKOUT it says so and passes.
+# Runs: AGY_GUARD_CHECKOUT=<bootstrap checkout> bash test/agy-guard-install.test.sh (Linux, bun 1.3.3 or newer on PATH,
+# which the installer copies in). Without AGY_GUARD_CHECKOUT it says so and passes.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -18,47 +18,52 @@ got=$(git -C "$AGY_GUARD_CHECKOUT" rev-parse HEAD)
 
 work=$(mktemp -d "$here/../.agy-guard-install-test.XXXXXX")
 work=$(cd "$work" && pwd -P)
-trap 'rm -rf "$work"' EXIT
+# The installer takes only a bun it can trust, so the one on PATH is copied where only this user can write.
+bundir=$(mktemp -d /tmp/agy-guard-install-bun.XXXXXX)
+trap 'rm -rf "$work" "$bundir"' EXIT
+install -m 0755 "$(readlink -f "$(command -v bun)")" "$bundir/bun"
 failures=0
 fail() {
   echo "FAIL: $1"
   failures=$((failures + 1))
 }
 
-mkdir -p "$work/release" "$work/home" "$work/scope" "$work/cwd"
+# A home with a space in its path, which the hook command must carry.
+home="$work/home dir"
+mkdir -p "$work/release" "$home" "$work/scope" "$work/cwd"
 printf '#!/bin/sh\nexit 0\n' > "$work/release/antigravity"
 chmod +x "$work/release/antigravity"
 tar -czf "$work/release.tar.gz" -C "$work/release" antigravity
 printf 'version=0.0.0-test\nurl=https://example.invalid/agy.tar.gz\nsha256=%s\n' \
   "$(sha256sum "$work/release.tar.gz" | cut -d' ' -f1)" > "$work/agy.pin"
-"$scripts/install-agy.sh" --user "$(id -un)" --home "$work/home" --guard "$AGY_GUARD_CHECKOUT/plugins/workflow-agents/hooks" \
-  --scope-dir "$work/scope" --prefix "$work/opt" --pin "$work/agy.pin" --tarball "$work/release.tar.gz" >/dev/null
+"$scripts/install-agy.sh" --user "$(id -un)" --home "$home" --guard "$AGY_GUARD_CHECKOUT/plugins/workflow-agents/hooks" \
+  --scope-dir "$work/scope" --bun "$bundir/bun" --prefix "$work/opt" --pin "$work/agy.pin" --tarball "$work/release.tar.gz" >/dev/null
+HOME="$home" "$scripts/register-agy.sh" --prefix "$work/opt" >/dev/null
 
 installed=$(sed -n 's/^guard=//p' "$work/opt/agy/etc/pin")
 for file in agy-guard.sh agy-guard.ts agy-supervisor.ts guard-policy.ts; do
   cmp -s "$AGY_GUARD_CHECKOUT/plugins/workflow-agents/hooks/$file" "$installed/$file" || fail "the installed $file differs from the checkout's"
 done
 
-# The hook command exactly as agy runs it: its words carry no quoting, since the installer refuses paths that need it.
-command=$(jq -r '.["agent-anderton-agy-guard"].PreToolUse[0].hooks[0].command' "$work/home/.gemini/config/hooks.json")
+# The hook command as agy runs it, by a shell or as words split on spaces: both must reach the guard.
+command=$(jq -r '.["agent-anderton-agy-guard"].PreToolUse[0].hooks[0].command' "$home/.gemini/config/hooks.json")
 read -r -a words <<<"$command"
-hook() { # hook <tool name> <args json>: the installed hook's reply to one agy call
-  jq -nc --arg name "$1" --argjson args "$2" --arg cwd "$work/cwd" \
-    '{hookEventName: "PreToolUse", toolCall: {name: $name, args: $args, id: "call-1"}, cwd: $cwd}' |
-    (cd "$work/cwd" && "${words[@]}")
+hook() { # hook <tool name> <args json>: the installed hook's replies to one agy call, by shell, then by split words
+  local payload
+  payload=$(jq -nc --arg name "$1" --argjson args "$2" --arg cwd "$work/cwd" \
+    '{hookEventName: "PreToolUse", toolCall: {name: $name, args: $args, id: "call-1"}, cwd: $cwd}')
+  (cd "$work/cwd" && sh -c "$command" <<<"$payload")
+  echo
+  (cd "$work/cwd" && "${words[@]}" <<<"$payload")
 }
 reply=$(hook run_command '{"CommandLine":"git status"}')
-[ "$reply" = '{"decision":"allow"}' ] || fail "a safe command was not allowed: $reply"
+[ "$reply" = $'{"decision":"allow"}\n{"decision":"allow"}' ] || fail "a safe command was not allowed: $reply"
 reply=$(hook run_command '{"CommandLine":"snow sql -q \"DROP TABLE example_db.core.orders\""}')
-case $(jq -r '"\(.decision) \(.reason)"' <<<"$reply") in
-  "deny "*"Drop Snowflake table"*) ;;
-  *) fail "a destructive command was not denied by the guard: $reply" ;;
-esac
+[ "$(jq -sr '[.[] | select(.decision == "deny" and (.reason | contains("Drop Snowflake table")))] | length' <<<"$reply")" = 2 ] ||
+  fail "a destructive command was not denied by the guard both ways: $reply"
 reply=$(hook write_file '{"Path":".agents/hooks.json","Content":"{}"}')
-case $(jq -r '"\(.decision) \(.reason)"' <<<"$reply") in
-  "deny "*"hook-config location"*) ;;
-  *) fail "a write to a hook config was not denied: $reply" ;;
-esac
+[ "$(jq -sr '[.[] | select(.decision == "deny" and (.reason | contains("hook-config location")))] | length' <<<"$reply")" = 2 ] ||
+  fail "a write to a hook config was not denied both ways: $reply"
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures agy-guard-install check(s) failed"
