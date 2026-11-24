@@ -256,6 +256,14 @@ run() {
 attempts='
 w() { if (eval "$2") >/dev/null 2>&1; then echo "wrote $1"; else echo "denied $1"; fi; }
 w worktree-agents       "echo x > .agents/hooks.json"
+e() { if err=$( (eval "$2") 2>&1 >/dev/null); then echo "wrote $1"; else case $err in *"Read-only file system"*) echo "erofs $1" ;; *) echo "denied-otherwise $1: $err" ;; esac; fi; }
+e alias-agent-hooks     "mkdir -p .agent && echo {} > .agent/hooks.json"
+e alias-uagents-hooks   "mkdir -p _agents && echo {} > _agents/hooks.json"
+e alias-uagent-hooks    "mkdir -p _agent && echo {} > _agent/hooks.json"
+e root-agents-plugin    "mkdir -p .agents/plugins/example"
+e alias-agent-plugin    "mkdir -p .agent/plugins/example"
+e alias-uagents-plugin  "mkdir -p _agents/plugins/example"
+e alias-uagent-plugin   "mkdir -p _agent/plugins/example"
 w worktree-agents-mv    "mv .agents agents-moved"
 w global-hooks          "echo {} > \"$HOME\"/.gemini/config/hooks.json"
 w gemini-hooks          "echo {} > \"$HOME\"/.gemini/hooks.json"
@@ -313,6 +321,16 @@ done
 for wrote in worktree-file python-control git-commit state-file cache-file tmp-file host-cache read-glob-sibling token-in-env; do
   printf '%s\n' "$out" | grep -qx "wrote $wrote" || fail "$wrote should be writable: $(printf '%s\n' "$out" | grep " $wrote\$")"
 done
+for root in alias-agent-hooks alias-uagents-hooks alias-uagent-hooks root-agents-plugin alias-agent-plugin \
+  alias-uagents-plugin alias-uagent-plugin; do
+  printf '%s\n' "$out" | grep -qx "erofs $root" || fail "$root was not refused read-only: $(printf '%s\n' "$out" | grep " $root")"
+done
+# The workspace roots the launcher creates are empty directories, which git does not list.
+for root in .agents .agent _agents _agent; do
+  [ -d "$work/wt-example/$root" ] && [ -z "$(ls -A "$work/wt-example/$root")" ] || fail "the launcher left $root other than an empty directory"
+done
+[ -z "$(git -C "$work/wt-example" status --porcelain --untracked-files=all -- .agents .agent _agents _agent)" ] ||
+  fail "git lists the workspace roots the launcher created: $(git -C "$work/wt-example" status --porcelain --untracked-files=all)"
 # The worker's cache is its own: what it writes there never reaches the cache host tools read and run from.
 [ ! -e "$home/.cache/example" ] && [ ! -e "$home/.cache/pre-commit-example" ] ||
   fail "a write to the worker's ~/.cache reached the host's"
@@ -460,16 +478,17 @@ mkdir "$work/agents-target"
 ln -s "$work/agents-target" "$home/.gemini/config/agents"
 refuses "the user's config/agents is a link to an empty directory" "config/agents is a symbolic link"
 rm "$home/.gemini/config/agents"
-# agy also reads .agent, _agents and _agent as customization roots, like .agents; the worktree may hold none of them.
+# agy also reads .agent, _agents and _agent as workspace roots, like .agents: each may only be missing or empty.
 for alias in .agent _agents _agent; do
-  mkdir "$work/wt-example/$alias"
-  refuses "the worktree has a $alias directory" "/$alias exists;"
-  rmdir "$work/wt-example/$alias"
+  mkdir -p "$work/wt-example/$alias"
+  echo '{}' > "$work/wt-example/$alias/hooks.json"
+  refuses "the worktree's $alias holds hooks" "/$alias is not empty"
+  rm -r "$work/wt-example/$alias"
   : > "$work/wt-example/$alias"
-  refuses "the worktree has a $alias file" "/$alias exists;"
+  refuses "the worktree has a $alias file" "/$alias is not a directory"
   rm "$work/wt-example/$alias"
   ln -s ../alias-elsewhere "$work/wt-example/$alias"
-  refuses "the worktree has a dangling $alias link" "/$alias exists;"
+  refuses "the worktree has a dangling $alias link" "/$alias is a symbolic link"
   rm "$work/wt-example/$alias"
 done
 # A plugin's agents directory loads its definitions too, in the user's plugins and the worktree's; empty, it may stay.

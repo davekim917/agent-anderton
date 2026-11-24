@@ -56,7 +56,7 @@ customizations="agents agents.json plugins plugins.json rules rules.json skills 
 # commits and fetches write (common_writable).
 read_only_paths() {
   local wt=$1 gitdir=$2 entry
-  printf '%s\n' "$wt/.agents" "$gemini/config" "$gemini/hooks.json" "$gitdir/config.worktree" "$gitdir/commondir" "$wt/.git"
+  printf '%s\n' "$wt/.agents" "$wt/.agent" "$wt/_agents" "$wt/_agent" "$gemini/config" "$gemini/hooks.json" "$gitdir/config.worktree" "$gitdir/commondir" "$wt/.git"
   for entry in $customizations; do printf '%s\n' "$state/$entry"; done
 }
 
@@ -201,7 +201,7 @@ owner_of() {
 # directory of a plugin. One with inheritCustomizations: false, or inheritScopes none or repo_and_org, runs its subagent
 # with no hooks at all, so the guard would not see it.
 refuse_workspace_config() {
-  local entry plugin
+  local entry plugin agent_why="a custom agent there can run its subagent with no hooks, so the guard would not see it."
   for entry in hooks.json plugins plugins.json plugins.txt; do
     if [ "$entry" = hooks.json ] && { [ -e "$wt/.agents/$entry" ] || [ -L "$wt/.agents/$entry" ]; }; then
       die "$wt/.agents/hooks.json exists; workspace hooks can switch the guard off."
@@ -213,37 +213,30 @@ refuse_workspace_config() {
   if [ -e "$wt/.agents/agents" ] || [ -L "$wt/.agents/agents" ]; then
     die "$wt/.agents/agents exists; a custom agent defined there can run its subagent with no hooks, so the guard would not see it."
   fi
-  # The other names agy reads as a workspace root, like .agents, and which are not read-only in the sandbox.
+  # The other names agy reads as a workspace root, like .agents. The launcher creates each empty and binds it read-only.
   for entry in .agent _agents _agent; do
-    if [ -e "$wt/$entry" ] || [ -L "$wt/$entry" ]; then
-      die "$wt/$entry exists; agy reads it as a workspace customization root, so its hooks or custom agents could switch the guard off."
-    fi
+    refuse_nonempty "$wt/$entry" "agy reads it as a workspace customization root, so its hooks or custom agents could switch the guard off."
   done
-  refuse_agent_definitions "$gemini/config/agents"
+  refuse_nonempty "$gemini/config/agents" "$agent_why"
   for plugin in "$gemini/config/plugins" "$wt/.agents/plugins"; do
     [ -d "$plugin" ] || continue
     for entry in "$plugin"/* "$plugin"/.[!.]* "$plugin"/..?*; do
       if [ -L "$entry" ]; then
         die "$entry is a symbolic link; its target could stay writable, and a plugin's custom agent can run its subagent with no hooks."
       fi
-      [ ! -d "$entry" ] || refuse_agent_definitions "$entry/agents"
+      [ ! -d "$entry" ] || refuse_nonempty "$entry/agents" "$agent_why"
     done
   done
 }
 
-# refuse_agent_definitions <dir>: the directory may be missing or empty, never a link or anything holding a definition.
-refuse_agent_definitions() {
-  local dir=$1 entry
-  if [ -L "$dir" ]; then
-    die "$dir is a symbolic link; its target could stay writable, and a custom agent there can run its subagent with no hooks."
-  fi
+# refuse_nonempty <dir> <why>: the directory may be missing or empty, never a link, anything else, or holding an entry.
+refuse_nonempty() {
+  local dir=$1 why=$2 entry
+  [ ! -L "$dir" ] || die "$dir is a symbolic link, whose target could stay writable; $why"
   [ -e "$dir" ] || return 0
-  [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] ||
-    die "$dir is not a directory agy-sandbox can list; a custom agent there can run its subagent with no hooks."
+  [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] || die "$dir is not a directory agy-sandbox can list; $why"
   for entry in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
-    if [ -e "$entry" ] || [ -L "$entry" ]; then
-      die "$dir is not empty ($entry); a custom agent there can run its subagent with no hooks, so the guard would not see it."
-    fi
+    if [ -e "$entry" ] || [ -L "$entry" ]; then die "$dir is not empty ($entry); $why"; fi
   done
 }
 
@@ -535,7 +528,7 @@ $(scope_files)
 EOF
 
 # Hook and plugin config agy reads stays read-only, inside the writable roots too.
-mkdir -p "$wt/.agents"
+for entry in .agents .agent _agents _agent; do mkdir -p "$wt/$entry"; done
 for path in "$gemini/hooks.json" "$state/hooks.json"; do
   [ -f "$path" ] || die "$path is missing; run install-agy.sh."
 done

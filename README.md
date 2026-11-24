@@ -248,8 +248,9 @@ pinned `bwrap`, with this view:
   directory the worker user owns and can write; under one it cannot (a `~/.bun` root installed bun into), the sandbox
   gets it in a read-only tmpfs over that directory, with the directory's own entries bound back read-only. It refuses
   such a directory it cannot list, and one holding a link that resolves into a writable root.
-- **Read-only even inside those:** every hook, plugin and agent location agy reads, agy's built-in plugins and skills
-  (`~/.gemini/antigravity-cli/builtin`), and this worktree's `config.worktree`, `commondir` and `.git` pointer, which
+- **Read-only even inside those:** every hook, plugin and agent location agy reads, among them all four workspace roots
+  (`.agents`, `.agent`, `_agents`, `_agent`), which the launcher creates empty when missing; agy's built-in plugins
+  and skills (`~/.gemini/antigravity-cli/builtin`); and this worktree's `config.worktree`, `commondir` and `.git` pointer, which
   host git reads.
 - **Hidden:** credential stores (every entry of the home whose name starts with `.claude` or `.codex`, a backup or second
   account included; `~/.config/gh`, `~/.ssh`, `~/.git-credentials`, `~/.netrc` and more) and the sockets of processes
@@ -264,8 +265,8 @@ Just before agy starts, it refuses to run unless all of these hold, checked insi
   timeout;
 - agy has a non-empty stored login;
 - no `.agents/hooks.json` sits above the worktree;
-- the worktree has no `.agents/agents` at all (directory, file or link), and no `.agent`, `_agents` or `_agent`, the
-  other names agy reads as a workspace customization root;
+- the worktree has no `.agents/agents` at all (directory, file or link), and `.agent`, `_agents` and `_agent`, the
+  other names agy reads as a workspace customization root, are each missing or an empty directory, never a link;
 - `~/.gemini/config/agents`, and the `agents` directory of every plugin in `~/.gemini/config/plugins/` and the
   worktree's `.agents/plugins/`, is missing or an empty directory, never a link, and no plugin there is a link;
 - every protected path is mounted read-only;
@@ -293,8 +294,10 @@ Inside, it also checks that `hookbin/` holds only the pinned bun, byte for byte,
 `inheritScopes` to `none` or `repo_and_org`, runs its subagent with no hooks, so the guard never sees what that subagent
 does. A plugin's `agents/` directory loads the same way. These directories are read-only inside the sandbox, but a
 repository can ship `.agents/agents`, and a worker can commit one for a later worktree to check out, so the launcher
-refuses to start instead. A repository that ships agent definitions, or uses `.agent`, `_agents` or `_agent` at its
-root, cannot run agy workers.
+refuses to start instead. agy also reloads a workspace root's `hooks.json` mid-session, so a worker that could create
+`.agent/hooks.json` could switch the guard off for its next turn: all four roots are bound read-only. A repository that
+ships agent definitions, or anything in `.agent`, `_agents` or `_agent` at its root, cannot run agy workers. The
+empty directories the launcher creates are not tracked, so they leave `git status` clean.
 
 **Known limit, startup window:** the checks inside the sandbox run just before agy starts, and agy discovers agent
 definitions after that. The protected directories are read-only only to the worker: a process on the host that writes
