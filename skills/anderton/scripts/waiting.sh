@@ -67,6 +67,11 @@ if [ -n "$worker_list" ]; then
   exit 0
 fi
 
+held_worker() { # held_worker <worker_record args...>: true when retire.sh holds that worker, whose hold line stands for it
+  local r
+  r=$(worker_record "$@")
+  [ -n "$r" ] && [ -f "${r%.json}.held" ]
+}
 # A retirement retire.sh held for messages since the worker's last report stays listed until the worker is retired, so
 # the worker is never left idle and unread. Under --blocked, the header alone, which the watch tells once.
 for h in "$holders"/workers/*.held; do
@@ -118,6 +123,7 @@ EOF
   if [ -n "$blocked" ] && [ "$status" != waiting ]; then continue; fi
   tag=""
   if is_worker "$name" "$cwd" "$sid" "$pid" "$start"; then
+    if [ -n "$blocked" ] && held_worker "$name" "$cwd" "$sid" "$pid" "$start"; then continue; fi
     [ "$status" = waiting ] || continue
     tag=" (worker)"
   fi
@@ -433,6 +439,7 @@ claude agents --json 2>/dev/null |
     if held_by "$sid"; then continue; fi
     tag=""
     if is_worker "$name" "$cwd" "$sid"; then
+      if [ -n "$blocked" ] && held_worker "$name" "$cwd" "$sid"; then continue; fi
       [ "$state" = blocked ] || continue
       tag=" (worker)"
     fi

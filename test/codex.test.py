@@ -801,14 +801,16 @@ class WorkerTest(unittest.TestCase):
 
     def reported_launch(self):
         self.worker["codexLaunchToken"] = "6f1c2b9e-0000-4000-8000-00000000abcd"
-        self.client.turns = [{"id": "launch", "status": "completed"}]
-        self.client.items = {"launch": [user_message("Anderton launch 6f1c2b9e-0000-4000-8000-00000000abcd\n\nFix the login."),
-                                        message("RESULT: PR ready, login test passes")]}
+        launch = self.worker["id"]
+        self.client.turns = [{"id": launch, "status": "completed"}]
+        self.client.items = {launch: [user_message("Anderton launch 6f1c2b9e-0000-4000-8000-00000000abcd\n\nFix the login."),
+                                      message("RESULT: PR ready, login test passes")]}
 
     def typed_turn(self, turn, text, at_ms, status="completed"):
         typed = user_message(text)
         typed["item"]["clientId"] = f"tui-{turn}"
-        typed["startedAtMs"] = typed["completedAtMs"] = at_ms
+        if at_ms is not None:
+            typed["startedAtMs"] = typed["completedAtMs"] = at_ms
         self.client.turns.insert(0, {"id": turn, "status": status})
         self.client.items[turn] = [typed, message("Looking into it.")]
 
@@ -841,12 +843,22 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual((0, []), self.inbound())
         self.assertIn(direction["clientUserMessageId"], self.worker["codexDirectionLedger"]["ids"])
 
-    def test_a_direction_sent_before_the_ledger_existed_is_known_by_its_text_only(self):
+    def test_text_never_makes_a_message_the_andertons(self):
         self.reported_launch()
-        self.typed_turn("old-direction", worker_api.DIRECTION_PREFIX + "Rebase on main", 1795000000250)
-        self.assertEqual((0, []), self.inbound())
-        self.worker["codexDirectionLedger"] = {"since": 1795000000000, "ids": []}
+        self.typed_turn("direction-text", worker_api.DIRECTION_PREFIX + "Rebase on main", 1795000000250)
         self.assertEqual(4, self.inbound()[0])
+        self.client.turns.pop(0)
+        self.typed_turn("launch-text", "Anderton launch 6f1c2b9e-0000-4000-8000-00000000abcd\n\nAlso fix logout.", 1795000000250)
+        self.assertEqual(4, self.inbound()[0])
+
+    def test_an_item_with_no_time_of_its_own_is_cleared_only_through_its_turns_end(self):
+        self.reported_launch()
+        self.typed_turn("running", "Wait, check the staging logs first.", None, status="inProgress")
+        self.client.turns[0]["startedAt"] = 1795000000
+        self.assertEqual(4, self.inbound("--reviewed-through", "2026-11-18T11:06:43Z")[0])
+        self.client.turns[0].update(status="interrupted", completedAt=1795000010)
+        self.assertEqual(4, self.inbound("--reviewed-through", "2026-11-18T11:06:43Z")[0])
+        self.assertEqual((0, []), self.inbound("--reviewed-through", "2026-11-18T11:06:50Z"))
 
     def test_a_worker_with_no_thread_cannot_be_read(self):
         self.worker["id"] = ""

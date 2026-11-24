@@ -523,12 +523,23 @@ final reply that is one; for a Codex worker, a completed turn whose final messag
 from anyone but that Anderton (typed in the worker's tab, a voice relay, another session, a Codex TUI turn)
 holds the retirement: it exits 4, lists each message's time and first line, and writes `<name>.held` beside the
 record, which `waiting.sh` (and so the watch) lists until the worker is retired. The Anderton's own messages are
-known from the record: its name and the processes its claim and session name, and for Codex, the directions
-`worker.sh message` recorded sending. What Claude Code injects does not count: tool results, skill bodies,
-compaction summaries, hook and Stop feedback, system reminders, task notifications, usage-reset and
-permission-grant prompts, sub-agent hand-backs, agent-team teammates and side-agent notes. A conversation it
+known from the record alone, never from a display name or the caller: the processes Claude Code verified as the
+record's spawner session, and for Codex, the client ids of the directions `worker.sh message` recorded sending. An
+entry a person typed counts whatever its text, apart from the launch brief itself. What Claude Code injects does not
+count: tool results, skill bodies, compaction summaries, hook and Stop feedback, system reminders, task
+notifications, usage-reset and permission-grant prompts, sub-agent hand-backs and agent-team teammates. A report
+counts only on the send's own evidence that it arrived, and a call Claude Code appends again counts once. A conversation it
 cannot read is held, never read as quiet, and so is every agy worker, which keeps no transcript.
-`--reviewed-through <ISO time>`, not in the future, clears the messages up to that time.
+`--reviewed-through <ISO time>`, not in the future, clears the messages up to that time. On an unreadable
+conversation or an agy worker it is the whole evidence, and `retire.sh` says so when it retires on it. Before each close
+it reads the conversation again, so a message that arrives while it works holds it too.
+
+**Known limits, the held check:** it guards oversight, not an adversarial worker. A Codex worker's ledger of the
+Anderton's directions lives in its record, which a worker with write access to the worker registry can edit. The
+ledger keeps the last 500 directions: after 501 with no report between them, the oldest, once its pending entry is
+pruned, reads as someone else's message and holds the retirement until reviewed. The Anderton's own messages are known
+by the processes its recorded session ran as; one sent from a process of that session that has left Claude Code's
+registry reads as another session's.
 
 **`adopt.sh <name>`** makes the calling Anderton answer for a live session the user opened in its
 repository, as for a worker it started: it writes a worker record naming the caller, so the session's

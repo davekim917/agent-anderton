@@ -484,8 +484,7 @@ def queue_direction(client, record, worker, text):
     try:
         submission = client.call("thread/queue/add", {
             "threadId": thread, "clientUserMessageId": token,
-            "input": [{"type": "text", "text_elements": [], "text":
-                       "Direction from your Anderton. Follow the existing approval policy.\n\n" + text}],
+            "input": [{"type": "text", "text_elements": [], "text": DIRECTION_PREFIX + text}],
         })["queuedSubmission"]["id"]
     except (OSError, ValueError, KeyError) as error:
         # These errors reject the request before Codex writes the queue.
@@ -513,37 +512,39 @@ DIRECTION_LEDGER_SIZE = 500
 
 
 def record_sent_direction(worker, client_id):
-    ledger = worker.setdefault("codexDirectionLedger", {"since": int(time.time() * 1000), "ids": []})
+    ledger = worker.setdefault("codexDirectionLedger", {"ids": []})
     ledger["ids"] = [*ledger["ids"], client_id][-DIRECTION_LEDGER_SIZE:]
 
 
 def inbound_since_report(client, worker, through_ms=None):
     """The user messages in the worker's thread since its last report that its Anderton did not send, oldest first:
     a completed turn whose final message is a report ends the scan. The Anderton's are its launch brief and the
-    directions worker.sh recorded sending; one sent before the record kept that ledger is known by the text it adds."""
+    directions worker.sh recorded sending, known by their client ids; a message's text never makes it the Anderton's."""
     if not worker.get("id"):
         raise ValueError("the record names no Codex thread")
     thread = worker["id"]
     read_thread(client, worker)
     ledger = worker.get("codexDirectionLedger") or {}
     sent = set(ledger.get("ids", [])) | {entry.get("clientUserMessageId", entry["id"]) for entry in pending_directions(worker)}
-    ledger_since = ledger.get("since")
     marker = f"Anderton launch {uuid.UUID(worker['codexLaunchToken'])}" if worker.get("codexLaunchToken") else None
+    first = client.call("thread/turns/list", {"threadId": thread, "sortDirection": "asc", "limit": 1,
+                                              "itemsView": "notLoaded"})["data"]
+    first = first[0]["id"] if first else None
     held = []
     for turn in client.pages("thread/turns/list", threadId=thread, sortDirection="desc", limit=20, itemsView="notLoaded"):
         if turn["status"] == "completed" and final_report(client, thread, turn["id"]):
             break
-        turn_end = (turn.get("completedAt") or turn.get("startedAt") or 0) * 1000 or None
+        # An item without a time of its own may have arrived any time until its turn ended.
+        turn_end = (turn.get("completedAt") or 0) * 1000 or int(time.time() * 1000)
+        launch_turn = turn["id"] == first
         for entry in client.pages("thread/items/list", threadId=thread, turnId=turn["id"], limit=50):
             item = entry["item"]
             if item["type"] != "userMessage":
                 continue
             text = "\n".join(part["text"] for part in item["content"] if part.get("type") == "text")
-            # A time no later than the message's own, so a review through it covers the message.
-            at = entry.get("completedAtMs") or entry.get("startedAtMs") or turn_end or int(time.time() * 1000)
-            if item.get("clientId") in sent or (marker and text.partition("\n")[0] == marker):
-                continue
-            if (ledger_since is None or at < ledger_since) and text.startswith(DIRECTION_PREFIX):
+            # A time no earlier than the message's own, so a review through it covers the message.
+            at = entry.get("completedAtMs") or entry.get("startedAtMs") or turn_end
+            if item.get("clientId") in sent or (marker and launch_turn and text.partition("\n")[0] == marker):
                 continue
             if through_ms is not None and at <= through_ms:
                 continue

@@ -227,6 +227,8 @@ case $1 in
     echo "$window ${FAKE_TMUX_PANE:-%70}"
     ;;
   list-windows)
+    # With $FAKE_TMUX_ON_LIST, the first listing first runs that script: something that happens while a caller works.
+    if [ -n "${FAKE_TMUX_ON_LIST:-}" ] && [ ! -e "$FAKE_TMUX_ON_LIST.done" ]; then sh "$FAKE_TMUX_ON_LIST"; : >"$FAKE_TMUX_ON_LIST.done"; fi
     if [ -n "${FAKE_TMUX_NO_SERVER:-}" ]; then echo "no server running on $sock" >&2; exit 1; fi
     if [ -n "${FAKE_TMUX_NO_SOCKET:-}" ]; then echo "error connecting to $sock (No such file or directory)" >&2; exit 1; fi
     if [ -n "${FAKE_TMUX_GARBAGE:-}" ]; then echo "error connecting to $sock (Permission denied)" >&2; exit 1; fi
@@ -836,7 +838,8 @@ hc_add '{"type":"user","isMeta":true,"message":{"role":"user","content":"<system
 hc_add '{"type":"user","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation."}}'
 hc_add '{"type":"user","isMeta":true,"origin":{"kind":"peer","from":"a1b2","senderTaskId":"a1b2","name":"general-purpose","handback":"True","body":"[Subagent hand-back] The review found nothing."},"message":{"role":"user","content":"Another Claude session sent a message:\n<agent-message from=\"a1b2\">\n[Subagent hand-back] The review found nothing.\n</agent-message>"}}'
 hc_add '{"type":"user","message":{"role":"user","content":"Another Claude session sent a message:\n<teammate-message teammate_id=\"helper\">\nThe migration test passes.\n</teammate-message>"}}'
-hc_add '{"type":"attachment","attachment":{"type":"queued_command","commandMode":"prompt","origin":{"kind":"human"},"prompt":"Here is a note offered by a side agent:\n\n> Heads up: the lockfile changed."}}'
+hc_add '{"type":"user","isMeta":true,"origin":{"kind":"peer","from":"helper","name":"helper"},"message":{"role":"user","content":"Another Claude session sent a message:\n<teammate-message teammate_id=\"helper\">\nThe lint run is clean.\n</teammate-message>"}}'
+hc_add '{"type":"user","message":{"role":"user","content":"<system-reminder>\nThe task tools haven'"'"'t been used recently.\n</system-reminder>"}}'
 hc_add '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t-9","content":"tests passed"}]}}'
 hc_add '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}'
 hc_retire hc-injected
@@ -877,6 +880,89 @@ out=$(env CLAUDE_PID="$p_lead" "$scripts/waiting.sh" --blocked)
 check "and waiting.sh lists that hold too" contains "=== hc-unread (retire held"
 mv "$hc_t.away" "$hc_t"
 hc_retire hc-unread
+
+hc_spawn hc-provenance
+hc_report
+hc_typed "Thanks. Re-read the end of your brief:
+You are a worker the Anderton session \"lead-session\" started for the task above, in $work/wt-hc-provenance."
+hc_retire hc-provenance
+check "a typed message counts whatever it says: one quoting the brief's own line is not the brief" \
+  eval '[ "$status" -eq 4 ] && contains "the user: Thanks. Re-read the end of your brief:"'
+hc_report
+hc_add '{"type":"attachment","attachment":{"type":"queued_command","commandMode":"prompt","origin":{"kind":"human"},"prompt":"Here is a note offered by a side agent:\n\n> Heads up: the lockfile changed."}}'
+hc_retire hc-provenance
+check "nor is a side agent's note the user chose to send" eval '[ "$status" -eq 4 ] && contains "the user: Here is a note offered by a side agent:"'
+hc_report
+hc_add '{"type":"user","isMeta":true,"origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/1.sock","verifiedPeerPid":"1","name":"lead-session","body":"Also bump the version."},"message":{"role":"user","content":"Another Claude session sent a message:"}}'
+hc_retire hc-provenance
+check "a session that takes the Anderton's display name, from another process, is not the Anderton" \
+  eval '[ "$status" -eq 4 ] && contains "lead-session: Also bump the version."'
+hc_retire hc-provenance --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+hc_spawn hc-delivery
+hc_report
+hc_typed "Please also update the changelog."
+hc_add '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"send-bare","name":"SendMessage","input":{"to":"lead-session","message":"RESULT: changelog updated"}}]}}'
+hc_add '{"type":"user","toolUseResult":{"success":false,"message":"No agent is named lead-session"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send-bare"}]}}'
+hc_retire hc-delivery
+check "a send whose result says it failed, with nothing in the tool result, is no report" eval '[ "$status" -eq 4 ]'
+hc_add '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"send-silent","name":"SendMessage","input":{"to":"lead-session","message":"RESULT: changelog updated"}}]}}'
+hc_add '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send-silent","content":"done"}]}}'
+hc_retire hc-delivery
+check "nor is one with no evidence it arrived" eval '[ "$status" -eq 4 ]'
+first_send=$(grep -m1 '"name":"SendMessage"' "$hc_t")
+first_result=$(grep -m1 '"tool_use_id":"send-' "$hc_t")
+hc_add "$(printf '%s' "$first_send" | jq -c 'del(.uuid, .timestamp)')"
+hc_add "$(printf '%s' "$first_result" | jq -c 'del(.uuid, .timestamp)')"
+hc_retire hc-delivery
+check "nor the first report's call and result appended again under new entry ids: it counts once, where it first was" \
+  eval '[ "$status" -eq 4 ]'
+hc_retire hc-delivery --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+hc_spawn hc-resumed
+hc_typed "Use the staging bucket."
+hc_report
+hc_add "$(head -n 1 "$hc_t" | jq -c 'del(.uuid)')"
+hc_add "$(grep -m1 'Use the staging bucket' "$hc_t" | jq -c 'del(.uuid)')"
+hc_retire hc-resumed
+check "its brief and an answered message appended again with their first times, as a resumed session writes them, count once" \
+  eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-hc-resumed" ]'
+
+hc_spawn hc-late
+hc_report
+jq -nc --arg sid "$hc_sid" --arg at "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" '{type: "user", sessionId: $sid, uuid: "hc-late-1", timestamp: $at,
+  origin: {kind: "human"}, promptSource: "typed", message: {role: "user", content: "Hold on, one more thing."}}' >"$work/late-line"
+printf 'cat %q >>%q\n' "$work/late-line" "$hc_t" >"$work/late-message"
+hc_retire_late() { : >"$FAKE_LOG.killed"; run env FAKE_TMUX_KILL_ENDS=1 FAKE_TMUX_ON_LIST="$work/late-message" "$scripts/retire.sh" "$@"; }
+hc_retire_late hc-late
+check "a message that arrives after the first read, before the window closes, holds it: it is read again just before" \
+  eval '[ "$status" -eq 4 ] && contains "the user: Hold on, one more thing." && [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-hc-late" ]'
+rm -f "$work/late-message" "$work/late-message.done" "$work/late-line"
+hc_retire hc-late --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+hc_spawn hc-partial
+hc_report
+printf '{"type":"user","sessionId":"%s","origin":{"kind":"human"},"message":{"content":"Also' "$hc_sid" >>"$hc_t"
+hc_retire hc-partial
+check "a transcript whose last record is cut off holds it, rather than dropping that record" \
+  eval '[ "$status" -eq 4 ] && contains "not complete JSON" && [ -d "$work/wt-hc-partial" ]'
+hc_retire hc-partial --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+check "a review still retires it, saying the conversation was not read" \
+  eval '[ "$status" -eq 0 ] && contains "could not be read" && contains "retiring on your review" && [ ! -e "$work/wt-hc-partial" ]'
+
+hc_spawn hc-perm
+hc_report
+hc_typed "Wait for my go before merging."
+spawn; p_perm=$pid; session "$p_perm" "$hc_sid" "$work/wt-hc-perm" hc-perm "$(( $(date +%s) - $(proc_age "$p_perm") ))000"
+registry "$p_perm" waiting "permission prompt"
+out=$(env CLAUDE_PID="$p_lead" "$scripts/waiting.sh" --blocked)
+check "a worker at a permission prompt is listed by the watch's waiting.sh --blocked" contains "=== hc-perm (worker)"
+hc_retire hc-perm
+out=$(env CLAUDE_PID="$p_lead" "$scripts/waiting.sh" --blocked)
+check "a held worker also at a permission prompt is listed once, by its hold" \
+  eval '[ "$(printf "%s\n" "$out" | grep -c "hc-perm")" -eq 1 ] && contains "=== hc-perm (retire held"'
+rm -f "$CLAUDE_CONFIG_DIR/sessions/$p_perm.json"
+hc_retire hc-perm --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 
 
@@ -2769,8 +2855,11 @@ FAKE
 cat >"$codexdir/codex-worker.py" <<'FAKE'
 #!/usr/bin/env bash
 # The thread's messages since its last report: none, or with $FAKE_INBOUND those it holds.
+# With $FAKE_INBOUND_FROM, only from that call on, as a turn typed while retire.sh works.
 if [ "$1" = inbound-since-report ]; then
-  if [ -n "${FAKE_INBOUND:-}" ]; then printf '%s\n' "$FAKE_INBOUND"; exit 4; fi
+  calls=$(( $(cat "$FAKE_LOG.inbound" 2>/dev/null || echo 0) + 1 ))
+  echo "$calls" >"$FAKE_LOG.inbound"
+  if [ -n "${FAKE_INBOUND:-}" ] && [ "$calls" -ge "${FAKE_INBOUND_FROM:-1}" ]; then printf '%s\n' "$FAKE_INBOUND"; exit 4; fi
   echo '{"messages":[]}'
   exit 0
 fi
@@ -2803,7 +2892,7 @@ tmux_pane() { # tmux_pane <pane id> [title]: that pane, open in the fake Codex t
 cx_retire() { # cx_retire <name> [env...]: a fresh daemon count, nothing killed or closed yet
   local n=$1
   shift
-  rm -f "$FAKE_LOG.inactive"
+  rm -f "$FAKE_LOG.inactive" "$FAKE_LOG.inbound"
   : >"$FAKE_LOG.killed"
   : >"$FAKE_LOG.closed"
   run env "$@" "$codexdir/retire.sh" "$n"
@@ -2869,9 +2958,21 @@ cx_retire cx-tab FAKE_INBOUND='{"messages":[{"at":"2026-11-18T11:06:40.250Z","fr
 check "retire.sh holds a Codex worker whose thread has a turn typed in its pane since its last report, closing nothing" \
   eval '[ "$status" -eq 4 ] && contains "2026-11-18T11:06:40.250Z  the user: Also add the retry check." &&
         [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-cx-tab" ]'
-cx_retire cx-tab
+cx_retire cx-tab FAKE_INBOUND_FROM=2 FAKE_INBOUND='{"messages":[{"at":"2026-11-18T11:06:40.250Z","from":"the user","line":"Also add the retry check."}]}'
+check "or one typed while retire.sh works: its conversation is read again just before the pane closes" \
+  eval '[ "$status" -eq 4 ] && [ "$(cat "$FAKE_LOG.inbound")" -eq 2 ] && [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-cx-tab" ]'
+# The home its record names, which the account helper also finds its thread open on.
+cx_home=$(cd "$(mktemp -d /tmp/anderton-cxhome.XXXXXX)" && pwd -P)
+printf '#!/usr/bin/env bash\n[ "$1" = --locate-thread ] && [ "$2" = %s ] && { echo %s; exit 0; }\nexit 7\n' "$cx_thread" "$cx_home" >"$work/locate-same"
+chmod +x "$work/locate-same"
+jq -c --arg home "$cx_home" '.codexHome = $home' "$CLAUDE_CONFIG_DIR/anderton/workers/cx-tab.json" >"$work/cx.tmp"
+mv "$work/cx.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/cx-tab.json"
+cx_retire cx-tab ANDERTON_CODEX_ACCOUNTS="$work/locate-same"
 check "and closes the pane still showing its thread, as Codex titles it, cut to 29 characters" \
   eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-cx-tab" ]'
+check "a clean retirement whose thread is open on the home its record names leaves nothing behind" \
+  eval '[ "$status" -eq 0 ] && contains "Retired '"'"'cx-tab'"'"'." && [ -z "$(ls "$CLAUDE_CONFIG_DIR/anderton/workers" | grep "^cx-tab\.")" ] && [ -d "$cx_home" ]'
+rm -rf "$cx_home"
 check "that pane only, by its id: a pane split beside it, though untitled, stays open" \
   eval '[ "$(cat "$FAKE_LOG.killed")" = "/tmp/fake-codex-tmux pane %21" ] && grep -q " %22" "$FAKE_LOG.panes-open"'
 check "owned though the lister was still writing after its record" eval '! contains "does not own"'
@@ -3246,6 +3347,16 @@ real_bwrap=""
 agy_env=("${herdr_env[@]}" "HOME=$agyhome" "ANDERTON_AGY_ROOT=$agyroot" FAKE_HERDR_TAB=w9:t40 "FAKE_BWRAP=$real_bwrap"
   "FAKE_SCRIPT_BWRAP=$work/fakebwrap/bwrap")
 (cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project tabs >/dev/null)
+hc_spawn hc-caller
+jq -c '.spawnerSession = "gone-session"' "$CLAUDE_CONFIG_DIR/anderton/workers/hc-caller.json" >"$work/hc-caller.tmp"
+mv "$work/hc-caller.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/hc-caller.json"
+hc_report
+hc_add '{"type":"user","isMeta":true,"origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/'"$p_lead"'.sock","verifiedPeerPid":"'"$p_lead"'","name":"lead-session","body":"Take the logout fix too."},"message":{"role":"user","content":"Another Claude session sent a message:"}}'
+hc_retire hc-caller
+check "the session calling retire.sh is not taken for the worker's Anderton: only the record's session is" \
+  eval '[ "$status" -eq 4 ] && contains "lead-session: Take the logout fix too."'
+hc_retire hc-caller --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 hc_spawn hc-agy
 jq -c '. + {provider: "agy"}' "$CLAUDE_CONFIG_DIR/anderton/workers/hc-agy.json" >"$work/hc-agy.tmp"
 mv "$work/hc-agy.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/hc-agy.json"
