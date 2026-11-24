@@ -226,6 +226,11 @@ than this one left there can still hold bun's `node_modules/.cache` links, and t
 names the link. Remove that copy, `<prefix>/agy-guard/<digest>`, and rerun. Nothing is installed in `/opt` yet, so no
 such copy exists today.
 
+**Known limit, agy versions:** agy unpacks its built-in plugins and skills into `~/.gemini/antigravity-cli/builtin` on a
+run, and rewrites them only when their checksum changes. The launcher keeps that directory read-only and refuses to
+start without it, or with one that lacks its `.manifest` or `.checksum`, so after any change of agy version, run agy
+once unsandboxed, as the worker user (the login command above), to reseed it before any worker starts.
+
 `test/agy-guard-install.test.sh` installs from the bootstrap commit in `test/agy-guard.commit` and checks the installed
 hook's replies, run both by a shell and as split words. CI runs it.
 
@@ -243,8 +248,10 @@ pinned `bwrap`, with this view:
   directory the worker user owns and can write; under one it cannot (a `~/.bun` root installed bun into), the sandbox
   gets it in a read-only tmpfs over that directory, with the directory's own entries bound back read-only. It refuses
   such a directory it cannot list, and one holding a link that resolves into a writable root.
-- **Read-only even inside those:** every hook and plugin location agy reads, and this worktree's `config.worktree`,
-  `commondir` and `.git` pointer, which host git reads.
+- **Read-only even inside those:** every hook, plugin and agent location agy reads, among them all four workspace roots
+  (`.agents`, `.agent`, `_agents`, `_agent`), which the launcher creates empty when missing; agy's built-in plugins
+  and skills (`~/.gemini/antigravity-cli/builtin`); and this worktree's `config.worktree`, `commondir` and `.git` pointer, which
+  host git reads.
 - **Hidden:** credential stores (every entry of the home whose name starts with `.claude` or `.codex`, a backup or second
   account included; `~/.config/gh`, `~/.ssh`, `~/.git-credentials`, `~/.netrc` and more) and the sockets of processes
   that would run a command for the worker.
@@ -258,11 +265,22 @@ Just before agy starts, it refuses to run unless all of these hold, checked insi
   timeout;
 - agy has a non-empty stored login;
 - no `.agents/hooks.json` sits above the worktree;
+- each of the four workspace roots (`.agents`, `.agent`, `_agents`, `_agent`) is missing, or a directory holding only
+  `rules/`, `skills/` and `workflows/`, each a real directory with no link and no `hooks.json` at any depth. Anything
+  else there is refused by name: `hooks.json`, `plugins/`, `agents/`, `skills.json` or any other file, and links;
+- `~/.gemini/config/agents`, and the `agents` directory of every plugin in `~/.gemini/config/plugins/`, is missing or
+  an empty directory, never a link, and no plugin there is a link;
+- `~/.gemini/config/plugins.json` and agy's state-directory `~/.gemini/antigravity-cli/plugins.json`, which can
+  register a plugin from anywhere, are each missing, empty or `{}`, never a link and never unreadable (both of the
+  file's fields, `entries` and `inherits`, are optional, so `{}` registers nothing). These workspace and user checks
+  also run before `bwrap` starts;
 - every protected path is mounted read-only;
 - the guard's policy files are not writable.
 
 Before that it also refuses:
 - a policy file inside a writable root;
+- a missing or unseeded `~/.gemini/antigravity-cli/builtin` (agy's built-in plugins and skills): it must hold
+  `.manifest` and `.checksum` as regular files. It never stands an empty, read-only directory in for them;
 - a second hard link to any protected file;
 - a git configuration include (plain or conditional, from the system, global or repository config, followed
   recursively) of a file inside a writable root, and any git configuration file with a second hard link;
@@ -275,6 +293,31 @@ Before that it also refuses:
 
 Inside, it also checks that `hookbin/` holds only the pinned bun, byte for byte, read-only, at a release no older than
 1.3.3.
+
+**Agent definitions.** agy loads custom agent definitions (`<name>.md` or `<name>/agent.md`) from the worktree's
+`.agents/agents/` and from `~/.gemini/config/agents/`. One whose frontmatter sets `inheritCustomizations: false`, or
+`inheritScopes` to `none` or `repo_and_org`, runs its subagent with no hooks, so the guard never sees what that subagent
+does. A plugin's `agents/` directory loads the same way. These directories are read-only inside the sandbox, but a
+repository can ship `.agents/agents`, and a worker can commit one for a later worktree to check out, so the launcher
+refuses to start instead. agy also reloads a workspace root's `hooks.json` mid-session, so a worker that could create
+`.agent/hooks.json` could switch the guard off for its next turn: all four roots are bound read-only. A workspace
+plugin can carry hooks and agents, and `skills.json` or `plugins.json` can name customizations anywhere, so a root may
+hold only rules, skills and workflows, which carry none of those. A repository that ships anything else in a workspace
+root cannot run agy workers. The empty directories the launcher creates are not tracked, so they leave `git status`
+clean.
+
+**Known limit, startup window:** the checks inside the sandbox run just before agy starts, and agy discovers agent
+definitions after that. The protected directories are read-only only to the worker: a process on the host that writes
+one in that window (a checkout into the worktree, say) gets its definition loaded, and the read-only bind keeps it
+there. Nothing on the host should write a worker's worktree or `~/.gemini/config` while the worker starts.
+
+**Known limit, branch switches:** `rules/`, `skills/` and `workflows/` in a workspace root pass the launcher's checks
+but are read-only for the whole session, so a checkout inside the sandbox that would change, add or remove a file under
+them (switching to a branch with different rules, say) fails. Switch branches before the worker starts, or in a new one.
+
+**Known limit, unwritable worktrees:** the launcher creates any missing workspace root (`.agents`, `.agent`, `_agents`,
+`_agent`) at the worktree's top level before it binds it read-only. If that top level is not writable by the worker user
+and one of them is missing, the launcher cannot create it and exits with `mkdir`'s error before agy starts.
 
 `/opt/agy/etc/sandbox.conf` starts with masks for the credential stores and, with `--nanoclaw`, that install's `data/` and
 `.env`. Add lines, owned by root. A leading `~/` is the home; every other character, brackets and `*` and `?` included,

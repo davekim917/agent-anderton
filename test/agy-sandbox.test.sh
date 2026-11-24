@@ -223,6 +223,13 @@ git -C "$work/repo" -c user.name=example -c user.email=example@example.invalid c
 git -C "$work/repo" worktree add -q --detach "$work/wt-example" HEAD
 git -C "$work/repo" worktree add -q --detach "$work/wt-other" HEAD
 printf 'import sys\nopen(sys.argv[1], "w").write("x")\n' > "$work/wt-example/write.py"
+# agy's built-in plugins, as its first start unpacks them.
+mkdir -p "$home/.gemini/antigravity-cli/builtin/plugins/swarm"
+echo '{}' > "$home/.gemini/antigravity-cli/builtin/plugins/swarm/plugin.json"
+printf 'plugins/swarm/plugin.json\n' > "$home/.gemini/antigravity-cli/builtin/.manifest"
+printf 'example-checksum\n' > "$home/.gemini/antigravity-cli/builtin/.checksum"
+# A global plugin manifest that registers nothing: its entries and inherits are both optional.
+echo '{}' > "$home/.gemini/config/plugins.json"
 mkdir -p "$home/.claude" "$home/.codex-example" "$home/.codex.backup" "$home/.claude-example" "$home/.cache"
 for canary in "$home/.claude/canary" "$home/.codex-example/canary" "$home/.codex.backup/auth.json" \
   "$home/.claude-example/canary" "$home/.claude.json" "$home/.git-credentials" "$home/.netrc" \
@@ -253,12 +260,23 @@ run() {
 attempts='
 w() { if (eval "$2") >/dev/null 2>&1; then echo "wrote $1"; else echo "denied $1"; fi; }
 w worktree-agents       "echo x > .agents/hooks.json"
+e() { if err=$( (eval "$2") 2>&1 >/dev/null); then echo "wrote $1"; else case $err in *"Read-only file system"*) echo "erofs $1" ;; *) echo "denied-otherwise $1: $err" ;; esac; fi; }
+e alias-agent-hooks     "mkdir -p .agent && echo {} > .agent/hooks.json"
+e alias-uagents-hooks   "mkdir -p _agents && echo {} > _agents/hooks.json"
+e alias-uagent-hooks    "mkdir -p _agent && echo {} > _agent/hooks.json"
+e root-agents-plugin    "mkdir -p .agents/plugins/example"
+e alias-agent-plugin    "mkdir -p .agent/plugins/example"
+e alias-uagents-plugin  "mkdir -p _agents/plugins/example"
+e alias-uagent-plugin   "mkdir -p _agent/plugins/example"
+e config-plugins-json   "echo x > \"$HOME\"/.gemini/config/plugins.json"
 w worktree-agents-mv    "mv .agents agents-moved"
 w global-hooks          "echo {} > \"$HOME\"/.gemini/config/hooks.json"
 w gemini-hooks          "echo {} > \"$HOME\"/.gemini/hooks.json"
 w state-hooks           "echo {} > \"$HOME\"/.gemini/antigravity-cli/hooks.json"
 w state-plugins         "mkdir \"$HOME\"/.gemini/antigravity-cli/plugins/example"
 w state-agents-json     "echo [] > \"$HOME\"/.gemini/antigravity-cli/agents.json"
+w state-builtin         "echo {} > \"$HOME\"/.gemini/antigravity-cli/builtin/plugins/swarm/plugin.json"
+w state-builtin-new     "mkdir \"$HOME\"/.gemini/antigravity-cli/builtin/plugins/example"
 w gemini-moved          "mv \"$HOME\"/.gemini \"$HOME\"/gemini-moved"
 w git-hooks             "echo x > $(git rev-parse --git-common-dir)/hooks/post-checkout"
 w git-config            "git config --file $(git rev-parse --git-common-dir)/config core.hooksPath /tmp"
@@ -298,6 +316,7 @@ w tmp-file              "echo x > /tmp/agy-sandbox-example-$$"
 '
 out=$(run "$attempts" 2>&1) || fail "the launcher did not start: $out"
 for denied in worktree-agents worktree-agents-mv global-hooks gemini-hooks state-hooks state-plugins state-agents-json \
+  state-builtin state-builtin-new \
   gemini-moved git-hooks git-config home-rc python-write unshare-umount inherited-fd read-claude-canary read-codex-glob \
   read-codex-backup read-claude-prefix read-claude-json read-token-file \
   read-git-credentials read-netrc read-nanoclaw-data read-nanoclaw-env git-config-worktree git-info own-config-worktree \
@@ -307,6 +326,16 @@ done
 for wrote in worktree-file python-control git-commit state-file cache-file tmp-file host-cache read-glob-sibling token-in-env; do
   printf '%s\n' "$out" | grep -qx "wrote $wrote" || fail "$wrote should be writable: $(printf '%s\n' "$out" | grep " $wrote\$")"
 done
+for root in alias-agent-hooks alias-uagents-hooks alias-uagent-hooks root-agents-plugin alias-agent-plugin \
+  alias-uagents-plugin alias-uagent-plugin config-plugins-json; do
+  printf '%s\n' "$out" | grep -qx "erofs $root" || fail "$root was not refused read-only: $(printf '%s\n' "$out" | grep " $root")"
+done
+# The workspace roots the launcher creates are empty directories, which git does not list.
+for root in .agents .agent _agents _agent; do
+  [ -d "$work/wt-example/$root" ] && [ -z "$(ls -A "$work/wt-example/$root")" ] || fail "the launcher left $root other than an empty directory"
+done
+[ -z "$(git -C "$work/wt-example" status --porcelain --untracked-files=all -- .agents .agent _agents _agent)" ] ||
+  fail "git lists the workspace roots the launcher created: $(git -C "$work/wt-example" status --porcelain --untracked-files=all)"
 # The worker's cache is its own: what it writes there never reaches the cache host tools read and run from.
 [ ! -e "$home/.cache/example" ] && [ ! -e "$home/.cache/pre-commit-example" ] ||
   fail "a write to the worker's ~/.cache reached the host's"
@@ -433,6 +462,166 @@ rm "$work/wt-example/.agents/hooks.json"
 ln -s ../plugins-elsewhere "$work/wt-example/.agents/plugins"
 refuses "a workspace plugin location is a link" "is a symbolic link"
 rm "$work/wt-example/.agents/plugins"
+# A custom agent definition can turn hooks off for its subagent, so the worktree may hold none, in any form.
+mkdir -p "$work/wt-example/.agents/agents"
+refuses "the worktree has a custom agent directory" ".agents/agents exists"
+rmdir "$work/wt-example/.agents/agents"
+: > "$work/wt-example/.agents/agents"
+refuses "the worktree has a file where custom agents load" ".agents/agents exists"
+rm "$work/wt-example/.agents/agents"
+ln -s ../agents-elsewhere "$work/wt-example/.agents/agents"
+refuses "the worktree has a dangling link where custom agents load" ".agents/agents exists"
+rm "$work/wt-example/.agents/agents"
+# The user's agent directory may exist only empty, and never as a link.
+mkdir "$home/.gemini/config/agents"
+run true >/dev/null 2>&1 || fail "the launcher refused an empty ~/.gemini/config/agents: $(run true 2>&1)"
+printf -- '---\nname: example-agent\n---\n' > "$home/.gemini/config/agents/example-agent.md"
+refuses "the user's config/agents holds a definition" "config/agents is not empty"
+rm "$home/.gemini/config/agents/example-agent.md"
+rmdir "$home/.gemini/config/agents"
+mkdir "$work/agents-target"
+ln -s "$work/agents-target" "$home/.gemini/config/agents"
+refuses "the user's config/agents is a link to an empty directory" "config/agents is a symbolic link"
+rm "$home/.gemini/config/agents"
+# agy also reads .agent, _agents and _agent as workspace roots, like .agents: each may only be missing or empty.
+for alias in .agent _agents _agent; do
+  mkdir -p "$work/wt-example/$alias"
+  echo '{}' > "$work/wt-example/$alias/hooks.json"
+  refuses "the worktree's $alias holds hooks" "/$alias/hooks.json exists"
+  rm -r "$work/wt-example/$alias"
+  : > "$work/wt-example/$alias"
+  refuses "the worktree has a $alias file" "/$alias is not a directory"
+  rm "$work/wt-example/$alias"
+  ln -s ../alias-elsewhere "$work/wt-example/$alias"
+  refuses "the worktree has a dangling $alias link" "/$alias is a symbolic link"
+  rm "$work/wt-example/$alias"
+done
+# A plugin's agents directory loads its definitions too, in the user's plugins and the worktree's; empty, it may stay.
+mkdir -p "$home/.gemini/config/plugins/example/agents"
+echo '{}' > "$home/.gemini/config/plugins/example/plugin.json"
+run true >/dev/null 2>&1 || fail "the launcher refused a user plugin with an empty agents directory: $(run true 2>&1)"
+printf -- '---\nname: example-agent\n---\n' > "$home/.gemini/config/plugins/example/agents/example-agent.md"
+refuses "a user plugin holds an agent definition" "plugins/example/agents is not empty"
+mv "$home/.gemini/config/plugins/example" "$work/plugin-elsewhere"
+ln -s "$work/plugin-elsewhere" "$home/.gemini/config/plugins/example"
+refuses "a user plugin is a link" "plugins/example is a symbolic link"
+rm "$home/.gemini/config/plugins/example"
+rm -r "$work/plugin-elsewhere"
+mkdir -p "$work/wt-example/.agents/plugins/example/agents"
+printf -- '---\nname: example-agent\n---\n' > "$work/wt-example/.agents/plugins/example/agents/example-agent.md"
+refuses "a worktree plugin holds an agent definition" ".agents/plugins exists"
+rm -r "$work/wt-example/.agents/plugins"
+# A workspace root may hold only rules, skills and workflows, with no link and no hooks.json in them; a plugin there, in
+# any form, is refused.
+mkdir -p "$work/wt-example/.agents/plugins/example"
+echo '{}' > "$work/wt-example/.agents/plugins/example/hooks.json"
+refuses "a worktree plugin holds hooks" ".agents/plugins exists"
+rm -r "$work/wt-example/.agents/plugins"
+mkdir -p "$work/wt-example/.agents/plugins/example/skills/example-skill"
+echo '{}' > "$work/wt-example/.agents/plugins/example/plugin.json"
+printf -- '---\nname: example-skill\ndescription: an example\n---\n' > "$work/wt-example/.agents/plugins/example/skills/example-skill/SKILL.md"
+refuses "a worktree plugin holds only a skill" ".agents/plugins exists"
+rm -r "$work/wt-example/.agents/plugins"
+echo '{}' > "$work/wt-example/.agents/skills.json"
+refuses "the worktree declares skills elsewhere" ".agents/skills.json exists"
+rm "$work/wt-example/.agents/skills.json"
+mkdir -p "$work/wt-example/.agents/skills/example-skill"
+echo '{}' > "$work/wt-example/.agents/skills/example-skill/hooks.json"
+refuses "a hooks.json is nested under skills" "skills/example-skill/hooks.json is a link or a hooks.json"
+rm "$work/wt-example/.agents/skills/example-skill/hooks.json"
+ln -s "$work/agents-target" "$work/wt-example/.agents/skills/example-skill/linked"
+refuses "a link is nested under skills" "skills/example-skill/linked is a link or a hooks.json"
+rm "$work/wt-example/.agents/skills/example-skill/linked"
+mkdir -p "$work/wt-example/.agents/rules" "$work/wt-example/.agents/workflows"
+echo 'Use tabs.' > "$work/wt-example/.agents/rules/example.md"
+printf -- '---\nname: example-skill\ndescription: an example\n---\n' > "$work/wt-example/.agents/skills/example-skill/SKILL.md"
+echo 'Run the tests.' > "$work/wt-example/.agents/workflows/example.md"
+run true >/dev/null 2>&1 || fail "the launcher refused rules, skills and workflows in .agents: $(run true 2>&1)"
+rm -r "$work/wt-example/.agents/rules" "$work/wt-example/.agents/skills" "$work/wt-example/.agents/workflows"
+# agy unpacks its built-ins on an unsandboxed run; the launcher never stands an empty directory in for them.
+mv "$home/.gemini/antigravity-cli/builtin" "$work/builtin.saved"
+refuses "agy's built-ins are missing" "builtin is missing; run"
+[ ! -e "$home/.gemini/antigravity-cli/builtin" ] || fail "the launcher created a missing builtin directory"
+mv "$work/builtin.saved" "$home/.gemini/antigravity-cli/builtin"
+# A seed agy never finished, an empty directory or one missing its checksum, is refused the same way.
+mv "$home/.gemini/antigravity-cli/builtin" "$work/builtin.saved"
+mkdir "$home/.gemini/antigravity-cli/builtin"
+refuses "agy's built-ins are an empty directory" "builtin has no .manifest, so agy has not seeded it; run agy once outside the sandbox"
+cp "$work/builtin.saved/.manifest" "$home/.gemini/antigravity-cli/builtin/.manifest"
+refuses "agy's built-ins hold only .manifest" "builtin has no .checksum, so agy has not seeded it; run agy once outside the sandbox"
+# A marker that is not a regular file is no seed either: a directory, or a link to the real one.
+rm "$home/.gemini/antigravity-cli/builtin/.manifest"
+cp "$work/builtin.saved/.checksum" "$home/.gemini/antigravity-cli/builtin/.checksum"
+mkdir "$home/.gemini/antigravity-cli/builtin/.manifest"
+refuses "agy's built-ins have a directory for .manifest" "builtin has no .manifest, so agy has not seeded it; run agy once outside the sandbox"
+rmdir "$home/.gemini/antigravity-cli/builtin/.manifest"
+ln -s "$work/builtin.saved/.manifest" "$home/.gemini/antigravity-cli/builtin/.manifest"
+refuses "agy's built-ins have a link for .manifest" "builtin has no .manifest, so agy has not seeded it; run agy once outside the sandbox"
+rm -r "$home/.gemini/antigravity-cli/builtin"
+mv "$work/builtin.saved" "$home/.gemini/antigravity-cli/builtin"
+# The global plugins.json can register a plugin from anywhere, with its hooks and agents: only one that registers
+# nothing may be there, never a link.
+printf '{"entries":[{"path":"~/example-plugins"}]}\n' > "$home/.gemini/config/plugins.json"
+refuses "the global plugins.json registers a plugin" "config/plugins.json registers plugins"
+printf '{"inherits":[{"path":"/srv/example/plugins.json"}]}\n' > "$home/.gemini/config/plugins.json"
+refuses "the global plugins.json inherits another" "config/plugins.json registers plugins"
+echo '{}' > "$work/plugins-json-target"
+rm "$home/.gemini/config/plugins.json"
+ln -s "$work/plugins-json-target" "$home/.gemini/config/plugins.json"
+refuses "the global plugins.json is a link to an empty manifest" "config/plugins.json is a symbolic link"
+rm "$home/.gemini/config/plugins.json"
+run true >/dev/null 2>&1 || fail "the launcher refused a missing ~/.gemini/config/plugins.json: $(run true 2>&1)"
+# One it cannot read could hold anything, so it is refused, not read as empty. Root reads it anyway.
+if [ "$(id -u)" != 0 ]; then
+  echo '{}' > "$home/.gemini/config/plugins.json"
+  chmod 000 "$home/.gemini/config/plugins.json"
+  refuses "the global plugins.json cannot be read" "config/plugins.json is not a file agy-sandbox can read"
+  rm -f "$home/.gemini/config/plugins.json"
+fi
+# agy's state directory holds a plugins.json of its own, checked the same way.
+state_manifest="$home/.gemini/antigravity-cli/plugins.json"
+rm -f "$state_manifest"
+printf '{"entries":[{"path":"~/example-plugins"}]}\n' > "$state_manifest"
+refuses "agy's state-directory plugins.json registers a plugin" "antigravity-cli/plugins.json registers plugins"
+echo '{}' > "$work/plugins-json-target"
+rm "$state_manifest"
+ln -s "$work/plugins-json-target" "$state_manifest"
+refuses "agy's state-directory plugins.json is a link to an empty manifest" "antigravity-cli/plugins.json is a symbolic link"
+rm "$state_manifest"
+if [ "$(id -u)" != 0 ]; then
+  echo '{}' > "$state_manifest"
+  chmod 000 "$state_manifest"
+  refuses "agy's state-directory plugins.json cannot be read" "antigravity-cli/plugins.json is not a file agy-sandbox can read"
+  rm -f "$state_manifest"
+fi
+echo '{}' > "$state_manifest"
+run true >/dev/null 2>&1 || fail "the launcher refused {} in agy's state-directory plugins.json: $(run true 2>&1)"
+rm "$state_manifest"
+: > "$home/.gemini/config/plugins.json"
+run true >/dev/null 2>&1 || fail "the launcher refused an empty ~/.gemini/config/plugins.json: $(run true 2>&1)"
+echo '{}' > "$home/.gemini/config/plugins.json"
+# A definition that appears after the checks before bwrap, as the sandbox starts, is refused by the checks inside it:
+# the pinned bwrap, wrapped, plants one on the host just before it builds the real (not the dry-run) view.
+cp "$prefixroot/opt/agy/etc/pin" "$work/pin.saved"
+printf '#!/bin/sh\ncase " $* " in *" --inside "*) mkdir -p "%s" ;; esac\nexec "%s" "$@"\n' \
+  "$work/wt-example/.agents/agents" "$(sed -n 's/^bwrap=//p' "$work/pin.saved")" > "$work/bwrap-plant"
+chmod 0755 "$work/bwrap-plant"
+sed -i "s|^bwrap=.*|bwrap=$work/bwrap-plant|" "$prefixroot/opt/agy/etc/pin"
+if got=$(run "echo ran > agy-ran" 2>&1); then fail "started although a custom agent directory appeared as the sandbox started"; fi
+case $got in *".agents/agents exists"*) ;; *) fail "the inside check refused a definition planted as the sandbox started for the wrong reason: $got" ;; esac
+[ -d "$work/wt-example/.agents/agents" ] && [ ! -e "$work/wt-example/agy-ran" ] ||
+  fail "the planted definition was not there, or agy ran, when the inside check ran"
+rm -rf "$work/wt-example/.agents/agents" "$work/wt-example/agy-ran"
+# The same for a plugins.json that registers a plugin, written as the sandbox starts.
+printf '#!/bin/sh\ncase " $* " in *" --inside "*) echo %s > "%s" ;; esac\nexec "%s" "$@"\n' \
+  "'{\"entries\":[{\"path\":\"/srv/example\"}]}'" "$home/.gemini/config/plugins.json" \
+  "$(sed -n 's/^bwrap=//p' "$work/pin.saved")" > "$work/bwrap-plant"
+if got=$(run "echo ran > agy-ran" 2>&1); then fail "started although plugins.json registered a plugin as the sandbox started"; fi
+case $got in *"config/plugins.json registers plugins"*) ;; *) fail "the inside check refused a plugins.json planted as the sandbox started for the wrong reason: $got" ;; esac
+[ ! -e "$work/wt-example/agy-ran" ] || fail "agy ran although plugins.json registered a plugin as the sandbox started"
+rm -f "$work/wt-example/agy-ran"
+echo '{}' > "$home/.gemini/config/plugins.json"
+cp "$work/pin.saved" "$prefixroot/opt/agy/etc/pin"
 ln -s ../outside-hooks.json "$work/wt-example/.agents/hooks.json"
 rm "$work/wt-example/.agents/hooks.json"
 mv "$home/.cache" "$home/cache-target"

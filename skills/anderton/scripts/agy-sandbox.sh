@@ -46,8 +46,9 @@ esac
 [ -n "${HOME:-}" ] && [ -d "$HOME" ] || die "HOME is not set."
 gemini="$HOME/.gemini"
 state="$gemini/antigravity-cli"
-# agy reads these from its state directory; a worker that could write one could add hooks, plugins or agents.
-customizations="agents agents.json plugins plugins.json rules rules.json skills skills.json workflows hooks.json secplugins"
+# agy reads these from its state directory; a worker that could write one could add hooks, plugins or agents. builtin
+# holds the plugins and skills agy ships, the enabled swarm plugin among them.
+customizations="agents agents.json plugins plugins.json rules rules.json skills skills.json workflows hooks.json secplugins builtin"
 
 # Every path the view below binds read-only inside a writable root, in bind order, for the check inside too. Host git
 # reads this worktree's config.worktree, commondir and .git pointer, so a worker that could write one could have host
@@ -55,7 +56,7 @@ customizations="agents agents.json plugins plugins.json rules rules.json skills 
 # commits and fetches write (common_writable).
 read_only_paths() {
   local wt=$1 gitdir=$2 entry
-  printf '%s\n' "$wt/.agents" "$gemini/config" "$gemini/hooks.json" "$gitdir/config.worktree" "$gitdir/commondir" "$wt/.git"
+  printf '%s\n' "$wt/.agents" "$wt/.agent" "$wt/_agents" "$wt/_agent" "$gemini/config" "$gemini/hooks.json" "$gitdir/config.worktree" "$gitdir/commondir" "$wt/.git"
   for entry in $customizations; do printf '%s\n' "$state/$entry"; done
 }
 
@@ -194,17 +195,74 @@ owner_of() {
   /usr/bin/stat -c %u "$1"
 }
 
-# agy loads hooks and plugins from the .agents directory of the worktree, which it treats as the workspace root. A
-# hooks.json there would load; a link there, even a dangling one, could point at a file the worker can still write.
+# agy treats the worktree as the workspace and reads four names at its root as customization roots, .agents, .agent,
+# _agents and _agent, for hooks, plugins, custom agents, rules, skills and workflows. A hooks.json there can switch the
+# guard off; a plugin can carry hooks and agents; a custom agent with inheritCustomizations: false, or inheritScopes none
+# or repo_and_org, runs its subagent with no hooks at all; skills.json and plugins.json can name customizations
+# anywhere. So a root may hold only real rules, skills and workflows directories, with no link and no hooks.json in
+# them. agy also loads custom agents from ~/.gemini/config/agents and from each plugin there when it starts, and loads
+# every plugin ~/.gemini/config/plugins.json registers, from anywhere; its entries and inherits are both optional.
 refuse_workspace_config() {
-  local entry
-  for entry in hooks.json plugins plugins.json plugins.txt; do
-    if [ "$entry" = hooks.json ] && { [ -e "$wt/.agents/$entry" ] || [ -L "$wt/.agents/$entry" ]; }; then
-      die "$wt/.agents/hooks.json exists; workspace hooks can switch the guard off."
-    fi
-    if [ -L "$wt/.agents/$entry" ]; then
-      die "$wt/.agents/$entry is a symbolic link; its target could stay writable."
-    fi
+  local root entry name found plugin agent_why="a custom agent there can run its subagent with no hooks, so the guard would not see it."
+  for root in "$wt/.agents" "$wt/.agent" "$wt/_agents" "$wt/_agent"; do
+    [ ! -L "$root" ] || die "$root is a symbolic link, whose target could stay writable; agy reads it as a workspace customization root."
+    [ -e "$root" ] || continue
+    [ -d "$root" ] || die "$root is not a directory; agy reads it as a workspace customization root."
+    [ -r "$root" ] && [ -x "$root" ] || die "$root cannot be listed, so agy-sandbox cannot check what agy would load from it."
+    for entry in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      name=${entry##*/}
+      case $name in
+        rules | skills | workflows)
+          [ ! -L "$entry" ] || die "$entry is a symbolic link; its target could stay writable."
+          [ -d "$entry" ] && [ -r "$entry" ] && [ -x "$entry" ] ||
+            die "$entry is not a directory agy-sandbox can list; only rules, skills and workflows directories may be in $root."
+          found=$(/usr/bin/find "$entry" \( -type l -o -name hooks.json \) -print -quit 2>/dev/null) ||
+            die "could not search $entry for links and hook files."
+          [ -z "$found" ] || die "$found is a link or a hooks.json inside $entry; agy could load hooks from it, or the worker could write through it."
+          ;;
+        *)
+          [ ! -L "$entry" ] || die "$entry exists and is a symbolic link; its target could stay writable."
+          [ "$name" != hooks.json ] || die "$entry exists; workspace hooks can switch the guard off."
+          die "$entry exists; only rules, skills and workflows may be in $root, and $name could carry hooks, plugins or custom agents that switch the guard off."
+          ;;
+      esac
+    done
+  done
+  refuse_nonempty "$gemini/config/agents" "$agent_why"
+  refuse_registrations "$gemini/config/plugins.json"
+  refuse_registrations "$state/plugins.json"
+  if [ -d "$gemini/config/plugins" ]; then
+    for plugin in "$gemini/config/plugins"/* "$gemini/config/plugins"/.[!.]* "$gemini/config/plugins"/..?*; do
+      if [ -L "$plugin" ]; then
+        die "$plugin is a symbolic link; its target could stay writable, and a plugin's custom agent can run its subagent with no hooks."
+      fi
+      [ ! -d "$plugin" ] || refuse_nonempty "$plugin/agents" "$agent_why"
+    done
+  fi
+}
+
+# refuse_registrations <plugins.json>: missing, empty or {}, never a link, unreadable, or registering a plugin, which
+# can carry hooks and custom agents from anywhere. Inside, a missing state-directory one is the launcher's read-only
+# /dev/null stand-in, a device no one can open there, which agy cannot read either.
+refuse_registrations() {
+  local file=$1 content why="a plugin it registers, from anywhere, can carry hooks and custom agents."
+  [ ! -L "$file" ] || die "$file is a symbolic link, whose target could stay writable; $why"
+  [ -e "$file" ] || return 0
+  if [ -c "$file" ] && [ "$(/usr/bin/stat -c %t:%T "$file")" = 1:3 ]; then return 0; fi
+  [ -f "$file" ] && [ -r "$file" ] || die "$file is not a file agy-sandbox can read; $why"
+  content=$(/usr/bin/tr -d '[:space:]' < "$file") || die "$file is not a file agy-sandbox can read; $why"
+  case $content in '' | '{}') ;; *) die "$file registers plugins; it may only be empty or {}, since $why" ;; esac
+}
+
+# refuse_nonempty <dir> <why>: the directory may be missing or empty, never a link, anything else, or holding an entry.
+refuse_nonempty() {
+  local dir=$1 why=$2 entry
+  [ ! -L "$dir" ] || die "$dir is a symbolic link, whose target could stay writable; $why"
+  [ -e "$dir" ] || return 0
+  [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] || die "$dir is not a directory agy-sandbox can list; $why"
+  for entry in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+    if [ -e "$entry" ] || [ -L "$entry" ]; then die "$dir is not empty ($entry); $why"; fi
   done
 }
 
@@ -496,11 +554,19 @@ $(scope_files)
 EOF
 
 # Hook and plugin config agy reads stays read-only, inside the writable roots too.
-mkdir -p "$wt/.agents"
+for entry in .agents .agent _agents _agent; do mkdir -p "$wt/$entry"; done
 for path in "$gemini/hooks.json" "$state/hooks.json"; do
   [ -f "$path" ] || die "$path is missing; run install-agy.sh."
 done
 for entry in agents plugins rules skills workflows secplugins; do mkdir -p "$state/$entry"; done
+# agy unpacks its built-ins there on a run outside the sandbox, and rewrites them only when their checksum changes. Read
+# only here, an empty stand-in would leave agy without them.
+seed="run agy once outside the sandbox ($agy, as the owner signs in) to seed it, then start the worker."
+[ -d "$state/builtin" ] && [ ! -L "$state/builtin" ] || die "$state/builtin is missing; $seed"
+# A seeded directory holds both; one without either is empty or partly unpacked, and would leave agy short of built-ins.
+for name in .manifest .checksum; do
+  [ -f "$state/builtin/$name" ] && [ ! -L "$state/builtin/$name" ] || die "$state/builtin has no $name, so agy has not seeded it; $seed"
+done
 while IFS= read -r path; do add_ro "$path"; done <<EOF
 $(read_only_paths "$wt" "$gitdir")
 EOF
