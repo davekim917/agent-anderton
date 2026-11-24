@@ -101,7 +101,9 @@ invoking_codex_home() {
 # An optional Codex account helper: $ANDERTON_CODEX_ACCOUNTS, else codex-accounts on PATH. `--start-home` with
 # CODEX_HOME set prints the home a new session from that home starts on. `--move-thread <id> --message <text>` with
 # CODEX_HOME set to a thread's home marks that account limited, makes the next account hold the thread, and prints
-# that home; it exits non-zero when no account may take the thread. Without a helper every session keeps its home.
+# that home; it exits non-zero when no account may take the thread. Anderton runs a session on whatever home the
+# helper prints, so the helper must print only a home that runs the same hook guards. Without a helper every session
+# keeps its home.
 codex_accounts() {
   local helper=${ANDERTON_CODEX_ACCOUNTS:-}
   if [ -z "$helper" ]; then helper=$(command -v codex-accounts 2>/dev/null) || return 1; fi
@@ -128,7 +130,8 @@ codex_daemon_up() {
   local socket tries=20
   socket=$(codex_socket "$1")
   [ -S "$socket" ] && return 0
-  CODEX_HOME=$1 codex app-server daemon start </dev/null >/dev/null 2>&1 || return 1
+  # The daemon outlives this script: it must not inherit the repository lock's descriptor.
+  CODEX_HOME=$1 codex app-server daemon start </dev/null >/dev/null 2>&1 9>&- || return 1
   while [ "$tries" -gt 0 ]; do
     [ -S "$socket" ] && return 0
     tries=$((tries - 1))

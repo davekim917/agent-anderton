@@ -34,6 +34,8 @@ QUEUE_PAGE_SIZE = 100
 HANDSHAKE_GUID = str(uuid.UUID("258eafa5-e914-47da-95ca-c5ab0dc85b11")).upper().encode("ascii")
 REPORT = re.compile(r"^(RESULT|QUESTION|BLOCKED|ANSWER):[ \t]*\S")
 USAGE_LIMIT = re.compile(r"hit your usage limit", re.IGNORECASE)
+# A move that could not run (no account free, a daemon that did not start) is tried again after this long.
+FAILOVER_RETRY_SECONDS = 600
 
 
 def daemon_socket(home):
@@ -269,16 +271,26 @@ def usage_limit(turn):
     return None
 
 
+def failover_due(worker, turn):
+    """True when the move of the worker's limited turn has not been tried, or failed long enough ago to retry. A moved
+    thread brings its failed turn along, so the new account must not read it as its own limit."""
+    tried = worker.get("codexFailover") or {}
+    if tried.get("turn") != turn:
+        return True
+    return not tried.get("moved") and time.time() - tried.get("at", 0) >= FAILOVER_RETRY_SECONDS
+
+
 def limited_turn(client, worker):
-    """The usage-limit message of the worker's latest turn while its thread waits idle on nothing, else None."""
+    """(turn id, usage-limit message) of the worker's latest turn when its move is due and the thread waits idle on
+    nothing, else None."""
     turns = client.call("thread/turns/list", {"threadId": worker["id"], "limit": 1, "itemsView": "notLoaded"})["data"]
-    if not turns or not usage_limit(turns[0]):
+    if not turns or not usage_limit(turns[0]) or not failover_due(worker, turns[0]["id"]):
         return None
     if client.call("thread/queue/list", {"threadId": worker["id"], "limit": 1})["data"]:
         return None
     if read_thread(client, worker)["status"]["type"] not in {"idle", "notLoaded"}:
         return None
-    return usage_limit(turns[0])
+    return turns[0]["id"], usage_limit(turns[0])
 
 
 def move_worker(record, worker, home):
@@ -583,8 +595,10 @@ def sweep_worker(worker, state_dir, stage_dir, limited=None):
         waiting = blocker_flags(info)
         completed = []
         running = None
+        latest = None
         for turn in client.pages("thread/turns/list", threadId=thread, limit=20,
                                  itemsView="notLoaded"):
+            latest = latest or turn
             if turn["id"] == state.get("turn"):
                 break
             if turn["status"] == "inProgress":
@@ -612,13 +626,15 @@ def sweep_worker(worker, state_dir, stage_dir, limited=None):
                 text = final_report(client, thread, turn["id"])
                 if text:
                     events.append(f"{name} (Codex {thread}) report:\n{text[:2000]}")
-            elif usage_limit(turn):
+            elif usage_limit(turn) and failover_due(worker, turn["id"]):
                 events.append(f"{name} (Codex {thread}) turn {turn['id']} failed at the usage limit of "
                               f"{worker['codexHome']}.")
-                if turn is completed[0] and running is None and limited is not None:
-                    limited.append(worker)
             elif turn["status"] in {"failed", "interrupted"}:
                 events.append(f"{name} (Codex {thread}) turn {turn['id']} {turn['status']}.")
+        # Offered on every sweep while due, not only when first reported, so a move that could not run is retried.
+        if (limited is not None and latest and latest["status"] != "inProgress" and usage_limit(latest)
+                and failover_due(worker, latest["id"])):
+            limited.append(worker)
         current = {"turn": completed[0]["id"] if completed else state.get("turn"), "block": block}
     if state != current:
         (stage_dir / bookmark).write_text(json.dumps(current) + "\n")
@@ -723,7 +739,7 @@ def main():
             message = limited_turn(client, worker)
         if message is None:
             return 3
-        print(message)
+        print(f"{message[0]}\n{message[1]}")
     elif args.command == "move":
         move_worker(args.record, json.loads(args.record.read_text()), args.home)
     elif args.command == "blocker-during-notice":
@@ -789,7 +805,7 @@ def main():
                     print(event)
                 if limited and limited_out:
                     with open(limited_out, "a") as file:
-                        file.write(f"{path}\n")
+                        file.write(f"{path}\t{worker['id']}\n")
             except (OSError, ValueError, KeyError) as error:
                 print(f"{path.stem}: {error}", file=sys.stderr)
                 failed = True

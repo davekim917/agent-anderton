@@ -207,7 +207,7 @@ class WorkerTest(unittest.TestCase):
         self.delivered()
         self.assertEqual([], self.scan())
 
-    def test_reports_a_usage_limit_and_offers_only_a_latest_idle_one_for_a_move(self):
+    def test_reports_a_usage_limit_and_offers_only_a_latest_finished_one_for_a_move(self):
         limit = {"message": "You've hit your usage limit.", "codexErrorInfo": "usageLimitExceeded"}
         for turns, moved in [
             ([{"id": "limited", "status": "failed", "error": limit}], True),
@@ -228,7 +228,28 @@ class WorkerTest(unittest.TestCase):
                 reported = any(f"failed at the usage limit of {self.worker['codexHome']}" in e for e in events)
                 self.assertEqual(any(turn["id"] == "limited" for turn in turns), reported)
 
-    def test_limited_names_the_limit_only_while_the_thread_waits_on_nothing(self):
+    def test_a_limit_is_offered_again_after_its_report_until_its_move_ran(self):
+        self.client.turns = [{"id": "limited", "status": "failed", "error": {"message": "You've hit your usage limit."}}]
+        self.client.items = {"limited": []}
+        limited = []
+        self.assertTrue(worker_api.sweep_worker(self.worker, self.state, self.stage, limited))
+        self.delivered()
+        limited = []
+        self.assertEqual([], worker_api.sweep_worker(self.worker, self.state, self.stage, limited))
+        self.assertEqual([self.worker], limited)
+        with patch.object(worker_api.time, "time", return_value=10_000):
+            self.worker["codexFailover"] = {"turn": "limited", "at": 10_000 - 60, "moved": False}
+            self.assertFalse(worker_api.failover_due(self.worker, "limited"))
+            self.worker["codexFailover"]["at"] = 10_000 - worker_api.FAILOVER_RETRY_SECONDS
+            self.assertTrue(worker_api.failover_due(self.worker, "limited"))
+            self.worker["codexFailover"]["moved"] = True
+            self.assertFalse(worker_api.failover_due(self.worker, "limited"))
+            limited = []
+            worker_api.sweep_worker(self.worker, self.state, self.stage, limited)
+            self.assertEqual([], limited)
+            self.assertTrue(worker_api.failover_due(self.worker, "a-later-limit"))
+
+    def test_limited_names_the_turn_and_limit_only_while_the_thread_waits_on_nothing(self):
         self.record.write_text(json.dumps(self.worker))
         self.client.turns = [{"id": "limited", "status": "failed",
                               "error": {"message": "You've hit your usage limit. Try again at 9:00 PM."}}]
@@ -239,7 +260,7 @@ class WorkerTest(unittest.TestCase):
                 status = worker_api.main()
             return status, out.getvalue()
 
-        self.assertEqual((0, "You've hit your usage limit. Try again at 9:00 PM.\n"), limited())
+        self.assertEqual((0, "limited\nYou've hit your usage limit. Try again at 9:00 PM.\n"), limited())
         self.client.queue = [{"id": "direction"}]
         self.assertEqual((3, ""), limited())
         self.client.queue = []

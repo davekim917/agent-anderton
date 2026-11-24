@@ -204,13 +204,15 @@ Nothing changes unless you install a Codex account helper: an executable named b
 `codex-accounts` on `PATH`. With `--start-home` it prints the Codex home a new session from `$CODEX_HOME` starts
 on. With `--move-thread <id> --message <text>` it marks the thread's account limited, puts the thread's rollout in
 the next account's home, and prints that home, or exits non-zero when no account may take it. The helper decides
-which accounts qualify, for example only those whose hooks match.
+which accounts qualify, and must print only a home that runs the same hook guards: Anderton runs the session there
+as given.
 
 With a helper, `spawn.sh` and `codex-anderton.sh` start on the home it names and start that home's daemon if it is
 not running. When the watch finds a Codex worker's latest turn failed at the usage limit, it moves the worker: the
-thread resumes on the new home's daemon, the worker's record points there, its pane reopens on that daemon while it
-still shows the thread, and the worker is told to continue without repeating completed work. The watch reports the
-move, or why the worker stayed. A Codex Anderton's own session is not moved for you; reopen it with
+Codex client in its pane stops, so no turn starts on the old account, the thread resumes on the new home's daemon,
+the worker's record points there, the pane reopens on that daemon, and the worker is told to continue without
+repeating completed work. A pane showing another conversation is left alone. The watch reports the move, or why the
+worker stayed; a move that could not run is tried again ten minutes later. A Codex Anderton's own session is not moved for you; reopen it with
 `codex resume <id>` under the new home.
 
 **How is it different from firstmate?**

@@ -100,7 +100,7 @@ if [ "$provider" = codex ]; then
   fi
   base_home=$(cd "${codex_home:-${CODEX_HOME:-$HOME/.codex}}" && pwd -P)
   codex_home=$(codex_start_home "$base_home")
-  if [ "$codex_home" != "$base_home" ] && ! codex_daemon_up "$codex_home"; then
+  if codex_accounts >/dev/null && ! codex_daemon_up "$codex_home"; then
     echo "Could not start the Codex daemon of $codex_home, the account new Codex sessions start on." >&2
     exit 2
   fi

@@ -155,7 +155,7 @@ case $1 in
     mv "$FAKE_LOG.panes-open.tmp" "$FAKE_LOG.panes-open"
     ;;
   capture-pane) cat "$FAKE_SCREEN" ;;
-  respawn-pane) printf '%s\n' "$@" > "$FAKE_LOG.respawn" ;;
+  respawn-pane) printf '%s\n' "$@" > "$FAKE_LOG.respawn"; echo respawn >>"$FAKE_LOG.order"; printf '%s\n' "$*" >>"$FAKE_LOG.respawns" ;;
   send-keys)
     echo "$3 $4" >> "$FAKE_LOG.keys"
     ;;
@@ -2735,9 +2735,13 @@ cat >"$fodir/codex-worker.py" <<'FAKE'
 case $1 in
   sweep)
     echo "cx-fail turn failed at the usage limit."
-    printf '%s\n' "$2" >>"$ANDERTON_CODEX_LIMITED" ;;
-  limited) [ -d "$2.lock" ] || exit 1; echo "You've hit your usage limit. Try again at 9:00 PM." ;;
+    printf '%s\t%s\n' "$2" "${FAKE_SWEPT_THREAD:-$(jq -r .id "$2")}" >>"$ANDERTON_CODEX_LIMITED" ;;
+  limited)
+    [ -d "$2.lock" ] || exit 1
+    echo limited >>"$FAKE_LOG.order"
+    printf 'turn-9\nYou%sve hit your usage limit. Try again at 9:00 PM.\n' "'" ;;
   move)
+    echo move >>"$FAKE_LOG.order"
     echo "$2 $3" >>"$FAKE_LOG.move"
     jq --arg home "$3" '.codexHome = $home' "$2" >"$2.tmp" && mv "$2.tmp" "$2" ;;
   message) printf '%s\n' "$4" >>"$FAKE_LOG.direction" ;;
@@ -2747,7 +2751,7 @@ chmod +x "$fodir/waiting.sh" "$fodir/codex-worker.py"
 cx_failover() { # cx_failover <pane title> [env...]: a sweep of worker cx-fail, recorded on $cxhome in pane %31
   local title=$1
   shift
-  rm -f "$FAKE_LOG.accounts" "$FAKE_LOG.move" "$FAKE_LOG.respawn" "$FAKE_LOG.direction"
+  rm -f "$FAKE_LOG.accounts" "$FAKE_LOG.move" "$FAKE_LOG.respawn" "$FAKE_LOG.respawns" "$FAKE_LOG.direction" "$FAKE_LOG.order"
   rho_worker cx-fail
   jq -c --arg id "$cx_thread" --arg home "$cxhome" '. + {provider: "codex", launcher: "tmux", id: $id, tab: "@31", pane: "%31",
     socket: "/tmp/fake-codex-tmux", server: "4", label: "cx-fail", codexHome: $home}' \
@@ -2755,9 +2759,10 @@ cx_failover() { # cx_failover <pane title> [env...]: a sweep of worker cx-fail, 
   mv "$work/cx.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/cx-fail.json"
   tmux_pane %31 "$title"
   set +e
-  out=$(cd "$rho" && env FAKE_ACCOUNTS_HOME="$cxnext" "$@" "$fodir/codex-workers.sh" sweep 2>&1)
+  out=$(cd "$rho" && env CLAUDE_PID="$p_rl" CLAUDE_CODE_SESSION_ID=rl-1 FAKE_ACCOUNTS_HOME="$cxnext" "$@" "$fodir/codex-workers.sh" sweep 2>&1)
   status=$?
   set -e
+  cp "$CLAUDE_CONFIG_DIR/anderton/workers/cx-fail.json" "$work/cx-fail.last"
   rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/cx-fail.json"
   git -C "$rho" worktree remove --force "$work/wt-cx-fail"
 }
@@ -2770,13 +2775,20 @@ check "its thread resumed and recorded on the new home" [ "$(cat "$FAKE_LOG.move
 check "its pane reopened at that thread on the new home's daemon, titled with it for retire.sh" \
   [ "$(tr '\n' ' ' <"$FAKE_LOG.respawn")" = "respawn-pane -k -t %31 -e CODEX_HOME=$cxnext codex resume $cx_thread --remote unix://$cxnext/app-server-control/app-server-control.sock -c tui.terminal_title=[\"thread-id\"] " ]
 check "and told to continue without repeating completed work" grep -q "Check the current state before repeating" "$FAKE_LOG.direction"
+check "its old client stopped before the thread moved, and the limit checked again after" \
+  [ "$(tr '\n' ' ' <"$FAKE_LOG.order")" = "limited respawn limited move respawn " ]
+check "and the move recorded against the limited turn" eval \
+  '[ "$(jq -c .codexFailover "$work/cx-fail.last")" = "$(jq -nc --argjson at "$(jq .codexFailover.at "$work/cx-fail.last")" "{turn: \"turn-9\", at: \$at, moved: true}")" ]'
+cx_failover "$cx_title" ANDERTON_CODEX_ACCOUNTS="$work/accounts" FAKE_SWEPT_THREAD=019a0000-0000-7000-8000-000000000000
+check "a record whose thread changed since the sweep read it is not moved" eval \
+  '[ ! -e "$FAKE_LOG.move" ] && [ ! -e "$FAKE_LOG.respawn" ] && [ ! -e "$FAKE_LOG.accounts" ]'
 cx_failover "019a0000-9999-7222-8333-44445..." ANDERTON_CODEX_ACCOUNTS="$work/accounts"
 check "a moved worker whose pane shows another conversation keeps that pane, and says how to open it" eval \
-  '[ ! -e "$FAKE_LOG.respawn" ] && [ -s "$FAKE_LOG.move" ] && contains "Its pane no longer shows thread $cx_thread." &&
-   contains "Open it with: CODEX_HOME=$cxnext codex resume $cx_thread"'
+  '[ ! -e "$FAKE_LOG.respawn" ] && [ -s "$FAKE_LOG.move" ] && contains "Its pane did not show thread $cx_thread" &&
+   contains "Open the thread with: CODEX_HOME=$cxnext codex resume $cx_thread"'
 cx_failover "$cx_title" ANDERTON_CODEX_ACCOUNTS="$work/accounts" FAKE_ACCOUNTS_REFUSE=1
-check "a worker no account may take stays where it is, and the watch says why" eval \
-  '[ ! -e "$FAKE_LOG.move" ] && [ ! -e "$FAKE_LOG.respawn" ] && [ ! -e "$FAKE_LOG.direction" ] &&
+check "a worker no account may take stays where it is, its pane reopened on the old home, and the watch says why" eval \
+  '[ ! -e "$FAKE_LOG.move" ] && grep -q -- "-e CODEX_HOME=$cxhome codex resume $cx_thread" "$FAKE_LOG.respawns" && [ ! -e "$FAKE_LOG.direction" ] &&
    contains "stays at the usage limit of $cxhome: accounts: no account other than $cxhome is confirmed to dispatch every hook"'
 cx_failover "$cx_title" ANDERTON_CODEX_ACCOUNTS="$work/missing-helper"
 check "and so does one with no account helper installed" eval \
