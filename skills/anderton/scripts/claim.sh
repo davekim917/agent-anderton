@@ -76,13 +76,6 @@ if [ -n "$worker" ]; then
 fi
 
 record=$(holder_record "$root" "$scope")
-# A claim follows its thread's conversation to the home it now lives in, as a move that stopped short of updating the
-# claim leaves it.
-if [ "$provider" = codex ] && [ -n "$record" ] && [ "$(record_provider "$record")" = codex ] &&
-  [ "$(jq -r '.sessionId // empty' "$record")" = "$sid" ] && [ "$(jq -r '.codexHome // empty' "$record")" != "$codex_home" ] &&
-  [ "$(codex_thread_home "$sid" || true)" = "$codex_home" ]; then
-  set_codex_home "$record" "$codex_home" || exit 1
-fi
 # One session holding two roles is the one control session doing two jobs again.
 while IFS= read -r other; do
   if [ -n "$other" ] && [ "$other" != "$state" ] && [ "$other" != "$record" ] &&
@@ -94,6 +87,13 @@ while IFS= read -r other; do
 done <<EOF
 $(project_holders "$root")
 EOF
+# A claim whose move to another account stopped before handing it over follows its thread to the home that last ran
+# it, once no other role is this session's.
+if [ "$provider" = codex ] && [ -n "$record" ] && [ "$(record_provider "$record")" = codex ] &&
+  [ "$(jq -r '.sessionId // empty' "$record")" = "$sid" ] && [ "$(jq -r '.codexHome // empty' "$record")" != "$codex_home" ] &&
+  [ "$(codex_thread_home "$sid" || true)" = "$codex_home" ]; then
+  set_codex_home "$record" "$codex_home" || exit 1
+fi
 
 if [ -n "$rebind" ]; then
   if [ -z "$record" ]; then

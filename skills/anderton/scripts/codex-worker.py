@@ -303,10 +303,6 @@ def limited_turn(client, worker):
 def resume_on(worker, home):
     """Resumes the worker's thread on the daemon of home, in its worktree; the caller records the home."""
     with Codex(home) as client:
-        # A daemon that still holds the thread from an earlier stay would resume its own copy, not the moved rollout.
-        for loaded in client.pages("thread/loaded/list"):
-            if loaded == worker["id"]:
-                raise ValueError(f"{home}'s daemon still has thread {worker['id']} loaded from an earlier stay")
         client.call("thread/resume", {"threadId": worker["id"], "cwd": worker["dir"], "excludeTurns": True},
                     timeout=60)
         read_thread(client, worker)
@@ -682,6 +678,10 @@ def main():
     unloaded = commands.add_parser("unloaded")
     unloaded.add_argument("record", type=Path)
     unloaded.add_argument("--wait", type=int, default=0)
+    loaded = commands.add_parser("loaded")
+    loaded.add_argument("home", type=Path)
+    loaded.add_argument("thread")
+    loaded.add_argument("--wait", type=int, default=0)
     limit = commands.add_parser("limited")
     limit.add_argument("record", type=Path)
     resume = commands.add_parser("resume-on")
@@ -745,13 +745,21 @@ def main():
                 return 0 if deliver_notice(client, claim, args.notice) else 3
             read_thread(client, worker)
             print("live")
-    elif args.command == "unloaded":
-        worker = json.loads(args.record.read_text())
+    elif args.command in {"unloaded", "loaded"}:
+        if args.command == "unloaded":
+            worker = json.loads(args.record.read_text())
+            home, thread = Path(worker["codexHome"]), worker["id"]
+        else:
+            home, thread = args.home, args.thread
         deadline = time.monotonic() + args.wait
         while True:
-            with Codex(Path(worker["codexHome"])) as client:
-                if worker["id"] not in client.pages("thread/loaded/list"):
-                    return 0
+            try:
+                with Codex(home) as client:
+                    if (thread in client.pages("thread/loaded/list")) == (args.command == "loaded"):
+                        return 0
+            except OSError:
+                if args.command == "unloaded":
+                    raise
             if time.monotonic() >= deadline:
                 return 3
             time.sleep(2)

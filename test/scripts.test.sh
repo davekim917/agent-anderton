@@ -2713,9 +2713,8 @@ if [ "$1" = --locate-thread ]; then
   echo "$FAKE_ACCOUNTS_LOCATE"
   exit 0
 fi
-echo "$CODEX_HOME ${CODEX_EXEC_MOVE_WAIT:-} $*" >>"$FAKE_LOG.accounts"
+echo "$CODEX_HOME $*" >>"$FAKE_LOG.accounts"
 case $1 in
-  --unmove-thread) exit "${FAKE_UNMOVE_EXIT:-1}" ;;
   --is-limited) exit "${FAKE_ACCOUNTS_LIMITED:-0}" ;;
   --start-home) echo "${FAKE_ACCOUNTS_START:-$FAKE_ACCOUNTS_HOME}"; exit 0 ;;
 esac
@@ -2731,16 +2730,16 @@ out=$(cd "$rho" && printf 'Task.\n' | env CLAUDE_CODE_SESSION_ID=rl-1 CLAUDE_PID
 status=$?
 set -e
 check "spawn.sh starts a Codex worker on the home the account helper names" eval \
-  '[ "$status" -eq 0 ] && [ "$(cat "$FAKE_LOG.accounts")" = "$cxhome  --start-home --" ] &&
+  '[ "$status" -eq 0 ] && [ "$(cat "$FAKE_LOG.accounts")" = "$cxhome --start-home --" ] &&
    [ "$(jq -r .codexHome "$CLAUDE_CONFIG_DIR/anderton/workers/cx-moved.json")" = "$cxnext" ] &&
    grep -qxF "unix://$cxnext/app-server-control/app-server-control.sock" "$FAKE_LOG.window"'
 rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/cx-moved.json" "$work/bin/codex"
 [ ! -d "$work/wt-cx-moved" ] || git -C "$rho" worktree remove --force "$work/wt-cx-moved"
 
 # A Codex worker whose latest turn failed at its account's usage limit moves to the account the helper names, across
-# sweeps so no sweep waits: the first stops its pane's client, a later one moves the thread once the old daemon has let
-# go of it, resumes it on the new home, reopens the pane there and tells the worker to continue. The daemon's answers
-# are faked.
+# sweeps so no sweep waits: the first stops its pane's client, a later one waits until the old daemon has let go of the
+# thread, resumes it on the new home (both homes read one conversation store), reopens the pane there and tells the
+# worker to continue. The daemon's answers are faked.
 fodir="$work/codex-failover"
 mkdir -p "$fodir"
 cp "$scripts/codex-workers.sh" "$scripts/session-lib.sh" "$fodir/"
@@ -2766,7 +2765,7 @@ case $1 in
     printf 'turn-9\nYou%sve hit your usage limit. Try again at 9:00 PM.\n' "'" ;;
   unloaded) echo unloaded >>"$FAKE_LOG.order"; [ -z "${FAKE_STILL_LOADED:-}" ] ;;
   resume-on) echo resume-on >>"$FAKE_LOG.order"; echo "$2 $3" >>"$FAKE_LOG.move" ;;
-  message) printf '%s\n' "$4" >>"$FAKE_LOG.direction" ;;
+  message) [ -z "${FAKE_MESSAGE_FAIL:-}" ] || exit 4; printf '%s\n' "$4" >>"$FAKE_LOG.direction" ;;
 esac
 FAKE
 chmod +x "$fodir/waiting.sh" "$fodir/codex-worker.py"
@@ -2806,14 +2805,37 @@ check "the first sweep only stops the pane's client of a worker at its usage lim
 cx_sweep
 check "a later sweep moves it to the account the helper names and continues it there" eval \
   '[ "$status" -eq 0 ] && contains "continues on $cxnext. Its pane shows it there." && [ "$(cx_record .codexHome)" = "$cxnext" ]'
-check "the helper moving its thread from the home it ran on, with the limit message, waiting for nothing" \
-  [ "$(cat "$FAKE_LOG.accounts")" = "$cxhome 0 --move-thread $cx_thread --message You've hit your usage limit. Try again at 9:00 PM." ]
+check "the helper marking the account it ran on, with the limit message, and naming the next" \
+  [ "$(cat "$FAKE_LOG.accounts")" = "$cxhome --move-thread $cx_thread --message You've hit your usage limit. Try again at 9:00 PM." ]
 check "once the old daemon had let go of it, then resumed on the new home, before its pane reopened" \
   [ "$(tr '\n' ' ' <"$FAKE_LOG.order")" = "limited unloaded resume-on respawn " ]
 check "its pane reopened at that thread on the new home's daemon, titled with it for retire.sh" \
   [ "$(tr '\n' ' ' <"$FAKE_LOG.respawn")" = "respawn-pane -k -t %31 -e CODEX_HOME=$cxnext codex resume $cx_thread --remote unix://$cxnext/app-server-control/app-server-control.sock -c tui.terminal_title=[\"thread-id\"] " ]
 check "and told to continue without repeating completed work" grep -q "Check the current state before repeating" "$FAKE_LOG.direction"
-check "and the move recorded against the limited turn" [ "$(cx_record '.codexFailover | "\(.turn) \(.moved) \(.marked)"')" = "turn-9 true true" ]
+check "and the move recorded against the limited turn, with no step left owed" \
+  [ "$(cx_record '.codexFailover | "\(.turn) \(.moved) \(.marked) \(.reopen) \(.continue)"')" = "turn-9 true true false false" ]
+: >"$FAKE_LOG.order"
+rm -f "$FAKE_LOG.respawn" "$FAKE_LOG.direction"
+cx_sweep
+check "and a later sweep neither moves it again nor repeats a step" eval \
+  '[ ! -s "$FAKE_LOG.order" ] && [ ! -e "$FAKE_LOG.respawn" ] && [ ! -e "$FAKE_LOG.direction" ] && [ "$(cx_record .codexHome)" = "$cxnext" ]'
+cx_teardown
+
+# A sweep that stopped after recording the move owes the steps that did not run; a direction to continue that did not
+# go through is retried.
+cx_setup cx-fail '{"turn": "turn-9", "at": 0, "moved": true, "marked": true, "paneStopped": true, "reopen": true, "continue": true}'
+jq --arg home "$cxnext" --arg from "$cxhome" '.codexHome = $home | .codexFailover.from = $from' \
+  "$CLAUDE_CONFIG_DIR/anderton/workers/cx-fail.json" >"$work/cx.tmp"
+mv "$work/cx.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/cx-fail.json"
+cx_sweep FAKE_MESSAGE_FAIL=1
+check "an owed reopen runs on the new home, and an unconfirmed direction stays owed" eval \
+  '[ ! -e "$FAKE_LOG.move" ] && grep -q -- "-e CODEX_HOME=$cxnext codex resume $cx_thread" "$FAKE_LOG.respawns" &&
+   contains "the direction to continue is unconfirmed" && [ "$(cx_record ".codexFailover | \"\\(.reopen) \\(.continue)\"")" = "false true" ]'
+rm -f "$FAKE_LOG.respawns"
+cx_sweep
+check "and the next sweep sends it, without reopening the pane again" eval \
+  'contains "continues on $cxnext." && [ ! -e "$FAKE_LOG.respawns" ] && grep -q "Check the current state before repeating" "$FAKE_LOG.direction" &&
+   [ "$(cx_record .codexFailover.continue)" = false ]'
 cx_teardown
 
 prior='{"turn": "turn-9", "at": 0, "moved": false, "marked": true}'
@@ -2821,7 +2843,7 @@ cx_setup cx-fail "$prior"
 cx_sweep FAKE_ACCOUNTS_START="$cxhome"
 check "a retry while its home is still limited and the helper names no other leaves the pane alone and wakes no one" eval \
   '[ "$status" -eq 0 ] && [ ! -e "$FAKE_LOG.respawn" ] && [ ! -e "$FAKE_LOG.move" ] && ! contains "stays" && ! contains "continues" &&
-   [ "$(tr "\n" " " <"$FAKE_LOG.accounts")" = "$cxhome  --is-limited $cxhome  --start-home " ]'
+   [ "$(tr "\n" " " <"$FAKE_LOG.accounts")" = "$cxhome --is-limited $cxhome --start-home " ]'
 cx_sweep
 cx_sweep
 check "and moves once the helper names another home again" eval '[ -s "$FAKE_LOG.move" ] && contains "continues on $cxnext"'
@@ -2875,8 +2897,7 @@ cx_sweep ANDERTON_CODEX_ACCOUNTS="$work/missing-helper"
 check "and so does one with no account helper installed" eval '[ ! -e "$FAKE_LOG.respawn" ] && contains "no Codex account helper is installed"'
 cx_teardown
 
-# The rollout's location is the truth the record follows: a move whose new daemon would not start is undone, and one
-# that could not be undone is followed once that daemon runs.
+# A move whose new home's daemon does not start leaves the worker on its old home, with nothing to undo.
 cxdown=$(cd "$(mktemp -d /tmp/anderton-cx.XXXXXX)" && pwd -P)
 # A codex whose daemon never starts, so no real daemon is started for the test's home.
 printf '#!/usr/bin/env bash\nexit 1\n' >"$work/bin/codex"
@@ -2884,19 +2905,9 @@ chmod +x "$work/bin/codex"
 cx_setup
 cx_sweep
 cx_sweep FAKE_ACCOUNTS_HOME="$cxdown"
-check "a move whose new home's daemon does not start is undone, its pane back where it was" eval \
-  '[ "$(cx_record .codexHome)" = "$cxhome" ] && grep -qxF "$cxdown  --unmove-thread $cx_thread" "$FAKE_LOG.accounts" &&
+check "a move whose new home's daemon does not start keeps the worker on its old home, its pane back there" eval \
+  '[ "$(cx_record .codexHome)" = "$cxhome" ] && [ ! -e "$FAKE_LOG.move" ] && [ "$(grep -c . "$FAKE_LOG.accounts")" -eq 1 ] &&
    grep -q -- "-e CODEX_HOME=$cxhome codex resume $cx_thread" "$FAKE_LOG.respawns" && contains "stays on $cxhome: $cxdown did not take its thread. Its Codex daemon did not start."'
-cx_sweep FAKE_ACCOUNTS_LOCATE="$cxdown"
-check "when the undo could not run, the sweep finds the thread on that home and waits for its daemon" eval \
-  '[ "$(cx_record .codexHome)" = "$cxhome" ] && contains "is on $cxdown, whose Codex daemon did not start"'
-mkdir -p "$cxdown/app-server-control"
-python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$cxdown/app-server-control/app-server-control.sock"
-: >"$FAKE_LOG.direction"
-cx_sweep FAKE_ACCOUNTS_LOCATE="$cxdown"
-check "and follows it there once that daemon runs, telling it to continue" eval \
-  '[ "$(cx_record .codexHome)" = "$cxdown" ] && contains "follows its thread to $cxdown" &&
-   grep -q "Check the current state before repeating" "$FAKE_LOG.direction" && [ "$(cx_record .codexFailover.moved)" = true ]'
 cx_teardown
 rm -rf "$cxdown" "$work/bin/codex"
 

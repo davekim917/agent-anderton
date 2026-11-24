@@ -39,6 +39,7 @@ case $1 in
   identity) jq -cn --arg id "$3" --arg dir "$FIXTURE_ROOT" '{id:$id, dir:$dir, name:"fixture-codex"}' ;;
   claim-state) if [ -n "${NOT_REACHABLE:-}" ]; then exit 1; fi; echo "${CLAIM_STATE:-live}" ;;
   start-watch) echo "${CODEX_THREAD_ID:-} ${CODEX_HOME:-} $3" >> "$FIXTURE_ROOT/../watch-starts" ;;
+  loaded) echo "$2 $3" >> "$FIXTURE_ROOT/../loaded-checks"; [ -z "${FIXTURE_NOT_LOADED:-}" ] ;;
   launch-matches)
     [ -z "${LAUNCH_LOOKUP_FAIL:-}" ] || exit 1
     [ "$3" = "${MATCHING_LAUNCH:-}" ] || exit 3
@@ -133,8 +134,9 @@ if grep -q 'DEPLOY: catalog fixture' "$tmp/wake"; then exit 1; fi
 rm -f "$claims/"*.json
 codex_role "$script/claim.sh"
 jq -e --arg thread "$FIXTURE_THREAD" '.provider == "codex" and .sessionId == $thread and .scope == null and (has("pid") | not)' "$root_claim" >/dev/null
-# A Codex Anderton at its usage limit moves with its claim: the helper moves the thread, the claim names the new home,
-# and the copy left in the old home no longer holds the role.
+# A Codex Anderton at its usage limit resumes on the next account, whose home reads the same conversation store: the
+# helper marks the old account and names the new home, and the claim names the new home only once its daemon has the
+# thread loaded, after the old home's watch is stopped.
 moved_home="$tmp/codex-moved"
 mkdir -p "$moved_home/app-server-control"
 python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$moved_home/app-server-control/app-server-control.sock"
@@ -143,31 +145,49 @@ cat > "$tmp/accounts" <<STUB
 echo "\$CODEX_HOME \$*" >> "$tmp/accounts.log"
 case \$1 in
   --move-thread) echo "$moved_home" ;;
-  --unmove-thread) exit "\${FIXTURE_UNMOVE_EXIT:-0}" ;;
+  --locate-thread) echo "$moved_home" ;;
   --start-home) echo "\$CODEX_HOME" ;;
 esac
 STUB
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s"\n' "$tmp/codex.args" > "$tmp/bin/codex"
 chmod +x "$tmp/accounts" "$tmp/bin/codex"
-# A claim that cannot be committed after the move undoes the move: the claim still names the old home, and holds.
-mkdir -p "$tmp/failing-bin"
-printf '#!/usr/bin/env bash\ncase "$*" in *"%s"*) exit 1 ;; esac\nexec /bin/mv "$@"\n' "$root_claim" > "$tmp/failing-bin/mv"
-chmod +x "$tmp/failing-bin/mv"
-if codex_role env PATH="$tmp/failing-bin:$PATH" ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" "$script/codex-anderton.sh" --move "$FIXTURE_THREAD" 2> "$tmp/refused"; then exit 1; fi
-grep -q 'the move is undone' "$tmp/refused"
-grep -qxF "$moved_home --unmove-thread $FIXTURE_THREAD" "$tmp/accounts.log"
+handed_over() { # handed_over <home>: waits for the background hand-over to settle the claim on <home>
+  for _ in $(seq 1 50); do
+    if jq -e --arg home "$1" '.codexHome == $home' "$root_claim" >/dev/null; then return 0; fi
+    sleep 0.1
+  done
+  return 1
+}
+# A new session whose daemon never loads the thread leaves the claim on the old home.
+rm -f "$tmp/loaded-checks"
+codex_role env FIXTURE_NOT_LOADED=1 ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" "$script/codex-anderton.sh" --move "$FIXTURE_THREAD"
+for _ in $(seq 1 50); do [ -s "$tmp/loaded-checks" ] && break; sleep 0.1; done
+sleep 0.5
+grep -qxF "$moved_home $FIXTURE_THREAD" "$tmp/loaded-checks"
 jq -e --arg home "$CODEX_HOME" '.codexHome == $home' "$root_claim" > /dev/null
-[ -z "$(find "$claims" -maxdepth 1 -name "$(basename "$root_claim").??????")" ]
+[ ! -e "$tmp/watch-starts" ] || ! grep -q "$moved_home" "$tmp/watch-starts"
 : > "$tmp/accounts.log"
+# The old home's watch is stopped before the claim moves: a watch for the same thread would leave on finding it held.
+watcher="$(dirname "$root_claim")/$(basename "$root_claim" .json).watch"
+bash -c 'exec -a watch.sh sleep 60' &
+old_watch=$!
+echo "$old_watch $FIXTURE_THREAD 0" > "$watcher"
 codex_role env ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" "$script/codex-anderton.sh" --move "$FIXTURE_THREAD"
-grep -qxF "$CODEX_HOME --move-thread $FIXTURE_THREAD --dry-run -- -c tui.terminal_title=[\"thread-id\"]" "$tmp/accounts.log"
+handed_over "$moved_home"
 grep -qxF "$CODEX_HOME --move-thread $FIXTURE_THREAD -- -c tui.terminal_title=[\"thread-id\"]" "$tmp/accounts.log"
-jq -e --arg home "$moved_home" '.codexHome == $home' "$root_claim" >/dev/null
+[ "$(grep -c -- --move-thread "$tmp/accounts.log")" -eq 1 ]
 [ "$(head -n 2 "$tmp/codex.args" | tr '\n' ' ')" = "resume $FIXTURE_THREAD " ]
 grep -qxF "unix://$moved_home/app-server-control/app-server-control.sock" "$tmp/codex.args"
+for _ in $(seq 1 50); do [ -s "$tmp/watch-starts" ] && break; sleep 0.1; done
 tail -n 1 "$tmp/watch-starts" | grep -qxF "$FIXTURE_THREAD $moved_home $root_claim"
+! kill -0 "$old_watch" 2>/dev/null
+[ ! -e "$watcher" ]
 refused_claim codex_role "$script/claim.sh"
 codex_role env CODEX_HOME="$moved_home" "$script/claim.sh"
+# A claim a hand-over never reached follows its thread to the home that last ran it when that session claims.
+jq --arg home "$CODEX_HOME" '.codexHome = $home' "$root_claim" > "$root_claim.tmp" && mv "$root_claim.tmp" "$root_claim"
+codex_role env CODEX_HOME="$moved_home" ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" "$script/claim.sh"
+jq -e --arg home "$moved_home" '.codexHome == $home' "$root_claim" > /dev/null
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/codex"
 jq --arg home "$CODEX_HOME" '.codexHome = $home' "$root_claim" > "$root_claim.tmp" && mv "$root_claim.tmp" "$root_claim"
 refused_claim claude_role "$script/claim.sh"

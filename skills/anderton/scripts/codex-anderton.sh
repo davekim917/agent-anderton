@@ -6,10 +6,22 @@ set -euo pipefail
 
 base_home=$(invoking_codex_home)
 resume=()
-# --move <thread-id>: a Codex Anderton at its account's usage limit continues on the next account, its thread and claim
-# moving as one unit under the repository lock: the claim for the new home is written first, the account helper moves
-# the thread (refusing while a codex still has it open), and a rename commits the claim. If the move fails the claim is
-# left as it was; if the claim cannot be committed the move is undone. Either way one copy holds the role.
+# --move <thread-id>: a Codex Anderton at its account's usage limit continues on the next account. Both accounts read
+# one conversation store, so the account helper only marks the old account and names the next one (refusing while a
+# codex still has the thread open), and the conversation resumes there. The claim keeps the old home until the new
+# home's daemon has the thread loaded; then, under the repository lock, the old home's watch is stopped before the
+# claim and a watch for the new home take over.
+adopt_moved_claim() {
+  local claim=$1 thread=$2 from=$3 to=$4 root=$5
+  "$anderton_scripts/codex-worker.py" loaded "$to" "$thread" --wait 300 || return 0
+  take_repository_lock "$root"
+  jq -e --arg id "$thread" --arg from "$from" '.provider == "codex" and .sessionId == $id and .codexHome == $from' \
+    "$claim" >/dev/null 2>&1 || return 0
+  stop_codex_watch "$claim"
+  set_codex_home "$claim" "$to" || return 0
+  release_repository_lock
+  CODEX_THREAD_ID=$thread CODEX_HOME=$to "$anderton_scripts/codex-worker.py" start-watch "$anderton_scripts/watch.sh" "$claim"
+}
 if [ "${1:-}" = --move ]; then
   [ $# -ge 2 ] || { echo "usage: codex-anderton.sh --move <thread-id> [codex options]" >&2; exit 2; }
   thread=$2
@@ -31,32 +43,13 @@ EOF
   from=$base_home
   if [ -n "$claim" ]; then from=$(jq -r .codexHome "$claim"); fi
   opts=(-c 'tui.terminal_title=["thread-id"]' "$@")
-  to=$(CODEX_HOME=$from "$helper" --move-thread "$thread" --dry-run -- "${opts[@]}" </dev/null) || exit $?
+  to=$(CODEX_HOME=$from "$helper" --move-thread "$thread" -- "${opts[@]}" </dev/null) || exit $?
   to=$(cd "$(printf '%s\n' "$to" | tail -n 1)" && pwd -P) || exit 1
-  prepared=""
-  if [ -n "$claim" ]; then
-    prepared=$(mktemp "$claim.XXXXXX") || exit 1
-    if ! jq --arg home "$to" '.codexHome = $home' "$claim" >"$prepared"; then rm -f "$prepared"; exit 1; fi
-  fi
-  moved=$(CODEX_HOME=$from "$helper" --move-thread "$thread" -- "${opts[@]}" </dev/null) || {
-    status=$?
-    [ -z "$prepared" ] || rm -f "$prepared"
-    exit "$status"
-  }
-  moved=$(cd "$(printf '%s\n' "$moved" | tail -n 1)" && pwd -P) || moved=""
-  if [ "$moved" != "$to" ] || { [ -n "$prepared" ] && ! mv -f "$prepared" "$claim"; }; then
-    echo "The claim for thread $thread could not follow it to ${moved:-the new home}, so the move is undone." >&2
-    [ -z "$moved" ] || CODEX_HOME=$moved "$helper" --unmove-thread "$thread" </dev/null >&2 ||
-      echo "Undoing the move failed: run claim.sh from thread $thread under CODEX_HOME=$moved." >&2
-    [ -z "$prepared" ] || rm -f "$prepared"
-    exit 1
-  fi
   release_repository_lock
   base_home=$to
   resume=(resume "$thread")
-  # The claim's watch ended when its home changed; the watch for the new home starts here, as claim.sh starts one.
   if [ -n "$claim" ]; then
-    CODEX_THREAD_ID=$thread CODEX_HOME=$to "$anderton_scripts/codex-worker.py" start-watch "$anderton_scripts/watch.sh" "$claim"
+    (adopt_moved_claim "$claim" "$thread" "$from" "$to" "$root" </dev/null >/dev/null 2>&1) &
   fi
 fi
 codex_home=$(codex_start_home "$base_home" "$@")

@@ -100,8 +100,9 @@ invoking_codex_home() {
 
 # An optional Codex account helper: $ANDERTON_CODEX_ACCOUNTS, else codex-accounts on PATH. `--start-home` with
 # CODEX_HOME set prints the home a new session from that home starts on. `--move-thread <id> --message <text>` with
-# CODEX_HOME set to a thread's home marks that account limited, makes the next account hold the thread, and prints
-# that home; it exits non-zero when no account may take the thread. Anderton runs a session on whatever home the
+# CODEX_HOME set to a thread's home marks that account limited and prints the next home reading the same conversation
+# store, where the thread resumes as it is; it exits non-zero when no account may take the thread, or a codex still
+# has it open. Anderton runs a session on whatever home the
 # helper prints, so the helper must print only a home that runs the same hook guards. Without a helper every session
 # keeps its home.
 codex_accounts() {
@@ -127,13 +128,32 @@ codex_start_home() {
   fi
 }
 
-# The home holding Codex thread $1's conversation, by the account helper: the rollout's location is the truth a claim
-# or worker record follows. Fails when there is no helper, or it cannot say (none, a move under way, an older helper).
+# The home that last ran Codex thread $1, by the account helper: where a claim whose move was interrupted belongs.
+# Fails when there is no helper, or it cannot say (no such thread, an older helper).
 codex_thread_home() {
   local helper home
   helper=$(codex_accounts) || return 1
   home=$("$helper" --locate-thread "$1" </dev/null 2>/dev/null) || return 1
   (cd "$home" 2>/dev/null && pwd -P)
+}
+
+# Stops the watch of claim $1, if one runs, and waits until it has let go of the job: a watch for the same thread on
+# another home would otherwise leave on finding it held. TERM runs the watch's EXIT trap, which a sleep between ticks
+# delays; one that outlives that is killed and its job file removed.
+stop_codex_watch() {
+  local watcher pid owner command waited=0 limit=$(( ${ANDERTON_WATCH_TICK:-30} + 15 ))
+  watcher="$holders/$(basename "$1" .json).watch"
+  { read -r pid _ <"$watcher"; } 2>/dev/null || return 0
+  command=$(ps -ww -o command= -p "$pid" 2>/dev/null) || return 0
+  case $command in *watch.sh*) ;; *) return 0 ;; esac
+  kill -TERM "$pid" 2>/dev/null || return 0
+  while [ "$waited" -lt "$limit" ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if [ "$(ps -ww -o command= -p "$pid" 2>/dev/null)" = "$command" ]; then kill -KILL "$pid" 2>/dev/null; fi
+  { read -r owner _ <"$watcher"; } 2>/dev/null && [ "$owner" = "$pid" ] && rm -f "$watcher"
+  return 0
 }
 
 # Points claim or worker record $1 at home $2, atomically; the caller holds the repository lock.
@@ -211,8 +231,8 @@ caller_matches_claim() {
   local p codex
   [ -f "$1" ] && [ "$(record_provider "$1")" = "$(invoking_provider)" ] || return 1
   if [ "$(invoking_provider)" = codex ]; then
-    # The claim names the conversation and the home it runs in: a copy of the thread left in another home never holds
-    # it. codex-anderton.sh --move moves the thread and its claim together.
+    # The claim names the conversation and the home it runs on: the same thread opened on another account's home does
+    # not hold it until codex-anderton.sh --move hands the claim over.
     codex=$(invoking_codex_home) || return 1
     jq -e --arg sid "${CODEX_THREAD_ID:-}" --arg codex "$codex" '
       $sid != "" and .sessionId == $sid and .codexHome == $codex' "$1" >/dev/null 2>&1

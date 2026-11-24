@@ -274,6 +274,27 @@ class WorkerTest(unittest.TestCase):
                 patch.object(worker_api.time, "sleep", side_effect=lambda _: self.client.loaded.clear()):
             self.assertEqual(0, unloaded("--wait", "5"))
 
+    def test_loaded_waits_for_a_daemon_to_load_the_thread_even_before_its_socket_answers(self):
+        def loaded(*extra):
+            with patch.object(worker_api.sys, "argv", ["codex-worker.py", "loaded", "/next-home", self.worker["id"], *extra]):
+                return worker_api.main()
+
+        self.assertEqual(3, loaded())
+        answers = iter([OSError("no socket yet"), None])
+
+        def connect(home):
+            answer = next(answers)
+            if answer is not None:
+                raise answer
+            self.client.loaded = [self.worker["id"]]
+            return self.client
+
+        clock = iter([0, 0, 1, 2])
+        with patch.object(worker_api, "Codex", side_effect=connect), \
+                patch.object(worker_api.time, "monotonic", side_effect=lambda: next(clock)), \
+                patch.object(worker_api.time, "sleep"):
+            self.assertEqual(0, loaded("--wait", "5"))
+
     def test_limited_names_the_turn_and_limit_only_while_the_thread_waits_on_nothing(self):
         self.record.write_text(json.dumps(self.worker))
         self.client.turns = [{"id": "limited", "status": "failed",
@@ -307,10 +328,6 @@ class WorkerTest(unittest.TestCase):
                                             "excludeTurns": True}), calls[0])
         worker_api.Codex.assert_called_with(Path("/next-home"))
         self.assertEqual(self.worker["codexHome"], json.loads(self.record.read_text())["codexHome"])
-        self.client.loaded = [self.worker["id"]]
-        with self.assertRaisesRegex(ValueError, "still has thread .* loaded"):
-            resume_on()
-        self.client.loaded = []
         self.client.info["cwd"] = "/elsewhere"
         with self.assertRaisesRegex(ValueError, "identity does not match"):
             resume_on()
