@@ -7,6 +7,11 @@ set -euo pipefail
 scripts="$(cd "$(dirname "$0")/../skills/anderton/scripts" && pwd)"
 if [ "$(uname -s)" != Linux ] || ! command -v bwrap >/dev/null 2>&1 ||
   ! bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid true 2>/dev/null; then
+  # Asked to check a root-owned install (CI's Linux runner), a host that cannot run the sandbox fails, never skips.
+  if [ "${AGY_SANDBOX_SUDO:-}" = 1 ]; then
+    echo "FAIL: AGY_SANDBOX_SUDO=1, but this host cannot run bwrap with unprivileged user namespaces"
+    exit 1
+  fi
   echo "agy-sandbox: skipped (needs Linux, bwrap and unprivileged user namespaces)"
   exit 0
 fi
@@ -157,7 +162,19 @@ if HOME="$home" "$scripts/register-agy.sh" --prefix "$prefixroot/opt" >/dev/null
   fail "register-agy.sh accepted a link to another file where agy's state hook file goes"
 fi
 [ "$(cat "$work/canary")" = canary ] || fail "register-agy.sh wrote through a link to $(cat "$work/canary")"
+# Where the link resolves is what counts, not its text: ../alias/../config/hooks.json reads as the registration's path,
+# but through the alias link it lands on another file.
+mkdir -p "$work/alias-target/sub" "$work/alias-target/config"
+echo canary > "$work/alias-target/config/hooks.json"
+ln -s "$work/alias-target/sub" "$home/.gemini/alias"
 rm "$home/.gemini/antigravity-cli/hooks.json"
+ln -s ../alias/../config/hooks.json "$home/.gemini/antigravity-cli/hooks.json"
+if HOME="$home" "$scripts/register-agy.sh" --prefix "$prefixroot/opt" >/dev/null 2>&1; then
+  fail "register-agy.sh accepted a link whose text, not its target, names config/hooks.json"
+fi
+[ -L "$home/.gemini/antigravity-cli/hooks.json" ] && [ "$(cat "$work/alias-target/config/hooks.json")" = canary ] ||
+  fail "register-agy.sh replaced or wrote through a link that resolves elsewhere"
+rm "$home/.gemini/alias" "$home/.gemini/antigravity-cli/hooks.json"
 printf '{}' > "$home/.gemini/antigravity-cli/hooks.json"
 HOME="$home" "$scripts/register-agy.sh" --prefix "$prefixroot/opt" >/dev/null || fail "register-agy.sh did not rerun cleanly"
 
@@ -313,7 +330,21 @@ for line in example-bun-tool "wrote bun-cache" "denied bun-home"; do
 done
 [ "$(ls -A "$home/.bun")" = bin ] || fail "the launcher or worker wrote under an unwritable ~/.bun: $(ls -A "$home/.bun")"
 ls "$home"/.cache/anderton-agy/*/bun/example-package >/dev/null 2>&1 || fail "the worker's bun cache under an unwritable ~/.bun is not its private one"
+# One whose entries cannot be listed (0711) would lose them under the tmpfs, so the launcher refuses it; so it does an
+# entry that is a link into the private cache, which would put a directory the worker writes where the host has none.
+cache_refusal() { # cache_refusal <description> <expected text>
+  if got=$(run true 2>&1); then fail "the launcher started with $1"; else
+    case $got in *"$2"*) ;; *) fail "the launcher refused $1 for another reason: $got" ;; esac
+  fi
+}
+chmod 0711 "$home/.bun"
+cache_refusal "a ~/.bun it cannot list" "cannot be listed"
 chmod 0755 "$home/.bun"
+ln -s install/cache/bin "$home/.bun/example-link"
+chmod 0555 "$home/.bun"
+cache_refusal "a ~/.bun entry that links into the private cache" "links into a directory agy can write"
+chmod 0755 "$home/.bun"
+rm "$home/.bun/example-link"
 
 # The pid the launcher writes to the file spawn.sh names is its bwrap, with the sandbox in a child of it, started from
 # the pane herdr placed it in: what spawn.sh proves before it sends a brief.
@@ -613,10 +644,28 @@ else
     HOME="$home" "$scripts/register-agy.sh" --prefix "$rootdir/opt" --replace-hooks >/dev/null || fail "register-agy.sh failed for the root-owned install"
     rm -rf "$home/.bun/install"
     sudo -n chown 0:0 "$home/.bun"
-    got=$(cd "$work/wt-example" && env -i HOME="$home" PATH=/usr/bin:/bin "$rootdir/opt/agy/bin/agy" 'echo started-from-root-install' \
-      2>"$work/root-launch.err") || fail "the launcher did not start agy from a root-owned install: $(cat "$work/root-launch.err")"
-    [ "$got" = started-from-root-install ] ||
-      fail "the launcher from a root-owned install printed something else: $got $(cat "$work/root-launch.err")"
+    root_launch() { (cd "$work/wt-example" && env -i HOME="$home" PATH=/usr/bin:/bin "$rootdir/opt/agy/bin/agy" "$1"); }
+    # Inside, the install shows as the overflow uid; as 0 only under a setuid bwrap, which makes no user namespace.
+    if [ -u "$(sed -n 's/^bwrap=//p' "$rootdir/opt/agy/etc/pin")" ]; then want=0 branch="0, under a setuid bwrap"; else
+      want=$(cat /proc/sys/kernel/overflowuid) branch="the overflow uid"
+    fi
+    seen=$(root_launch "stat -c %u $rootdir/opt/agy" 2>"$work/root-launch.err") ||
+      fail "the launcher did not start agy from a root-owned install: $(cat "$work/root-launch.err")"
+    if [ "$seen" = "$want" ]; then
+      echo "agy-sandbox: the root-owned install showed inside the sandbox as uid $seen ($branch)"
+    else
+      fail "inside the sandbox the root-owned install showed as uid '$seen', not $want ($branch): $(cat "$work/root-launch.err")"
+    fi
+    # The release the launcher execs, and its version directory, are root's too: one another user owns could be
+    # rewritten between the digest check and the exec.
+    version=$(sed -n 's/^version=//p' "$rootdir/opt/agy/etc/pin")
+    for owned in "$rootdir/opt/agy/$version/antigravity" "$rootdir/opt/agy/$version"; do
+      sudo -n chown 1 "$owned"
+      if got=$(root_launch true 2>&1); then fail "the launcher started with $owned owned by uid 1"; else
+        case $got in *"$owned is not owned by root"*) ;; *) fail "the launcher refused $owned owned by uid 1 for another reason: $got" ;; esac
+      fi
+      sudo -n chown 0 "$owned"
+    done
     sudo -n chown -R "$(id -u)" "$home/.bun"
   fi
 fi
