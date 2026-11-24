@@ -67,6 +67,24 @@ if [ -n "$worker_list" ]; then
   exit 0
 fi
 
+# A retirement retire.sh held for messages since the worker's last report stays listed until the worker is retired, so
+# the worker is never left idle and unread. Under --blocked, the header alone, which the watch tells once.
+for h in "$holders"/workers/*.held; do
+  [ -f "$h" ] || continue
+  r="${h%.held}.json"
+  [ -f "$r" ] || continue
+  if [ -z "$all" ] && [ "$(jq -r '.root // empty' "$r" 2>/dev/null)" != "$root" ]; then continue; fi
+  [ -z "$mine" ] || worker_belongs "$r" "$root" "$mine" || continue
+  jq -r --arg blocked "$blocked" '
+    (.messages // []) as $m
+    | "=== \(.name) (retire held \(.heldAt): "
+      + (if ($m | length) > 0 then
+           "\($m | length) message(s) since its last report, at \([$m[].at] | join(", ")); read them, then retire.sh \(.name) --reviewed-through \($m | last | .at))"
+         else .why + ")" end)
+      + (if $blocked != "" or ($m | length) == 0 then "" else "\n" + ([$m[] | "  \(.at)  \(.from): \(.line)"] | join("\n")) + "\n" end)' \
+    "$h" 2>/dev/null || echo "waiting.sh: could not read $h" >&2
+done
+
 # Each entry is judged on one copy: Claude Code rewrites it as the session's status changes, and a session selected
 # as blocked but rendered from a newer entry reads as a call unanswered for over a minute, a header the watch never
 # reported. Without a temporary file it reads the entry in place, as before.

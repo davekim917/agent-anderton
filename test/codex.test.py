@@ -793,6 +793,67 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(1, len(sent))
 
 
+    def inbound(self, *options):
+        self.record.write_text(json.dumps(self.worker))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            status = self.worker_command("inbound-since-report", *options)
+        return status, json.loads(out.getvalue() or '{"messages": null}')["messages"]
+
+    def reported_launch(self):
+        self.worker["codexLaunchToken"] = "6f1c2b9e-0000-4000-8000-00000000abcd"
+        self.client.turns = [{"id": "launch", "status": "completed"}]
+        self.client.items = {"launch": [user_message("Anderton launch 6f1c2b9e-0000-4000-8000-00000000abcd\n\nFix the login."),
+                                        message("RESULT: PR ready, login test passes")]}
+
+    def typed_turn(self, turn, text, at_ms, status="completed"):
+        typed = user_message(text)
+        typed["item"]["clientId"] = f"tui-{turn}"
+        typed["startedAtMs"] = typed["completedAtMs"] = at_ms
+        self.client.turns.insert(0, {"id": turn, "status": status})
+        self.client.items[turn] = [typed, message("Looking into it.")]
+
+    def test_a_typed_turn_after_the_last_report_holds_retirement_until_reviewed_through_it(self):
+        self.reported_launch()
+        self.assertEqual((0, []), self.inbound())
+        self.typed_turn("follow-up", "Also add the retry check.\nThen open a second PR.", 1795000000250)
+        self.assertEqual((4, [{"at": "2026-11-18T11:06:40.250Z", "from": "the user", "line": "Also add the retry check."}]),
+                         self.inbound())
+        self.assertEqual(4, self.inbound("--reviewed-through", "2026-11-18T11:06:40Z")[0])
+        self.assertEqual((0, []), self.inbound("--reviewed-through", "2026-11-18T11:06:41Z"))
+
+    def test_a_typed_turn_still_running_holds_retirement(self):
+        self.reported_launch()
+        self.typed_turn("running", "Wait, check the staging logs first.", 1795000000250, status="inProgress")
+        self.assertEqual(4, self.inbound()[0])
+
+    def test_a_report_after_a_typed_turn_clears_it(self):
+        self.reported_launch()
+        self.typed_turn("follow-up", "Also add the retry check.", 1795000000250)
+        self.client.items["follow-up"][-1] = message("RESULT: retry check added in the second PR")
+        self.assertEqual((0, []), self.inbound())
+
+    def test_the_andertons_directions_after_the_last_report_do_not_hold_it_after_they_are_pruned(self):
+        self.reported_launch()
+        self.record.write_text(json.dumps(self.worker))
+        direction = self.send("Rebase on main")
+        self.client.start_direction(self.client.queue[0], "completed")
+        self.worker["codexDirections"] = []
+        self.assertEqual((0, []), self.inbound())
+        self.assertIn(direction["clientUserMessageId"], self.worker["codexDirectionLedger"]["ids"])
+
+    def test_a_direction_sent_before_the_ledger_existed_is_known_by_its_text_only(self):
+        self.reported_launch()
+        self.typed_turn("old-direction", worker_api.DIRECTION_PREFIX + "Rebase on main", 1795000000250)
+        self.assertEqual((0, []), self.inbound())
+        self.worker["codexDirectionLedger"] = {"since": 1795000000000, "ids": []}
+        self.assertEqual(4, self.inbound()[0])
+
+    def test_a_worker_with_no_thread_cannot_be_read(self):
+        self.worker["id"] = ""
+        with self.assertRaisesRegex(ValueError, "names no Codex thread"):
+            self.inbound()
+
+
 class SlowDaemonTest(unittest.TestCase):
     """The real Codex.call against a daemon that answers each method after a delay on a simulated clock."""
 

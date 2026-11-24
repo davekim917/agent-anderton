@@ -236,6 +236,286 @@ def acknowledged(worker):
             and transcript_contains_notice(worker, f"Direction {direction['id']} from your Anderton."))
 
 
+BRIEF_LINE = re.compile(r'^You are a worker the Anderton session "(?P<spawner>[^"]*)" started for the task above, in (?P<dir>/.*)\.$')
+# Claude Code wraps a cross-session message so when the transcript entry carries no origin.
+WRAPPED_PEER = re.compile(r'^Another Claude session sent a message:\s*<cross-session-message from="(?P<sender>[^"]*)"'
+                          r'(?: from-name="(?P<name>[^"]*)")?[^>]*>\s*(?P<body>[\s\S]*?)(?:</cross-session-message>|$)')
+# What Claude Code writes as a user entry without a person having written it: a sub-agent's hand-back, a shell
+# command's output (its input line is the person's), and the marker an interruption leaves.
+INJECTED = ("<bash-stdout>", "<bash-stderr>", "<local-command-stdout>", "<local-command-stderr>", "<local-command-caveat>",
+            "[Request interrupted by user", "Tool loaded.")
+# A sub-agent's hand-back and an agent-team teammate's message are the worker's own helpers answering it; a side agent's
+# note is offered to the session by Claude Code, not written by a person.
+DELEGATED = re.compile(r"^(Another Claude session sent a message:\s*<(agent-message|teammate-message)[ >]|Here is a note offered by a side agent:)")
+SOCKET_PID = re.compile(r"^uds:.*/(\d+)\.sock$")
+
+
+class Unreadable(ValueError):
+    pass
+
+
+def first_line(text):
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            return line[:200]
+    return "(no text)"
+
+
+def entry_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(block.get("text", "") for block in content
+                         if isinstance(block, dict) and block.get("type") == "text")
+    return ""
+
+
+class Anderton:
+    """The worker's own Anderton, known by the record: its name, and the processes its claim and session name. A socket
+    address its messages arrive from counts as its own from then on, so a reply that copies it is a report."""
+
+    def __init__(self, names, pids):
+        self.names = {name for name in names if name}
+        self.pids = {str(pid) for pid in pids if pid}
+        self.addresses = set()
+
+    def sent(self, sender, name, pid):
+        if pid and str(pid) in self.pids:
+            if sender:
+                self.addresses.add(sender)
+            if name:
+                self.names.add(name)
+            return True
+        if not isinstance(sender, str) or not sender.startswith("uds:"):
+            return False
+        match = SOCKET_PID.match(sender)
+        if sender in self.addresses or (match and match.group(1) in self.pids) or (name and name in self.names):
+            self.addresses.add(sender)
+            return True
+        return False
+
+    def addressed(self, to):
+        if not isinstance(to, str):
+            return False
+        if to in self.addresses or any(to == name or to.startswith(name + " [") for name in self.names):
+            return True
+        match = SOCKET_PID.match(to)
+        return bool(match and match.group(1) in self.pids)
+
+
+def inbound_message(origin, text, meta, anderton, brief):
+    """(sender, text) for a message someone other than the worker's own Anderton sent it, else None."""
+    kind = origin.get("kind")
+    if kind == "peer":
+        if origin.get("handback"):
+            return None
+        if anderton.sent(origin.get("from"), origin.get("name"), origin.get("verifiedPeerPid")):
+            return None
+        body = origin.get("body")
+        if not isinstance(body, str):
+            wrapped = WRAPPED_PEER.match(text.strip())
+            body = wrapped.group("body") if wrapped else text
+        return origin.get("name") or origin.get("from") or "another session", body
+    if kind in {"task-notification", "auto-continuation"} or DELEGATED.match(text.strip()):
+        return None
+    if brief and brief in text.splitlines():
+        return None
+    if kind == "human":
+        return "the user", text
+    if kind is not None:
+        return None if meta else (f"an unrecognised {kind} entry", text)
+    if meta or not text.strip():
+        return None
+    stripped = text.strip()
+    wrapped = WRAPPED_PEER.match(stripped)
+    if wrapped:
+        if anderton.sent(wrapped.group("sender"), wrapped.group("name"), None):
+            return None
+        return wrapped.group("name") or wrapped.group("sender"), wrapped.group("body")
+    if stripped.startswith(INJECTED):
+        return None
+    return "the user", text
+
+
+def delivered(block):
+    if block.get("is_error"):
+        return False
+    return not re.search(r'\\*"success\\*"\s*:\s*false', json.dumps(block.get("content")))
+
+
+def scan_inbound(events, anderton, brief, final_replies_report, held, seen):
+    """Walks one transcript in order, keeping in held the messages that arrived since the worker's last report."""
+    sends = {}
+    latest = None
+    for event in events:
+        # Claude Code can append earlier entries again (a resumed or forked session): each is read once, where it first
+        # appeared.
+        if event.get("uuid"):
+            if event["uuid"] in seen:
+                continue
+            seen.add(event["uuid"])
+        latest = event.get("timestamp") or latest
+        kind = event.get("type")
+        if kind == "assistant":
+            message = event.get("message") or {}
+            for block in message.get("content") or []:
+                if block.get("type") == "tool_use" and block.get("name") == "SendMessage":
+                    args = block.get("input") or {}
+                    if isinstance(args.get("message"), str) and REPORT.match(report_text(args["message"])) \
+                            and anderton.addressed(args.get("to")):
+                        sends[block.get("id")] = True
+            if final_replies_report and message.get("stop_reason") == "end_turn" and \
+                    REPORT.match(report_text(entry_text(message.get("content")))):
+                held.clear()
+            continue
+        if kind == "attachment":
+            attachment = event.get("attachment") or {}
+            if attachment.get("type") != "queued_command":
+                continue
+            prompt = attachment.get("prompt")
+            found = inbound_message(attachment.get("origin") or {}, prompt if isinstance(prompt, str) else entry_text(prompt),
+                                    False, anderton, brief)
+        elif kind == "user":
+            content = (event.get("message") or {}).get("content", "")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result" and sends.pop(block.get("tool_use_id"), None) \
+                            and delivered(block):
+                        held.clear()
+                if all(isinstance(block, dict) and block.get("type") == "tool_result" for block in content):
+                    continue
+            if event.get("isCompactSummary"):
+                continue
+            found = inbound_message(event.get("origin") or {}, entry_text(content), bool(event.get("isMeta")), anderton, brief)
+        else:
+            continue
+        if found:
+            held.append({"at": event.get("timestamp"), "from": found[0], "line": first_line(found[1])})
+    return latest
+
+
+def worker_identities(worker, home):
+    identities = list(worker.get("claudePreviousSessions") or [])
+    if worker.get("claudeSession"):
+        identities.append(worker["claudeSession"])
+    if not identities and worker.get("claudeLaunchId"):
+        launch = worker["claudeLaunchId"]
+        if not re.fullmatch(r"[a-zA-Z0-9-]+", launch):
+            raise Unreadable("the record's launch id is not a session id")
+        found = sorted((home / "projects").glob(f"*/{launch}.jsonl"))
+        identities = [{"id": launch, "transcript": str(path)} for path in found[:1]] if len(found) == 1 else []
+    if not identities and worker.get("dir") and worker.get("spawner"):
+        # A record from before launch ids: the one transcript whose brief names this worker and its worktree.
+        legacy = {"startedAt": "1970-01-01T00:00:00Z", **worker}
+        found = legacy_worker_transcript(legacy, home, instant(legacy["startedAt"]))
+        identities = [found] if found else []
+    if not identities:
+        raise Unreadable("its record names no transcript, and none was found for its launch")
+    for identity in identities:
+        if not identity.get("id") or not identity.get("transcript"):
+            raise Unreadable("its record names a session without its transcript")
+        if not Path(identity["transcript"]).is_file():
+            raise Unreadable(f"its transcript {identity['transcript']} is missing")
+    return identities
+
+
+def anderton_of(worker, claim, home):
+    pids = []
+    if claim:
+        pids += [claim.get("pid"), (claim.get("claudeReportPreviousHolder") or {}).get("pid")]
+    spawner_session = worker.get("spawnerSession")
+    if spawner_session:
+        for entry in (home / "sessions").glob("*.json"):
+            try:
+                if json.loads(entry.read_text()).get("sessionId") == spawner_session:
+                    pids.append(entry.stem)
+            except (OSError, ValueError):
+                continue
+    return Anderton([worker.get("spawner")], pids)
+
+
+def reviewed_instant(value):
+    """The instant a --reviewed-through value names: ISO-8601 with a zone, and not in the future."""
+    if not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d(:\d\d(\.\d+)?)?(Z|[+-]\d\d:\d\d)", value or ""):
+        raise ValueError(f"--reviewed-through takes an ISO-8601 time with its zone, such as 2026-01-31T14:05:00Z, not '{value}'")
+    at = instant(value)
+    if at > datetime.datetime.now(datetime.timezone.utc):
+        raise ValueError(f"--reviewed-through {value} is in the future: it can only confirm what has already arrived")
+    return at
+
+
+def unreviewed(held, through, latest):
+    """The held messages after through. One without a time takes the transcript's latest, so a review through then
+    covers it."""
+    kept = []
+    for message in held:
+        message["at"] = message["at"] or latest
+        if through is None or message["at"] is None or instant(message["at"]) > through:
+            kept.append(message)
+    return kept
+
+
+def inbound_since_report(worker, claim, home, through):
+    anderton = anderton_of(worker, claim, home)
+    brief = f'You are a worker the Anderton session "{worker["spawner"]}" started for the task above, in {worker["dir"]}.' \
+        if worker.get("spawner") and worker.get("dir") else None
+    final_replies_report = worker.get("reportTransport") == "transcript" or worker.get("spawnerProvider") == "codex"
+    held = []
+    seen = set()
+    latest = None
+    for identity in worker_identities(worker, home):
+        latest = scan_inbound(transcript_events({**worker, "claudeSession": identity}), anderton, brief,
+                              final_replies_report, held, seen) or latest
+    return unreviewed(held, through, latest)
+
+
+def transcript_inbound(transcript, through, trust_reports=False):
+    """The same reading for a transcript alone, its Anderton named by the brief's own line."""
+    spawner = directory = None
+    with transcript.open() as file:
+        for line in file:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "user":
+                for text_line in entry_text((event.get("message") or {}).get("content")).splitlines():
+                    match = BRIEF_LINE.match(text_line)
+                    if match:
+                        spawner, directory = match.group("spawner"), match.group("dir")
+                        break
+            if spawner:
+                break
+    if not spawner:
+        raise Unreadable("no worker brief in this transcript")
+    worker = {"spawner": spawner, "dir": directory}
+    identity = {"id": transcript.stem, "transcript": str(transcript)}
+    brief = f'You are a worker the Anderton session "{spawner}" started for the task above, in {directory}.'
+    held = []
+    names = [spawner] + (reported_to(transcript_events({**worker, "claudeSession": identity})) if trust_reports else [])
+    latest = scan_inbound(transcript_events({**worker, "claudeSession": identity}), Anderton(names, []), brief, False, held, set())
+    return spawner, unreviewed(held, through, latest)
+
+
+def reported_to(events):
+    """The names the worker's delivered reports went to. Only a replay with no record uses them: an Anderton handed off or
+    renamed since the brief keeps no other trace in the transcript."""
+    sends, names = {}, set()
+    for event in events:
+        for block in (event.get("message") or {}).get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if event.get("type") == "assistant" and block.get("type") == "tool_use" and block.get("name") == "SendMessage":
+                args = block.get("input") or {}
+                if isinstance(args.get("message"), str) and REPORT.match(report_text(args["message"])) \
+                        and isinstance(args.get("to"), str) and not args["to"].startswith("uds:"):
+                    sends[block.get("id")] = args["to"].split(" [")[0]
+            elif block.get("type") == "tool_result" and block.get("tool_use_id") in sends and delivered(block):
+                names.add(sends[block["tool_use_id"]])
+    return sorted(names)
+
+
 def main():
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
@@ -255,7 +535,33 @@ def main():
     peer.add_argument("transcript", type=Path)
     peer.add_argument("session")
     peer.add_argument("peer")
+    inbound = commands.add_parser("inbound-since-report")
+    inbound.add_argument("record", type=Path)
+    inbound.add_argument("--home", type=Path, required=True)
+    inbound.add_argument("--claim", type=Path)
+    inbound.add_argument("--reviewed-through")
+    replay = commands.add_parser("transcript-inbound")
+    replay.add_argument("transcript", type=Path)
+    replay.add_argument("--reviewed-through")
+    replay.add_argument("--trust-reported-names", action="store_true")
+    reviewed = commands.add_parser("reviewed-time")
+    reviewed.add_argument("value")
     args = parser.parse_args()
+    if args.command == "reviewed-time":
+        reviewed_instant(args.value)
+        return 0
+    if args.command == "transcript-inbound":
+        through = reviewed_instant(args.reviewed_through) if args.reviewed_through else None
+        spawner, held = transcript_inbound(args.transcript, through, args.trust_reported_names)
+        print(json.dumps({"anderton": spawner, "messages": held}))
+        return 4 if held else 0
+    if args.command == "inbound-since-report":
+        through = reviewed_instant(args.reviewed_through) if args.reviewed_through else None
+        worker = json.loads(args.record.read_text())
+        claim = json.loads(args.claim.read_text()) if args.claim else None
+        held = inbound_since_report(worker, claim, args.home, through)
+        print(json.dumps({"messages": held}))
+        return 4 if held else 0
     if args.command == "peer-received":
         worker = {"claudeSession": {"id": args.session, "transcript": str(args.transcript)}}
         return 0 if transcript_contains_notice(worker, f"Peer message {args.peer} from Anderton ") else 3

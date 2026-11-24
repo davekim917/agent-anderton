@@ -34,6 +34,19 @@ case $1 in
 esac
 FAKE
 chmod +x "$work/bin/claude"
+# What Claude Code writes when a session started with --session-id <id> in <dir> gets its first prompt: the transcript
+# line of a person's typed message. The fake tmux and herdr call it with the brief they were given.
+cat > "$work/bin/fake-prompt-transcript" <<'FAKE'
+#!/usr/bin/env bash
+# fake-prompt-transcript <session id> <cwd> <text>
+dir="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$2" | tr '/.' '--')"
+mkdir -p "$dir"
+jq -nc --arg sid "$1" --arg cwd "$2" --arg text "$3" --arg at "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+  --arg uuid "$(python3 -c 'import uuid; print(uuid.uuid4())')" \
+  '{type: "user", sessionId: $sid, cwd: $cwd, timestamp: $at, uuid: $uuid, origin: {kind: "human"}, promptSource: "typed",
+    message: {role: "user", content: $text}}' >> "$dir/$1.jsonl"
+FAKE
+chmod +x "$work/bin/fake-prompt-transcript"
 # A fake herdr. Open tabs are lines "<server socket> <tab id> <label>" in $FAKE_LOG.tabs-open, so a tab is
 # found only in the server ($HERDR_SOCKET_PATH) it was opened in, under its own label.
 # `tab create` opens tab $FAKE_HERDR_TAB (default w9:t5), or fails with $FAKE_HERDR_CREATE_FAIL. `agent start` and `agent prompt` log what they got;
@@ -91,10 +104,20 @@ case "$1 $2" in
       sleep 0.3
       set -- agent start "$agent_name"
     fi
+    # A Claude session started with --session-id writes that session's transcript at its first prompt.
+    start_pane="" previous=""
+    for arg; do
+      if [ "$previous" = --pane ]; then start_pane=$arg; fi
+      if [ "$previous" = --session-id ] && [ -n "$start_pane" ]; then printf '%s\n' "$arg" > "$FAKE_LOG.claude-session.$start_pane"; fi
+      previous=$arg
+    done
     if [ -n "${FAKE_HERDR_START_LIVE:-}" ]; then printf '[{"kind":"interactive","name":"%s","id":null}]\n' "$3" > "$FAKE_AGENTS"; fi
     if [ -n "${FAKE_HERDR_START_FAIL:-}" ]; then echo '{"error":{"code":"agent_not_ready"}}'; exit 1; fi
     ;;
-  "agent prompt") printf '%s' "$4" > "$FAKE_LOG.prompt"; printf '%s\n' "$3" > "$FAKE_LOG.prompt-target"; echo "$3" >> "$FAKE_LOG.prompts" ;;
+  "agent prompt")
+    printf '%s' "$4" > "$FAKE_LOG.prompt"; printf '%s\n' "$3" > "$FAKE_LOG.prompt-target"; echo "$3" >> "$FAKE_LOG.prompts"
+    if [ -f "$FAKE_LOG.claude-session.$3" ]; then fake-prompt-transcript "$(cat "$FAKE_LOG.claude-session.$3")" "$(cat "$FAKE_LOG.tab-cwd")" "$4"; fi
+    ;;
   "agent list") cat "$FAKE_LOG.herdr-agents" 2>/dev/null || echo '{"result":{"agents":[]}}' ;;
   "agent get")
     # The agent in pane $3 of this server: a "<server socket> <json>" line in $FAKE_LOG.agent-get.<pane>, or agent_not_found.
@@ -178,6 +201,15 @@ case $1 in
   new-window)
     printf '%s\n' "$@" > "$FAKE_LOG.window"
     if [ -n "${FAKE_TMUX_FAIL:-}" ]; then echo "no server" >&2; exit 1; fi
+    # A Claude session started with --session-id in the window's directory writes its transcript at its first prompt,
+    # the brief given as the last argument.
+    window_dir="" window_sid="" previous=""
+    for arg; do
+      if [ "$previous" = -c ]; then window_dir=$arg; fi
+      if [ "$previous" = --session-id ]; then window_sid=$arg; fi
+      previous=$arg
+    done
+    if [ -n "$window_sid" ]; then fake-prompt-transcript "$window_sid" "$window_dir" "${!#}"; fi
     if [ -n "${FAKE_TMUX_LIVE:-}" ]; then
       previous=""
       for arg; do
@@ -738,11 +770,120 @@ check "an unnamed caller is refused: the worker would have no one to report to" 
 run env FAKE_TMUX_KILL_ENDS=1 "$scripts/retire.sh" fix-login
 check "the interactive report worker can be retired" [ "$status" -eq 0 ]
 
+# retire.sh reads the worker's conversation before it closes anything: a message there since its last report, from anyone
+# but its own Anderton, holds the retirement. The entries below follow Claude Code's transcript shapes.
+hc_n=0
+hc_spawn() { # hc_spawn <name>: a worker in tmux window @9, its transcript begun by its brief; sets $hc_sid and $hc_t
+  run env "${tmux_env[@]}" FAKE_TMUX_WINDOW=@9 "$scripts/spawn.sh" --effort high "$1" <<'BRIEF'
+Fix the login redirect.
+BRIEF
+  hc_sid=$(jq -r .claudeLaunchId "$CLAUDE_CONFIG_DIR/anderton/workers/$1.json")
+  hc_t=$(ls "$CLAUDE_CONFIG_DIR"/projects/*/"$hc_sid.jsonl")
+}
+hc_add() { # hc_add <entry JSON>: appends it to the worker's transcript as its session wrote it, timestamped now
+  hc_n=$((hc_n + 1))
+  jq -c --arg sid "$hc_sid" --arg uuid "hc-$hc_n" --arg at "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+    '{sessionId: $sid, uuid: $uuid, timestamp: $at, cwd: "/"} + .' <<<"$1" >>"$hc_t"
+}
+hc_report() { # hc_report [is_error]: a RESULT the worker sent its Anderton, and SendMessage's answer
+  hc_add '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"send-'"$hc_n"'","name":"SendMessage","input":{"to":"lead-session","message":"RESULT: PR ready https://example.invalid/pr/7, redirect test passes"}}]}}'
+  hc_add '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send-'"$((hc_n - 1))"'","is_error":'"${1:-false}"',"content":[{"type":"text","text":"{\"success\":true,\"message\":\"sent\"}"}]}]}}'
+}
+hc_typed() { hc_add "$(jq -nc --arg text "$1" '{type: "user", origin: {kind: "human"}, promptSource: "typed", message: {role: "user", content: $text}}')"; }
+hc_retire() { : >"$FAKE_LOG.killed"; run env FAKE_TMUX_KILL_ENDS=1 "$scripts/retire.sh" "$@"; }
+
+hc_spawn hc-typed
+hc_report
+hc_typed "Also add the retry check you mentioned.
+Then open a second PR."
+typed_at=$(tail -n 1 "$hc_t" | jq -r .timestamp)
+hc_retire hc-typed
+check "retire.sh holds a worker the user typed to after its last report, closing nothing" \
+  eval '[ "$status" -eq 4 ] && [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-hc-typed" ] && [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/hc-typed.json" ]'
+check "listing the message's time and first line" contains "$typed_at  the user: Also add the retry check you mentioned."
+check "and how to clear it once read" contains "retire.sh hc-typed --reviewed-through $typed_at"
+out=$(env CLAUDE_PID="$p_lead" "$scripts/waiting.sh" --blocked)
+check "the watch's waiting.sh --blocked lists the held worker, with the command that clears it" \
+  contains "=== hc-typed (retire held"
+check "naming when the message came" contains "at $typed_at; read them, then retire.sh hc-typed --reviewed-through $typed_at)"
+hc_retire hc-typed --force
+check "--force does not clear it" eval '[ "$status" -eq 2 ] && [ -d "$work/wt-hc-typed" ]'
+hc_retire hc-typed --reviewed-through 2099-01-01T00:00:00Z
+check "nor does a review through a time still to come" eval '[ "$status" -eq 2 ] && contains "in the future" && [ -d "$work/wt-hc-typed" ]'
+hc_retire hc-typed --reviewed-through 2020-01-01T00:00:00Z
+check "nor one through a time before the message" eval '[ "$status" -eq 4 ] && [ -d "$work/wt-hc-typed" ]'
+hc_retire hc-typed --reviewed-through "$typed_at"
+check "a review through the message's time retires it" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-hc-typed" ]'
+check "and clears what waiting.sh listed" eval '[ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/hc-typed.held" ] &&
+  ! env CLAUDE_PID="$p_lead" "$scripts/waiting.sh" --blocked | grep -q hc-typed'
+
+hc_spawn hc-injected
+hc_report
+own='{"kind":"peer","from":"uds:/run/user/1000/cc-socks/'"$p_lead"'.sock","verifiedPeerPid":"'"$p_lead"'","msg_id":"m-1","name":"lead-session","fromMode":"bypass","body":"DIRECTION: rebase on main before the merge."}'
+hc_add '{"type":"user","isMeta":true,"origin":'"$own"',"promptSource":"system","message":{"role":"user","content":"Another Claude session sent a message:\n<cross-session-message from=\"uds:/run/user/1000/cc-socks/'"$p_lead"'.sock\" from-name=\"lead-session\">\nDIRECTION: rebase on main before the merge.\n</cross-session-message>"}}'
+hc_add '{"type":"attachment","attachment":{"type":"queued_command","commandMode":"prompt","origin":'"$own"',"prompt":"<cross-session-message from=\"uds:/run/user/1000/cc-socks/'"$p_lead"'.sock\" from-name=\"lead-session\">\nAnd keep the old cookie name.\n</cross-session-message>"}}'
+hc_add '{"type":"user","origin":{"kind":"task-notification","producer":"session-task"},"promptSource":"system","message":{"role":"user","content":"<task-notification>\n<summary>Stop hook feedback</summary>\n</task-notification>\n<system-reminder>\nStop hook blocking error from command \"Stop\": Anderton watch: nothing new.\n</system-reminder>"}}'
+hc_add '{"type":"user","origin":{"kind":"task-notification","producer":"session-task","runId":"r-1"},"promptSource":"system","message":{"role":"user","content":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>"}}'
+hc_add '{"type":"user","isMeta":true,"origin":{"kind":"auto-continuation"},"message":{"role":"user","content":"Your claude.ai usage limit has reset. Continue the task you were working on when the limit was reached; do not repeat work that is already complete."}}'
+hc_add '{"type":"user","isMeta":true,"origin":{"kind":"auto-continuation"},"message":{"role":"user","content":"Permission granted for this exact command only, as one whole string: \"git push origin fix-login\"."}}'
+hc_add '{"type":"user","isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /skills/review\n\n# Review\n\nRead the diff."}]}}'
+hc_add '{"type":"user","isMeta":true,"message":{"role":"user","content":"<system-reminder>\nThe user named this session \"hc-injected\".\n</system-reminder>"}}'
+hc_add '{"type":"user","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation."}}'
+hc_add '{"type":"user","isMeta":true,"origin":{"kind":"peer","from":"a1b2","senderTaskId":"a1b2","name":"general-purpose","handback":"True","body":"[Subagent hand-back] The review found nothing."},"message":{"role":"user","content":"Another Claude session sent a message:\n<agent-message from=\"a1b2\">\n[Subagent hand-back] The review found nothing.\n</agent-message>"}}'
+hc_add '{"type":"user","message":{"role":"user","content":"Another Claude session sent a message:\n<teammate-message teammate_id=\"helper\">\nThe migration test passes.\n</teammate-message>"}}'
+hc_add '{"type":"attachment","attachment":{"type":"queued_command","commandMode":"prompt","origin":{"kind":"human"},"prompt":"Here is a note offered by a side agent:\n\n> Heads up: the lockfile changed."}}'
+hc_add '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t-9","content":"tests passed"}]}}'
+hc_add '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}'
+hc_retire hc-injected
+check "messages from its own Anderton and what Claude Code injects after the last report leave the retirement clean" \
+  eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-hc-injected" ]'
+
+hc_spawn hc-answered
+hc_report
+hc_typed "Can you also check the logout path?"
+hc_report true
+hc_retire hc-answered
+check "a report whose send failed does not count as one" eval '[ "$status" -eq 4 ] && contains "Can you also check the logout path?"'
+hc_report
+hc_retire hc-answered
+check "a user's message the worker reported on afterwards does not hold it" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-hc-answered" ]'
+
+hc_spawn hc-voice
+hc_report
+hc_add '{"type":"user","isMeta":true,"origin":{"kind":"peer","from":"Voice relay","verifiedPeerPid":"4242","verifiedPeerProcStart":"77","msg_id":"m-2"},"promptSource":"system","message":{"role":"user","content":"Another Claude session sent a message:\n<cross-session-message from=\"Voice relay\">\nHold on, I want a follow-up on the cookie expiry.\n</cross-session-message>"}}'
+hc_retire hc-voice
+check "a voice relay's message after the last report holds it: it is the user's word, though it arrives as a session's" \
+  eval '[ "$status" -eq 4 ] && contains "Voice relay: Hold on, I want a follow-up on the cookie expiry."'
+hc_add '{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"RESULT: follow-up started"}]}}'
+hc_retire hc-voice
+check "and a reply in its own tab is no report to a Claude Anderton" eval '[ "$status" -eq 4 ]'
+hc_report
+hc_add '{"type":"user","isMeta":true,"origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/1.sock","verifiedPeerPid":"1","name":"other-anderton","body":"Can you share the fixture with me?"},"message":{"role":"user","content":"Another Claude session sent a message:"}}'
+hc_retire hc-voice
+check "so does another session's message" eval '[ "$status" -eq 4 ] && contains "other-anderton: Can you share the fixture with me?"'
+hc_retire hc-voice --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+hc_spawn hc-unread
+mv "$hc_t" "$hc_t.away"
+hc_retire hc-unread
+check "a transcript that cannot be read holds it: a missing read is not a quiet conversation" \
+  eval '[ "$status" -eq 4 ] && contains "could not be read" && [ -d "$work/wt-hc-unread" ] && [ ! -s "$FAKE_LOG.killed" ]'
+out=$(env CLAUDE_PID="$p_lead" "$scripts/waiting.sh" --blocked)
+check "and waiting.sh lists that hold too" contains "=== hc-unread (retire held"
+mv "$hc_t.away" "$hc_t"
+hc_retire hc-unread
+
+
+
+
 # waiting.sh: background sessions come from `claude agents --json`, which the registry does not list.
 git -C "$alpha" worktree add -q --detach "$work/wt-legacy-bg" HEAD
 jq -nc --arg root "$alpha" --arg dir "$work/wt-legacy-bg" --arg base "$(git -C "$alpha" rev-parse HEAD)" '
   {name:"legacy-bg", launcher:"bg", id:"a1b2c3d4", root:$root, dir:$dir, base:$base,
    worktree:true, spawner:"lead-session", spawnerSession:"lead-1"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/legacy-bg.json"
+# Its session, from before records kept a launch id, is found by the brief that names it and its worktree.
+fake-prompt-transcript legacy-bg-session "$work/wt-legacy-bg" "Task.
+You are a worker the Anderton session \"lead-session\" started for the task above, in $work/wt-legacy-bg."
 printf '{"type":"assistant","timestamp":"%s","message":{"content":[{"type":"text","text":"Blocked: which bucket?"}]}}\n' \
   "$recent" > "$CLAUDE_CONFIG_DIR/projects/p/bg-1.jsonl"
 printf '{"type":"assistant","timestamp":"%s","message":{"content":[{"type":"text","text":"I will check the settings."}]}}\n{"type":"assistant","timestamp":"%s","message":{"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"questions":[{"question":"Which bucket for prod?","options":[{"label":"east"},{"label":"west"}]}]}}]}}\n' \
@@ -908,7 +1049,11 @@ check "a failed tab whose session is not confirmed stopped fails the spawn" [ "$
 check "saying so" contains "not confirmed stopped"
 check "keeping its worktree" [ -d "$work/wt-live-stuck" ]
 check "and a record retire.sh can finish from" [ "$(jq -r '"\(.launcher) \(.tab)"' "$CLAUDE_CONFIG_DIR/anderton/workers/live-stuck.json" 2>/dev/null)" = "herdr w9:t7" ]
+: >"$FAKE_LOG.closed"
 run env FAKE_HERDR_CLOSE_ENDS=1 "$scripts/retire.sh" live-stuck
+check "its brief never arrived, so no transcript shows it was not told anything: retire.sh holds it, closing nothing" \
+  eval '[ "$status" -eq 4 ] && contains "could not be read" && [ -d "$work/wt-live-stuck" ] && ! grep -qx "w9:t7" "$FAKE_LOG.closed" 2>/dev/null'
+run env FAKE_HERDR_CLOSE_ENDS=1 "$scripts/retire.sh" live-stuck --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 check "which it does once the session ends" [ "$status" -eq 0 ]
 check "removing that worktree" [ ! -e "$work/wt-live-stuck" ]
 
@@ -2343,6 +2488,8 @@ rho_worker() { # rho_worker <name> [spawner]: a worker record and its worktree a
   jq -nc --arg name "$1" --arg dir "$work/wt-$1" --arg root "$rho" --arg base "$(git -C "$work/wt-$1" rev-parse HEAD)" --arg spawner "${2:-rho-lead}" \
     '{name: $name, launcher: "bg", id: ("id-" + $name), dir: $dir, root: $root, base: $base, worktree: true, spawner: $spawner}' \
     > "$CLAUDE_CONFIG_DIR/anderton/workers/$1.json"
+  fake-prompt-transcript "rho-$1" "$work/wt-$1" "Task.
+You are a worker the Anderton session \"${2:-rho-lead}\" started for the task above, in $work/wt-$1."
 }
 rho_commit() { # rho_commit <name> [committer date]: a commit in that worker's worktree
   GIT_COMMITTER_DATE="${2:-}" git -C "$work/wt-$1" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m "$1"
@@ -2616,6 +2763,12 @@ FAKE
 # $FAKE_RETITLE_AT, that call also retitles every pane, as a user switching conversations during it would.
 cat >"$codexdir/codex-worker.py" <<'FAKE'
 #!/usr/bin/env bash
+# The thread's messages since its last report: none, or with $FAKE_INBOUND those it holds.
+if [ "$1" = inbound-since-report ]; then
+  if [ -n "${FAKE_INBOUND:-}" ]; then printf '%s\n' "$FAKE_INBOUND"; exit 4; fi
+  echo '{"messages":[]}'
+  exit 0
+fi
 if [ "$1" = message ]; then
   printf '%s\n' "$@" >>"$FAKE_LOG.direction"
   exit "${FAKE_DIRECTION_EXIT:-0}"
@@ -2707,6 +2860,10 @@ check "or one moved out of its window, which is gone, while it runs another conv
 echo "/tmp/fake-codex-tmux 4 @21 cx-tab" >>"$FAKE_LOG.windows-open"
 tmux_pane %21 "[ ! ] Action Required | $cx_title"
 tmux_pane %22 ""
+cx_retire cx-tab FAKE_INBOUND='{"messages":[{"at":"2026-11-18T11:06:40.250Z","from":"the user","line":"Also add the retry check."}]}'
+check "retire.sh holds a Codex worker whose thread has a turn typed in its pane since its last report, closing nothing" \
+  eval '[ "$status" -eq 4 ] && contains "2026-11-18T11:06:40.250Z  the user: Also add the retry check." &&
+        [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-cx-tab" ]'
 cx_retire cx-tab
 check "and closes the pane still showing its thread, as Codex titles it, cut to 29 characters" \
   eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-cx-tab" ]'
@@ -3084,6 +3241,14 @@ real_bwrap=""
 agy_env=("${herdr_env[@]}" "HOME=$agyhome" "ANDERTON_AGY_ROOT=$agyroot" FAKE_HERDR_TAB=w9:t40 "FAKE_BWRAP=$real_bwrap"
   "FAKE_SCRIPT_BWRAP=$work/fakebwrap/bwrap")
 (cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project tabs >/dev/null)
+hc_spawn hc-agy
+jq -c '. + {provider: "agy"}' "$CLAUDE_CONFIG_DIR/anderton/workers/hc-agy.json" >"$work/hc-agy.tmp"
+mv "$work/hc-agy.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/hc-agy.json"
+hc_retire hc-agy
+check "an agy worker, whose conversation nothing here reads, is held until a review is given" \
+  eval '[ "$status" -eq 4 ] && contains "agy keeps no transcript" && contains "retire.sh hc-agy --reviewed-through" && [ -d "$work/wt-hc-agy" ]'
+rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/hc-agy.json" "$CLAUDE_CONFIG_DIR/anderton/workers/hc-agy.held"
+git -C "$alpha" worktree remove --force "$work/wt-hc-agy"
 agy_spawn() { # agy_spawn <env...> -- <spawn args...>: as the lead session, with a one-line brief
   local envs=()
   while [ "$1" != -- ]; do envs+=("$1"); shift; done
@@ -3134,6 +3299,8 @@ else
 
   # retire.sh, worker.sh and waiting.sh find the launcher where spawn.sh did.
   export ANDERTON_AGY_ROOT="$agyroot"
+  # agy keeps no transcript to read for messages since a report, so each retirement here names the review it rests on.
+  agy_retire() { run "$scripts/retire.sh" "$1" --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; }
   # The sandbox check: each case fails one of its three tests and passes the others, and gets no brief.
   rm -f "$FAKE_LOG.prompt"
   : > "$FAKE_LOG.closed"
@@ -3158,6 +3325,9 @@ else
     contains "Kept $work/wt-agy-refused" && [ -d "$work/wt-agy-refused" ]'
   agy_pin "$real_bwrap"
   run "$scripts/retire.sh" agy-refused
+  check "retire.sh holds an agy worker given no review, since nothing reads what it was told" \
+    eval '[ "$status" -eq 4 ] && contains "agy keeps no transcript" && [ -d "$work/wt-agy-refused" ]'
+  agy_retire agy-refused
   check "which retire.sh removes once the pinned bwrap can" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-refused" ]'
   agy_spawn "${agy_env[@]}" FAKE_AGY_PANE=w9:p99 "FAKE_AGY_NOTE=$(printf 'a note\nHERDR_PANE_ID=w9:p5')" -- --provider agy --effort high agy-noted
   check "a variable whose value holds a line HERDR_PANE_ID=<this pane> does not put another pane's sandbox in it" eval '[ "$status" -eq 1 ] &&
@@ -3185,7 +3355,7 @@ WRITES
   check "a failed agy spawn runs no clean filter its worktree names outside the sandbox" eval '[ "$status" -eq 1 ] &&
     [ ! -e "$work/filter-ran" ] && contains "Kept $work/wt-agy-filtered"'
   git -C "$work/wt-agy-filtered" reset -q && git -C "$work/wt-agy-filtered" clean -qfd
-  run "$scripts/retire.sh" agy-filtered
+  agy_retire agy-filtered
   check "and retire.sh then removes its clean worktree" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-filtered" ] &&
     [ ! -e "$work/filter-ran" ]'
   rm -f "$work/filter-ran"
@@ -3236,20 +3406,20 @@ WRITES
   run "$scripts/worker.sh" message agy-worker "Rebase on main."
   check "nor for a record that saved no agy instance" eval '[ "$status" -eq 1 ] && [ ! -e "$FAKE_LOG.prompt" ]'
   : > "$FAKE_LOG.closed"
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "and retire.sh leaves that pane and worktree alone" eval '[ "$status" -eq 1 ] && ! grep -qx "pane w9:p5" "$FAKE_LOG.closed" &&
     [ -d "$work/wt-agy-worker" ]'
   jq -c '.agyInstance = "agy-session-1"' "$agy_record" > "$agy_record.tmp" && mv "$agy_record.tmp" "$agy_record"
   agy_agent agy idle "$work/wt-agy-worker" "" agy-session-2
   : > "$FAKE_LOG.closed"
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "and retire.sh leaves that instance's pane open" eval '[ "$status" -eq 1 ] && ! grep -qx "pane w9:p5" "$FAKE_LOG.closed"'
   : > "$FAKE_LOG.closed"
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "retire.sh keeps an agy worker whose launcher runs but not in its pane" eval '[ "$status" -eq 1 ] &&
     [ -d "$work/wt-agy-worker" ] && ! grep -qx "pane w9:p5" "$FAKE_LOG.closed"'
   agy_agent agy working
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "or that herdr reports working" eval '[ "$status" -eq 1 ] && contains "not idle" && [ -d "$work/wt-agy-worker" ]'
 
   # Host git reads the worktree the worker wrote with none of the repository's helpers, and only while its .git still
@@ -3262,7 +3432,7 @@ WRITES
   cp "$work/wt-agy-worker/.git" "$work/agy-pointer.saved"
   printf 'gitdir: %s\n' "$work/elsewhere-repo/.git" > "$work/wt-agy-worker/.git"
   agy_agent agy
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "retire.sh refuses an agy worktree whose .git points elsewhere, running nothing there" eval '[ "$status" -eq 1 ] &&
     contains "no longer points into the repository" && [ ! -e "$work/fsmonitor-ran" ] && [ -d "$work/wt-agy-worker" ]'
   cp "$work/agy-pointer.saved" "$work/wt-agy-worker/.git"
@@ -3270,7 +3440,7 @@ WRITES
   git -C "$work/wt-agy-worker" config --worktree core.fsmonitor "$work/fsmonitor.sh"
   git -C "$work/wt-agy-worker" config --worktree core.hooksPath "$work/hooks-elsewhere"
   : > "$FAKE_LOG.closed"
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "and retires it by closing its pane once idle, after its launcher exits" eval '[ "$status" -eq 0 ] &&
     grep -qx "pane w9:p5" "$FAKE_LOG.closed"'
   check "running no fsmonitor the worktree's config names" [ ! -e "$work/fsmonitor-ran" ]
@@ -3282,12 +3452,12 @@ WRITES
   agy_agent agy
   agy_spawn "${agy_env[@]}" "FAKE_AGY_WRITE=$work/agy-writes.sh" -- --provider agy --effort high agy-worker
   check "an agy worker starts, and writes a formatter its repository runs as a clean filter" [ "$status" -eq 0 ]
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "retire.sh keeps that worktree's staged work, running no clean filter outside the sandbox" eval '[ "$status" -eq 3 ] &&
     contains "uncommitted changes" && [ ! -e "$work/filter-ran" ] && [ -d "$work/wt-agy-worker" ]'
   git -C "$work/wt-agy-worker" reset -q && git -C "$work/wt-agy-worker" clean -qfd
   rm -f "$FAKE_LOG.agent-get.w9:p5"
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "and retires it once that work is gone" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-worker" ] && [ ! -e "$work/filter-ran" ]'
   # Clean but for the formatter, which the repository ignores: the sandbox's status runs the filter and finds nothing to
   # keep, and the removal that follows reads nothing in the worktree, so the filter never runs on the host.
@@ -3301,7 +3471,7 @@ WRITES
     > "$work/agy-writes-clean.sh"
   agy_agent agy
   agy_spawn "${agy_env[@]}" "FAKE_AGY_WRITE=$work/agy-writes-clean.sh" -- --provider agy --effort high agy-worker
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "retire.sh removes a worktree the sandbox finds clean, running its clean filter nowhere outside it" eval '
     [ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-worker" ] && [ ! -e "$work/filter-ran" ]'
 
@@ -3314,11 +3484,11 @@ WRITES
   rm -f "$FAKE_LOG.prompt"
   run "$scripts/worker.sh" message agy-worker "Rebase on main."
   check "worker.sh message sends nothing when agy exits after the pane read" eval '[ "$status" -eq 1 ] && [ ! -e "$FAKE_LOG.prompt" ]'
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "retire.sh keeps the worktree while the pane's new agent works in it" eval '[ "$status" -eq 1 ] &&
     contains "now runs claude" && [ -d "$work/wt-agy-worker" ]'
   agy_agent claude idle /
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "and retires the stopped worker once nothing in the pane is in its worktree" eval '[ "$status" -eq 0 ] &&
     [ ! -e "$work/wt-agy-worker" ] && [ ! -e "$agy_record" ]'
   : > "$FAKE_LOG.closed"
@@ -3326,11 +3496,11 @@ WRITES
   agy_spawn "${agy_env[@]}" -- --provider agy --effort high agy-worker
   agy_agent claude idle "$work/wt-agy-worker" .then
   touch "$FAKE_LOG.agent-get.w9:p5.kill"
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "retire.sh does not close a pane whose agy exited after the pane read" eval '[ "$status" -eq 1 ] &&
     ! grep -qx "pane w9:p5" "$FAKE_LOG.closed" && [ -d "$work/wt-agy-worker" ]'
   agy_agent claude idle /
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "and retires it once that pane is no longer in its worktree" [ "$status" -eq 0 ]
 
   # The pane's agy exits and leaves a plain shell in the worktree, which herdr does not report as an agent.
@@ -3343,12 +3513,12 @@ WRITES
   kill -KILL "$(cat "$agy_launch")" 2>/dev/null || true
   sleep 0.3
   rm -f "$FAKE_LOG.agent-get.w9:p5"
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "retire.sh keeps a stopped worker's worktree while a plain shell herdr shows no agent for sits in it" eval '[ "$status" -eq 1 ] &&
     [ -d "$work/wt-agy-worker" ] && [ -f "$agy_record" ]'
   kill "$agy_shell" 2>/dev/null || true
   wait "$agy_shell" 2>/dev/null || true
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "and retires it once nothing has its directory there" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-worker" ]'
 
   # A launch that set up no sandbox started nothing, so spawn.sh starts agy in the pane again, up to two more times:
@@ -3365,12 +3535,12 @@ WRITES
   mv "$agyroot/bin/agy" "$agyroot/bin/agy.real"
   printf '#!/bin/sh\nexit 0\n' > "$agyroot/bin/agy"
   chmod +x "$agyroot/bin/agy"
-  run "$scripts/retire.sh" agy-retried
+  agy_retire agy-retried
   check "retire.sh keeps a worktree whose inspection exits 0 with no answer" eval '[ "$status" -eq 3 ] &&
     contains "could not read its status" && [ -d "$work/wt-agy-retried" ]'
   mv "$agyroot/bin/agy.real" "$agyroot/bin/agy"
   rm -f "$FAKE_LOG.agent-get.w9:p5"
-  run "$scripts/retire.sh" agy-retried
+  agy_retire agy-retried
   check "which retires" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-retried" ]'
 
   # The sandbox proof says what started; the brief goes only to a pane herdr reports agy in.
@@ -3406,7 +3576,7 @@ WRITES
   printf '#!/bin/sh\nif [ ! -e "%s" ]; then : > "%s"; exit 75; fi\nexec "%s" "$@"\n' "$work/agy-failed-once" "$work/agy-failed-once" \
     "$agyroot/bin/agy.real" > "$agyroot/bin/agy"
   chmod +x "$agyroot/bin/agy"
-  run "$scripts/retire.sh" agy-landed
+  agy_retire agy-landed
   check "and retire.sh retires it, trying again a sandbox start that set up nothing" eval '[ "$status" -eq 0 ] &&
     [ ! -e "$work/wt-agy-landed" ] && [ -e "$work/agy-failed-once" ]'
   mv "$agyroot/bin/agy.real" "$agyroot/bin/agy"
@@ -3420,11 +3590,11 @@ WRITES
   agy_spawn "${agy_env[@]}" FAKE_AGY_FOREIGN=1 FAKE_HERDR_CLOSE_FAIL=1 -- --provider agy --effort high agy-worker
   check "a launch whose pane would not close keeps a record with no launcher" eval '[ "$status" -eq 1 ] &&
     [ -f "$agy_record" ] && [ "$(jq -r ".agyPid // \"none\"" "$agy_record")" = none ]'
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "retire.sh keeps it while its pane is there" eval '[ "$status" -eq 1 ] && [ -f "$agy_record" ]'
   awk '$2 != "w9:p5"' "$FAKE_LOG.herdr-panes" > "$FAKE_LOG.herdr-panes.tmp"
   mv "$FAKE_LOG.herdr-panes.tmp" "$FAKE_LOG.herdr-panes"
-  run "$scripts/retire.sh" agy-worker
+  agy_retire agy-worker
   check "and retires it once the pane is gone" eval '[ "$status" -eq 0 ] && [ ! -e "$agy_record" ] && [ ! -e "$work/wt-agy-worker" ]'
   rm -f "$FAKE_LOG.agent-get.w9:p5"
   for leftover in "$FAKE_LOG".agy-pid.*; do

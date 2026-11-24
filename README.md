@@ -509,13 +509,26 @@ startup details for the operator. Existing background sessions use `claude attac
   the repository's Codex Anderton inherits a scoped worker. Recovery of native sends with an unknown
   recipient requires the worker to report again in its final reply.
 
-**`retire.sh <name>`** stops that worker, then removes its worktree and record. A herdr tab or tmux
+**`retire.sh <name> [--reviewed-through <ISO time>]`** stops that worker, then removes its worktree and record. A herdr tab or tmux
 window is closed only when it still carries the label it was opened with, in the server recorded at spawn, and
 the worker counts as stopped only when that tab or window is gone and its name has left
 `claude agents`; an existing background worker is stopped with `claude stop`. It exits 3 and keeps the
 worktree when the worktree has uncommitted changes, or commits since it started that no remote
 branch has. Untracked files count whatever `status.showUntrackedFiles` says, and a worktree git
 cannot read or compare with its base is kept too. Gitignored files don't count as changes.
+
+Before it closes anything, `retire.sh` reads the worker's conversation since its last report to its
+Anderton: a delivered `SendMessage` report, or for a Codex Anderton reading a Claude worker's transcript, a
+final reply that is one; for a Codex worker, a completed turn whose final message is one. A message after it
+from anyone but that Anderton (typed in the worker's tab, a voice relay, another session, a Codex TUI turn)
+holds the retirement: it exits 4, lists each message's time and first line, and writes `<name>.held` beside the
+record, which `waiting.sh` (and so the watch) lists until the worker is retired. The Anderton's own messages are
+known from the record: its name and the processes its claim and session name, and for Codex, the directions
+`worker.sh message` recorded sending. What Claude Code injects does not count: tool results, skill bodies,
+compaction summaries, hook and Stop feedback, system reminders, task notifications, usage-reset and
+permission-grant prompts, sub-agent hand-backs, agent-team teammates and side-agent notes. A conversation it
+cannot read is held, never read as quiet, and so is every agy worker, which keeps no transcript.
+`--reviewed-through <ISO time>`, not in the future, clears the messages up to that time.
 
 **`adopt.sh <name>`** makes the calling Anderton answer for a live session the user opened in its
 repository, as for a worker it started: it writes a worker record naming the caller, so the session's

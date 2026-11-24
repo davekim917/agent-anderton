@@ -247,6 +247,13 @@ After starting a worker:
   its work is merged or dropped. It stops the session and
   removes the worktree, unless the worktree holds work no remote has: a line that
   names such work is yours to push or discard first.
+- `retire.sh` exits 4 and closes nothing when the worker's conversation has a message
+  since its last report to you from anyone but you: the user typing in its tab, a voice
+  relay, another session. It lists each one's time and first line. Read them: if one asks
+  for work still open, the worker is not done. Once nothing in them is open, run
+  `scripts/retire.sh <name> --reviewed-through <time>` with the last time it listed.
+  A conversation it cannot read, and any agy worker, is held the same way. Each hold
+  stays listed in `waiting.sh`, and your watch tells you once, until the worker is retired.
 
 **Before anything is built**, settle the data model, the module boundary and the
 caller's usage. That decision is yours even when the build is not.

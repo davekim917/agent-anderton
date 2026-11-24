@@ -3,17 +3,34 @@
 # keeps running and stops reporting to its Anderton. A worktree with uncommitted work, or
 # commits since it started that no remote branch has, is kept and the worker stays recorded: push or discard
 # that work, then rerun.
-# usage: retire.sh <name>   Exit 0: retired. Exit 3: stopped, worktree kept.
+# Before closing anything it reads the worker's conversation: a message there since its last report to its Anderton, from
+# anyone but that Anderton (the user in its tab, a voice relay, another session), holds the retirement, and so does a
+# conversation it cannot read. The hold is written beside the record for waiting.sh to list until it is cleared.
+# usage: retire.sh <name> [--reviewed-through <ISO time>]   Exit 0: retired. Exit 3: stopped, worktree kept.
+# Exit 4: held for messages since the last report; --reviewed-through clears those up to that time.
 # Portable to macOS's bash 3.2 and BSD userland.
 set -euo pipefail
 # shellcheck source=SCRIPTDIR/session-lib.sh
 . "$(dirname "$0")/session-lib.sh"
 
 require_tools retire.sh
+usage() { echo "usage: retire.sh <name> [--reviewed-through <ISO time>]" >&2; exit 2; }
 name="${1:-}"
 case $name in
-  '' | -* | *[!a-z0-9-]*) echo "usage: retire.sh <name>" >&2; exit 2 ;;
+  '' | -* | *[!a-z0-9-]*) usage ;;
 esac
+shift
+reviewed=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --reviewed-through) [ $# -ge 2 ] || usage; reviewed=$2; shift 2 ;;
+    *) usage ;;
+  esac
+done
+if [ -n "$reviewed" ] && ! out=$("$anderton_scripts/claude-worker.py" reviewed-time "$reviewed" 2>&1); then
+  echo "${out#Claude worker: }" >&2
+  exit 2
+fi
 record="$holders/workers/$name.json"
 if [ ! -f "$record" ]; then
   echo "No worker named '$name' was started by spawn.sh; nothing to retire." >&2
@@ -60,6 +77,48 @@ if [ "$(jq -r '.adopted // false' "$record")" = true ]; then
   echo "Released '$name': it keeps running and no longer reports to $spawner."
   exit 0
 fi
+
+# hold <why> [messages JSON]: records the hold for waiting.sh and refuses.
+held="${record%.json}.held"
+hold() {
+  local updated
+  updated=$(mktemp "$held.XXXXXX")
+  jq -n --arg name "$name" --arg why "$1" --argjson messages "${2:-[]}" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{name: $name, why: $why, heldAt: $at, messages: $messages}' > "$updated" && mv -f "$updated" "$held"
+  {
+    echo "Not retiring '$name': $1"
+    if [ "${2:-[]}" != "[]" ]; then
+      printf '%s' "$2" | jq -r '.[] | "  \(.at)  \(.from): \(.line)"'
+      echo "Read them first. If nothing in them is still open, run: retire.sh $name --reviewed-through $(printf '%s' "$2" | jq -r 'last.at')"
+    fi
+  } >&2
+  exit 4
+}
+case $provider in
+  agy)
+    [ -n "$reviewed" ] || hold "agy keeps no transcript these scripts read, so nothing shows what it was told since its last report. Read its pane, then run: retire.sh $name --reviewed-through $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    ;;
+  *)
+    if [ "$provider" = codex ]; then
+      check=("$anderton_scripts/codex-worker.py" inbound-since-report "$record")
+    else
+      check=("$anderton_scripts/claude-worker.py" inbound-since-report "$record" --home "$home")
+      claim=$(caller_claim "$(invoking_root)")
+      if [ -n "$claim" ]; then check+=(--claim "$claim"); fi
+    fi
+    if [ -n "$reviewed" ]; then check+=(--reviewed-through "$reviewed"); fi
+    errors=$(mktemp "$held.err.XXXXXX")
+    status=0
+    found=$("${check[@]}" 2>"$errors") || status=$?
+    error=$(head -c 400 "$errors")
+    rm -f "$errors"
+    case $status in
+      0) rm -f "$held" ;;
+      4) hold "it has messages since its last report to its Anderton, from someone other than that Anderton:" "$(printf '%s' "$found" | jq -c '.messages')" ;;
+      *) [ -n "$reviewed" ] || hold "its conversation could not be read (${error:-no reason given}), so nothing shows it has no messages since its last report. Read it yourself, then run: retire.sh $name --reviewed-through $(date -u +%Y-%m-%dT%H:%M:%SZ)" ;;
+    esac
+    ;;
+esac
 
 mixed_claude_pane() {
   local registry sid pid
@@ -276,7 +335,7 @@ if [ "$launcher" = bg ] && ! claude rm "$id" >/dev/null 2>&1; then
   echo "Stopped '$name' and removed its worktree, but claude rm $id failed; kept the record. Rerun to finish." >&2
   exit 1
 fi
-rm -f "$record" "${record%.json}.agy-launch"
+rm -f "$record" "${record%.json}.agy-launch" "$held"
 # Earlier versions kept a last-report file beside each worker record.
 find "$holders/workers" -maxdepth 1 -name '*.last-report' -exec rm -f {} + 2>/dev/null || true
 echo "Retired '$name'."
