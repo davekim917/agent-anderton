@@ -114,15 +114,45 @@ codex_socket() {
   printf '%s/app-server-control/app-server-control.sock\n' "$1"
 }
 
-# The home a new Codex session from home $1 starts on: the account helper's choice, else $1.
+# The home a new Codex session from home $1 starts on, judged under the codex options after it: the account helper's
+# choice, else $1.
 codex_start_home() {
-  local helper start
-  if helper=$(codex_accounts) && start=$(CODEX_HOME=$1 "$helper" --start-home </dev/null 2>/dev/null) &&
+  local helper start from=$1
+  shift
+  if helper=$(codex_accounts) && start=$(CODEX_HOME=$from "$helper" --start-home -- "$@" </dev/null 2>/dev/null) &&
     start=$(cd "$start" 2>/dev/null && pwd -P); then
     printf '%s\n' "$start"
   else
-    (cd "$1" && pwd -P)
+    (cd "$from" && pwd -P)
   fi
+}
+
+# The home holding Codex thread $1's conversation, by the account helper: the rollout's location is the truth a claim
+# or worker record follows. Fails when there is no helper, or it cannot say (none, a move under way, an older helper).
+codex_thread_home() {
+  local helper home
+  helper=$(codex_accounts) || return 1
+  home=$("$helper" --locate-thread "$1" </dev/null 2>/dev/null) || return 1
+  (cd "$home" 2>/dev/null && pwd -P)
+}
+
+# Points claim or worker record $1 at home $2, atomically; the caller holds the repository lock.
+set_codex_home() {
+  local updated
+  updated=$(mktemp "$1.XXXXXX") || return 1
+  if jq --arg home "$2" '.codexHome = $home' "$1" >"$updated" && mv -f "$updated" "$1"; then return 0; fi
+  rm -f "$updated"
+  return 1
+}
+
+# Gives back the repository lock while this script keeps working; a worker lock it holds stays.
+release_repository_lock() {
+  if [ -n "${repository_directory_lock:-}" ]; then
+    rm -f -- "$repository_directory_lock/pid"
+    rmdir -- "$repository_directory_lock"
+    repository_directory_lock=""
+  fi
+  exec 9>&-
 }
 
 # Starts the Codex daemon of home $1 unless its socket is there, waiting up to 10 seconds for it.

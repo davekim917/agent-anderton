@@ -38,7 +38,7 @@ cat > "$tmp/scripts/codex-worker.py" <<'STUB'
 case $1 in
   identity) jq -cn --arg id "$3" --arg dir "$FIXTURE_ROOT" '{id:$id, dir:$dir, name:"fixture-codex"}' ;;
   claim-state) if [ -n "${NOT_REACHABLE:-}" ]; then exit 1; fi; echo "${CLAIM_STATE:-live}" ;;
-  start-watch) ;;
+  start-watch) echo "${CODEX_THREAD_ID:-} ${CODEX_HOME:-} $3" >> "$FIXTURE_ROOT/../watch-starts" ;;
   launch-matches)
     [ -z "${LAUNCH_LOOKUP_FAIL:-}" ] || exit 1
     [ "$3" = "${MATCHING_LAUNCH:-}" ] || exit 3
@@ -141,15 +141,31 @@ python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])'
 cat > "$tmp/accounts" <<STUB
 #!/usr/bin/env bash
 echo "\$CODEX_HOME \$*" >> "$tmp/accounts.log"
-case \$1 in --move-thread) echo "$moved_home" ;; --start-home) echo "\$CODEX_HOME" ;; esac
+case \$1 in
+  --move-thread) echo "$moved_home" ;;
+  --unmove-thread) exit "\${FIXTURE_UNMOVE_EXIT:-0}" ;;
+  --start-home) echo "\$CODEX_HOME" ;;
+esac
 STUB
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s"\n' "$tmp/codex.args" > "$tmp/bin/codex"
 chmod +x "$tmp/accounts" "$tmp/bin/codex"
+# A claim that cannot be committed after the move undoes the move: the claim still names the old home, and holds.
+mkdir -p "$tmp/failing-bin"
+printf '#!/usr/bin/env bash\ncase "$*" in *"%s"*) exit 1 ;; esac\nexec /bin/mv "$@"\n' "$root_claim" > "$tmp/failing-bin/mv"
+chmod +x "$tmp/failing-bin/mv"
+if codex_role env PATH="$tmp/failing-bin:$PATH" ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" "$script/codex-anderton.sh" --move "$FIXTURE_THREAD" 2> "$tmp/refused"; then exit 1; fi
+grep -q 'the move is undone' "$tmp/refused"
+grep -qxF "$moved_home --unmove-thread $FIXTURE_THREAD" "$tmp/accounts.log"
+jq -e --arg home "$CODEX_HOME" '.codexHome == $home' "$root_claim" > /dev/null
+[ -z "$(find "$claims" -maxdepth 1 -name "$(basename "$root_claim").??????")" ]
+: > "$tmp/accounts.log"
 codex_role env ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" "$script/codex-anderton.sh" --move "$FIXTURE_THREAD"
+grep -qxF "$CODEX_HOME --move-thread $FIXTURE_THREAD --dry-run -- -c tui.terminal_title=[\"thread-id\"]" "$tmp/accounts.log"
 grep -qxF "$CODEX_HOME --move-thread $FIXTURE_THREAD -- -c tui.terminal_title=[\"thread-id\"]" "$tmp/accounts.log"
 jq -e --arg home "$moved_home" '.codexHome == $home' "$root_claim" >/dev/null
 [ "$(head -n 2 "$tmp/codex.args" | tr '\n' ' ')" = "resume $FIXTURE_THREAD " ]
 grep -qxF "unix://$moved_home/app-server-control/app-server-control.sock" "$tmp/codex.args"
+tail -n 1 "$tmp/watch-starts" | grep -qxF "$FIXTURE_THREAD $moved_home $root_claim"
 refused_claim codex_role "$script/claim.sh"
 codex_role env CODEX_HOME="$moved_home" "$script/claim.sh"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/codex"

@@ -282,6 +282,8 @@ def failover_due(worker, turn):
         return True
     if tried.get("moved") or tried.get("resumed"):
         return False
+    if tried.get("stage") == "stopped":
+        return True
     return time.time() - tried.get("at", 0) >= FAILOVER_RETRY_SECONDS
 
 
@@ -298,8 +300,8 @@ def limited_turn(client, worker):
     return turns[0]["id"], usage_limit(turns[0])
 
 
-def move_worker(record, worker, home):
-    """Resumes the worker's thread on the daemon of home and records it there; the caller holds the worker lock."""
+def resume_on(worker, home):
+    """Resumes the worker's thread on the daemon of home, in its worktree; the caller records the home."""
     with Codex(home) as client:
         # A daemon that still holds the thread from an earlier stay would resume its own copy, not the moved rollout.
         for loaded in client.pages("thread/loaded/list"):
@@ -308,8 +310,6 @@ def move_worker(record, worker, home):
         client.call("thread/resume", {"threadId": worker["id"], "cwd": worker["dir"], "excludeTurns": True},
                     timeout=60)
         read_thread(client, worker)
-    worker["codexHome"] = str(home)
-    save_worker(record, worker)
 
 
 def is_inactive(client, worker, directions_only=False, reconcile=True):
@@ -684,9 +684,9 @@ def main():
     unloaded.add_argument("--wait", type=int, default=0)
     limit = commands.add_parser("limited")
     limit.add_argument("record", type=Path)
-    move = commands.add_parser("move")
-    move.add_argument("record", type=Path)
-    move.add_argument("home", type=Path)
+    resume = commands.add_parser("resume-on")
+    resume.add_argument("record", type=Path)
+    resume.add_argument("home", type=Path)
     for command in ("state", "inactive", "output", "message"):
         action = commands.add_parser(command)
         action.add_argument("record", type=Path)
@@ -762,8 +762,8 @@ def main():
         if message is None:
             return 3
         print(f"{message[0]}\n{message[1]}")
-    elif args.command == "move":
-        move_worker(args.record, json.loads(args.record.read_text()), args.home)
+    elif args.command == "resume-on":
+        resume_on(json.loads(args.record.read_text()), args.home)
     elif args.command == "blocker-during-notice":
         blocker_during_notice(json.loads(args.record.read_text()), args.pending_stage, args.bookmarks)
     elif args.command in {"state", "inactive", "output", "message"}:

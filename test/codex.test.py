@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -291,29 +292,32 @@ class WorkerTest(unittest.TestCase):
         self.client.info["status"] = {"type": "active"}
         self.assertEqual((3, ""), limited())
 
-    def test_move_resumes_the_thread_in_its_worktree_before_recording_the_new_home(self):
+    def test_resume_on_resumes_the_thread_in_its_worktree_and_leaves_the_record_to_the_caller(self):
         self.record.write_text(json.dumps(self.worker))
         calls = []
         original = self.client.call
         self.client.call = lambda method, params, timeout=None: calls.append((method, params)) or original(method, params)
-        with patch.object(worker_api.sys, "argv", ["codex-worker.py", "move", str(self.record), "/next-home"]):
-            self.assertEqual(0, worker_api.main())
+
+        def resume_on():
+            with patch.object(worker_api.sys, "argv", ["codex-worker.py", "resume-on", str(self.record), "/next-home"]):
+                return worker_api.main()
+
+        self.assertEqual(0, resume_on())
         self.assertEqual(("thread/resume", {"threadId": self.worker["id"], "cwd": self.worker["dir"],
                                             "excludeTurns": True}), calls[0])
-        self.assertEqual("/next-home", json.loads(self.record.read_text())["codexHome"])
         worker_api.Codex.assert_called_with(Path("/next-home"))
-        self.record.write_text(json.dumps(self.worker))
-        self.client.loaded = [self.worker["id"]]
-        with patch.object(worker_api.sys, "argv", ["codex-worker.py", "move", str(self.record), "/next-home"]):
-            with self.assertRaisesRegex(ValueError, "still has thread .* loaded"):
-                worker_api.main()
         self.assertEqual(self.worker["codexHome"], json.loads(self.record.read_text())["codexHome"])
+        self.client.loaded = [self.worker["id"]]
+        with self.assertRaisesRegex(ValueError, "still has thread .* loaded"):
+            resume_on()
         self.client.loaded = []
         self.client.info["cwd"] = "/elsewhere"
-        with patch.object(worker_api.sys, "argv", ["codex-worker.py", "move", str(self.record), "/next-home"]):
-            with self.assertRaisesRegex(ValueError, "identity does not match"):
-                worker_api.main()
-        self.assertEqual(self.worker["codexHome"], json.loads(self.record.read_text())["codexHome"])
+        with self.assertRaisesRegex(ValueError, "identity does not match"):
+            resume_on()
+
+    def test_a_stopped_move_is_due_at_once_on_the_next_sweep(self):
+        self.worker["codexFailover"] = {"turn": "limited", "at": time.time(), "moved": False, "stage": "stopped"}
+        self.assertTrue(worker_api.failover_due(self.worker, "limited"))
 
     def test_launch_uses_first_user_message_of_the_matching_thread(self):
         expected = self.worker["id"]

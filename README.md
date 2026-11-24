@@ -201,26 +201,39 @@ it yourself.
 **What happens when a Codex account hits its usage limit?**
 
 Nothing changes unless you install a Codex account helper: an executable named by `ANDERTON_CODEX_ACCOUNTS`, or
-`codex-accounts` on `PATH`. With `--start-home` it prints the Codex home a new session from `$CODEX_HOME` starts
-on. With `--move-thread <id> --message <text>` it marks the thread's account limited, puts the thread's rollout in
-the next account's home, and prints that home, or exits non-zero when no account may take it. The helper decides
-which accounts qualify, and must print only a home that runs the same hook guards: Anderton runs the session there
-as given.
+`codex-accounts` on `PATH`. Anderton asks it, with `CODEX_HOME` set to the home in question:
 
-With a helper, `spawn.sh` and `codex-anderton.sh` start on the home it names and start that home's daemon if it is
-not running. When the watch finds a Codex worker's latest turn failed at the usage limit (Codex's structured
-`usageLimitExceeded`, or with no structured kind its own "You've hit your usage limit" message), it moves the worker:
-the Codex client in its pane stops, the move waits for the old daemon to let go of the thread (about a minute after its
-last client leaves), the thread resumes on the new home's daemon, the worker's record points there, the pane reopens
-on that daemon, and the worker is told to continue without repeating completed work. A thread another client still
-has open is not moved, and a pane showing another conversation is left alone. The watch reports the move, or why the
-worker stayed. A move that could not run is retried quietly: the worker continues on its own home once that home's
-limit has reset (`--is-limited` exits 1), or moves once the helper names another home.
+- `--start-home [-- <codex options>]` prints the home a new session starts on.
+- `--move-thread <id> [--message <text>] [--dry-run] [-- <codex options>]` marks the account limited, moves the
+  thread's conversation to the next account as one transaction, and prints that home. It exits non-zero, changing
+  nothing, when no account may take the thread or a codex still has it open. `--dry-run` only names the home.
+- `--unmove-thread <id>`, with `CODEX_HOME` the home it moved to, undoes a move nothing has written to since.
+- `--locate-thread <id>` prints the home holding the conversation. The claims and worker records follow it.
+- `--is-limited` exits 0 while `CODEX_HOME` is marked limited, and 1 once it is not.
 
-A Codex Anderton at its limit moves with `codex-anderton.sh --move <thread-id>` after you close its window: under
-the repository lock the helper moves the thread and the claim moves to the new home with it, so the copy left behind
-never holds the role. The helper also answers `--is-limited`, exiting 0 while `$CODEX_HOME` is marked limited and
-1 once it is not.
+The helper decides which accounts qualify, and must print only a home that runs the same hook guards: Anderton runs the
+session there as given. An answer it cannot read (an older helper's exit 2) leaves the session where it is.
+
+With a helper, `spawn.sh` and `codex-anderton.sh` start on the home it names, judged under their codex options, and
+start that home's daemon if it is not running. Each sweep, the watch points a Codex worker's record at the home the
+helper finds its conversation in. When a worker's latest turn failed at the usage limit (Codex's structured
+`usageLimitExceeded`, or with no structured kind its own "You've hit your usage limit" sentence), the watch moves it
+over sweeps, so no sweep waits:
+
+1. A sweep stops the Codex client in its pane.
+2. A later sweep, once the old daemon has let go of the thread (about a minute after its last client leaves), moves
+   it, resumes it on the new home's daemon, reopens the pane there, and tells the worker to continue without
+   repeating completed work.
+
+Only the record's writes hold the repository lock, and a sweep takes a step for one worker at most. A thread another
+client still has open after three minutes is not moved, and a pane showing another conversation is left alone. If
+the new daemon does not start, the move is undone. A move that could not run is retried quietly: the worker continues
+on its own home once that home's limit has reset, or moves once the helper names another home.
+
+A Codex Anderton at its limit moves with `codex-anderton.sh --move <thread-id>` after you close its window. Under the
+repository lock, the claim for the new home is written first. Then the helper moves the thread, and a rename commits
+the claim; if the commit fails, the move is undone. The script starts the claim's watch on the new home. A claim also
+follows its thread when `claim.sh` runs from the home the helper finds it in.
 
 **How is it different from firstmate?**
 
