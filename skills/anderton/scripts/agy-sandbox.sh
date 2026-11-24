@@ -229,6 +229,33 @@ add_rw() { # add_rw <path> [<source>]: <path> writable, backed by <source> when 
   args+=(--bind "$source" "$path")
   writable+=("$path")
 }
+# add_cache <path> <private dir>: <path> writable, backed by the private dir. bwrap cannot make a mount point inside the
+# read-only view, so a missing <path> is made first, but only in a directory this user owns and can write. Below one it
+# cannot write (a ~/.bun root installed bun into), the missing part is made in a tmpfs over the deepest directory that
+# exists, with that directory's own entries bound back read-only and the tmpfs read-only too.
+add_cache() {
+  local path=$1 top=$1 entry
+  while [ ! -e "$top" ] && [ ! -L "$top" ]; do top=$(dirname "$top"); done
+  if [ "$top" != "$path" ]; then
+    [ -d "$top" ] && [ "$(readlink -f "$top")" = "$top" ] ||
+      die "$top is not a directory, or is or passes through a symbolic link, so $path cannot be made there."
+    if [ -O "$top" ] && [ -w "$top" ]; then
+      mkdir -p "$path"
+    else
+      case $top in "$HOME"/?*) ;; *) die "$top is not yours to write, so the worker's cache $path cannot be made." ;; esac
+      args+=(--tmpfs "$top")
+      if [ -r "$top" ] && [ -x "$top" ]; then
+        while IFS= read -r -d '' entry; do
+          if [ -L "$entry" ]; then args+=(--symlink "$(readlink "$entry")" "$entry"); else args+=(--ro-bind "$entry" "$entry"); fi
+        done < <(find "$top" -mindepth 1 -maxdepth 1 -print0)
+      fi
+      add_rw "$path" "$2"
+      args+=(--remount-ro "$top")
+      return 0
+    fi
+  fi
+  add_rw "$path" "$2"
+}
 inside_writable() { # inside_writable <path>: true when <path> lies in a writable root
   local root
   for root in "${writable[@]}"; do
@@ -337,13 +364,11 @@ add_rw "$state"                      # agy's conversations, logs and caches
 # Tool caches are this worktree's own, never the host's: host tools run what they cache (pre-commit's hook
 # environments, packages pnpm hard-links into node_modules), so a shared cache would run worker code outside.
 private="$HOME/.cache/anderton-agy/$(printf '%s' "$wt" | sha256sum | cut -c1-16)"
-for name in cache pnpm bun npm; do mkdir -p "$private/$name"; done
-# bwrap cannot make a mount point inside the read-only view, so each target exists first.
-mkdir -p "$HOME/.cache" "$HOME/.local/share/pnpm" "$HOME/.bun/install/cache" "$HOME/.npm"
-add_rw "$HOME/.cache" "$private/cache"
-add_rw "$HOME/.local/share/pnpm" "$private/pnpm"
-add_rw "$HOME/.bun/install/cache" "$private/bun"
-add_rw "$HOME/.npm" "$private/npm"
+for name in cache pnpm bun npm; do mkdir -p "$private/$name" || die "could not create the worker's private cache $private/$name."; done
+add_cache "$HOME/.cache" "$private/cache"
+add_cache "$HOME/.local/share/pnpm" "$private/pnpm"
+add_cache "$HOME/.bun/install/cache" "$private/bun"
+add_cache "$HOME/.npm" "$private/npm"
 if [ -f "$conf" ]; then
   while read -r kind path _; do
     path=${path/#\~/$HOME}

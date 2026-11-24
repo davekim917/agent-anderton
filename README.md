@@ -177,7 +177,8 @@ the plugin's scripts are updated before the launcher is reinstalled, a launcher 
 retirement exit 3 and keep the worktree. That is safe; reinstall the launcher (`install-agy.sh`) together with the
 plugin.
 
-Installing takes two steps, so root never writes inside a user's home.
+Installing takes four steps, in this order, so root never writes inside a user's home and agy's first-run migration
+cannot replace the guard registration.
 
 1. **As root,** `skills/anderton/scripts/install-agy.sh` writes only under the prefix (`/opt`):
    - the release pinned in `agy.pin`, checked against its sha256, root-owned under `/opt/agy`;
@@ -194,14 +195,26 @@ Installing takes two steps, so root never writes inside a user's home.
    dev and lab scopes are set empty, so agy workers get none of their approval exemptions: they build code, and agy has no
    approval channel. It refuses a guard without `agy-supervisor.ts`, or whose supervisor deadline is not above the guard's
    one-hour approval wait and at least 10 seconds under the hook timeout.
-2. **As the worker user,** `/opt/agy/libexec/register-agy` copies that registration into `~/.gemini/config/hooks.json` and
-   creates the two other hook files agy reads as `{}`. It refuses root, a link at any path it writes, and a hard-linked
-   hook file. When `~/.gemini/config/hooks.json` already holds other hooks, it stops until you pass `--replace-hooks`.
+2. **As the worker user, log in once, unsandboxed,** with the command `install-agy.sh` prints. agy's first start
+   migrates its configuration: it moves the legacy `~/.gemini/antigravity-cli/hooks.json` over
+   `~/.gemini/config/hooks.json`, leaves a link to it in the old place, and writes `~/.gemini/config/.migrated`. A
+   registration written before that is lost, and agy then loads no hooks.
+3. **As the worker user,** `/opt/agy/libexec/register-agy` copies that registration into `~/.gemini/config/hooks.json` and
+   creates the two other hook files agy reads as `{}`. It refuses until `~/.gemini/config/.migrated` exists, and refuses
+   root, a link at any path it writes, and a hard-linked hook file. The one link it replaces, with an empty file, is the
+   migration's `antigravity-cli/hooks.json` link to `config/hooks.json`; a link there to anything else is refused. When
+   `~/.gemini/config/hooks.json` holds other hooks (anything but `{}` or nothing), it stops until you pass
+   `--replace-hooks`.
+4. **Verify:** `cmp /opt/agy/etc/hooks.json ~/.gemini/config/hooks.json` succeeds, and `/opt/agy/bin/agy` started from a
+   linked worktree opens agy instead of refusing with a reason.
 
 ```bash
 sudo skills/anderton/scripts/install-agy.sh --user <worker user> --guard <bootstrap>/plugins/workflow-agents/hooks \
   --nanoclaw <NanoClaw install>
-/opt/agy/libexec/register-agy   # as the worker user
+# as the worker user:
+env -u DBUS_SESSION_BUS_ADDRESS AGY_CLI_DISABLE_AUTO_UPDATE=true /opt/agy/<version>/antigravity acp --login
+/opt/agy/libexec/register-agy
+cmp /opt/agy/etc/hooks.json ~/.gemini/config/hooks.json
 ```
 
 **Known limit, upgrades:** the installer refuses any symbolic link under the prefix. A guard copy that an installer older
@@ -222,7 +235,9 @@ pinned `bwrap`, with this view:
   repository's main checkout. With the repository's git directory read-only otherwise, a worker cannot add a worktree,
   rewrite `packed-refs` in place (deleting a packed branch, `pack-refs`), or write submodule or LFS state.
 - **Private:** `~/.cache`, `~/.npm`, `~/.bun/install/cache` and `~/.local/share/pnpm` are this worktree's own, kept under
-  `~/.cache/anderton-agy/`, never the caches host tools run from.
+  `~/.cache/anderton-agy/`, never the caches host tools run from. The launcher creates a missing one only inside a
+  directory the worker user owns and can write; under one it cannot (a `~/.bun` root installed bun into), the sandbox
+  gets it in a read-only tmpfs over that directory, with the directory's own entries bound back read-only.
 - **Read-only even inside those:** every hook and plugin location agy reads, and this worktree's `config.worktree`,
   `commondir` and `.git` pointer, which host git reads.
 - **Hidden:** credential stores (every entry of the home whose name starts with `.claude` or `.codex`, a backup or second
