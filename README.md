@@ -146,8 +146,9 @@ loaded and end a turn to receive those directions.
 agy workers (Antigravity CLI) do not exist yet: `spawn.sh --provider agy` arrives in a later change. This change ships
 what they run inside. `skills/anderton/scripts/install-agy.sh` installs the release pinned in `agy.pin`, checked
 against its sha256, root-owned under `/opt/agy`. It also installs the agy guard from a reviewed bootstrap checkout
-under `/opt/agy-guard`, and registers that guard in the worker user's `~/.gemini/config/hooks.json`. Run it as root
-after reading it:
+under `/opt/agy-guard`, and registers that guard in the worker user's `~/.gemini/config/hooks.json`, with a timeout
+above the guard's watchdog and the paths of the bootstrap checkout's `*-scope.local.json` files (`--scope-dir` to read
+them from elsewhere). Run it as root after reading it:
 
 ```bash
 sudo skills/anderton/scripts/install-agy.sh --user <worker user> --guard <bootstrap>/plugins/workflow-agents/hooks

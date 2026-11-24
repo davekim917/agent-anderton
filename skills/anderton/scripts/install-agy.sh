@@ -2,9 +2,12 @@
 # Installs the pinned agy release for Anderton workers, its sandbox launcher and the agy guard, and registers the guard
 # in the worker user's ~/.gemini/config/hooks.json. The operator runs it as root after reviewing it; agents never do.
 #
-# usage: install-agy.sh --user NAME --guard DIR [--home DIR] [--prefix DIR] [--pin FILE] [--tarball FILE] [--replace-hooks]
-#   --home     the user's home, default from the passwd database.
-#   --guard    plugins/workflow-agents/hooks of a reviewed bootstrap checkout; it is copied, not referenced.
+# usage: install-agy.sh --user NAME --guard DIR [--home DIR] [--scope-dir DIR] [--prefix DIR] [--pin FILE] [--tarball FILE]
+#                       [--replace-hooks]
+#   --home       the user's home, default from the passwd database.
+#   --guard      plugins/workflow-agents/hooks of a reviewed bootstrap checkout; it is copied, not referenced.
+#   --scope-dir  where the guard reads its untracked *-scope.local.json and response-secrets.local.json, default the
+#                root of the --guard checkout. The installed copy has no checkout above it, so the hook names them.
 #   --prefix   default /opt. The release, launcher and pin go under PREFIX/agy, the guard under PREFIX/agy-guard.
 #   --pin      default agy.pin beside this script.
 #   --tarball  an already-downloaded release tarball, checked against the pin like a download.
@@ -12,19 +15,20 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd -P)
-prefix=/opt user="" home="" guard="" pin="$here/agy.pin" tarball="" replace=""
+prefix=/opt user="" home="" guard="" scope="" pin="$here/agy.pin" tarball="" replace=""
 die() {
   echo "install-agy: $*" >&2
   exit 1
 }
 while [ $# -gt 0 ]; do
   case $1 in
-    --user | --home | --guard | --prefix | --pin | --tarball)
+    --user | --home | --guard | --scope-dir | --prefix | --pin | --tarball)
       [ $# -ge 2 ] || die "$1 needs a value."
       case $1 in
         --user) user=$2 ;;
         --home) home=$2 ;;
         --guard) guard=$2 ;;
+        --scope-dir) scope=$2 ;;
         --prefix) prefix=$2 ;;
         --pin) pin=$2 ;;
         --tarball) tarball=$2 ;;
@@ -36,8 +40,20 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ "$(uname -s)" = Linux ] || die "Linux only."
-[ -n "$user" ] && [ -n "$guard" ] || die "usage: install-agy.sh --user NAME --guard DIR [--home DIR] [--prefix DIR] [--pin FILE] [--tarball FILE] [--replace-hooks]"
-[ -f "$guard/agy-guard.sh" ] && [ -f "$guard/agy-guard.ts" ] || die "$guard has no agy-guard.sh and agy-guard.ts."
+[ -n "$user" ] && [ -n "$guard" ] || die "usage: install-agy.sh --user NAME --guard DIR [--home DIR] [--scope-dir DIR] [--prefix DIR] [--pin FILE] [--tarball FILE] [--replace-hooks]"
+for file in agy-guard.sh agy-guard.ts guard-reply.ts; do
+  [ -f "$guard/$file" ] || die "$guard has no $file."
+done
+# The hook must outlast the wrapper's watchdog, or agy cuts the wrapper off before it can deny.
+watchdog=$(sed -n 's/^WATCHDOG_SECONDS=\([0-9][0-9]*\)$/\1/p' "$guard/agy-guard.sh" | head -n 1)
+[ -n "$watchdog" ] || die "$guard/agy-guard.sh sets no WATCHDOG_SECONDS."
+hook_timeout=$((watchdog + 30))
+[ -n "$scope" ] || scope="$guard/../../.."
+[ -d "$scope" ] || die "no scope directory $scope."
+scope=$(cd "$scope" && pwd -P)
+case $scope in
+  *[!A-Za-z0-9._/-]*) die "the scope directory path $scope has characters the hook command cannot carry." ;;
+esac
 [ -n "$home" ] || home=$(getent passwd "$user" | cut -d: -f6)
 [ -n "$home" ] && [ -d "$home" ] || die "no home directory for $user."
 value() {
@@ -68,8 +84,9 @@ install -m 0755 "$here/agy-sandbox.sh" "$root/bin/agy"
 # The guard is copied first and named by the digest of the copy, so the name always matches what the hook runs.
 copy="$work/guard"
 install -d -m 0755 "$copy" "$copy/guards"
-for file in agy-guard.sh agy-guard.ts guard-policy.ts package.json bun.lock; do
-  if [ -f "$guard/$file" ]; then install -m 0644 "$guard/$file" "$copy/$file"; fi
+for file in "$guard"/*.ts "$guard"/agy-guard.sh "$guard"/package.json "$guard"/bun.lock; do
+  case $file in *.test.ts) continue ;; esac
+  if [ -f "$file" ]; then install -m 0644 "$file" "$copy/${file##*/}"; fi
 done
 for file in "$guard"/guards/*.ts; do
   if [ -f "$file" ]; then install -m 0644 "$file" "$copy/guards/${file##*/}"; fi
@@ -88,7 +105,9 @@ fi
 
 # agy runs every hook in this file; the launcher refuses to start unless it still has exactly these bytes.
 hooks="$home/.gemini/config/hooks.json"
-registration=$(printf '{"agent-anderton-agy-guard":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=%s /bin/bash %s/agy-guard.sh PreToolUse","timeout":3660}]}]}}' "$home" "$dest")
+scope_env="BOOTSTRAP_MERGE_SCOPE_FILE=$scope/merge-scope.local.json BOOTSTRAP_DEV_SCOPE_FILE=$scope/dev-scope.local.json"
+scope_env="$scope_env BOOTSTRAP_LAB_SCOPE_FILE=$scope/lab-scope.local.json BOOTSTRAP_RESPONSE_SECRETS_FILE=$scope/response-secrets.local.json"
+registration=$(printf '{"agent-anderton-agy-guard":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=%s %s /bin/bash %s/agy-guard.sh PreToolUse","timeout":%s}]}]}}' "$home" "$scope_env" "$dest" "$hook_timeout")
 expected=$(printf '%s' "$registration" | sha256sum | cut -d' ' -f1)
 if [ -f "$hooks" ] && [ "$(sha256sum "$hooks" | cut -d' ' -f1)" != "$expected" ] && [ -z "$replace" ]; then
   die "$hooks already holds other hooks; review it, then rerun with --replace-hooks."

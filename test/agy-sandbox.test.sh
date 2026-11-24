@@ -31,18 +31,39 @@ chmod +x "$work/release/antigravity"
 tar -czf "$work/release.tar.gz" -C "$work/release" antigravity
 printf 'version=0.0.0-test\nurl=https://example.invalid/agy.tar.gz\nsha256=%s\n' \
   "$(sha256sum "$work/release.tar.gz" | cut -d' ' -f1)" > "$work/agy.pin"
-printf '#!/usr/bin/env bash\necho example guard\n' > "$work/guard/agy-guard.sh"
+printf '#!/usr/bin/env bash\nWATCHDOG_SECONDS=3630\necho example guard\n' > "$work/guard/agy-guard.sh"
 printf 'export {};\n' > "$work/guard/agy-guard.ts"
+printf 'export {};\n' > "$work/guard/guard-reply.ts"
+mkdir "$work/scope"
 home="$work/home"
-"$scripts/install-agy.sh" --user "$(id -un)" --home "$home" --guard "$work/guard" --prefix "$work/opt" \
-  --pin "$work/agy.pin" --tarball "$work/release.tar.gz" >/dev/null
+"$scripts/install-agy.sh" --user "$(id -un)" --home "$home" --guard "$work/guard" --scope-dir "$work/scope" \
+  --prefix "$work/opt" --pin "$work/agy.pin" --tarball "$work/release.tar.gz" >/dev/null
+
+# The registration outlasts the wrapper's watchdog and names the scope files, which the installed copy cannot find.
+hook=$(jq -r '.["agent-anderton-agy-guard"].PreToolUse[0].hooks[0]' "$home/.gemini/config/hooks.json")
+[ "$(jq '.timeout' <<<"$hook")" -gt 3630 ] || fail "the hook timeout does not outlast the guard's watchdog"
+for name in MERGE_SCOPE_FILE=merge-scope DEV_SCOPE_FILE=dev-scope LAB_SCOPE_FILE=lab-scope RESPONSE_SECRETS_FILE=response-secrets; do
+  case $(jq -r '.command' <<<"$hook") in
+    *" BOOTSTRAP_${name%%=*}=$work/scope/${name#*=}.local.json "*) ;;
+    *) fail "the hook command does not set BOOTSTRAP_${name%%=*}" ;;
+  esac
+done
+[ -f "$(sed -n 's/^guard=//p' "$work/opt/agy/etc/pin")/guard-reply.ts" ] || fail "the installed guard has no guard-reply.ts"
+
+# The install refuses a guard checkout without the reply check its wrapper runs.
+cp -a "$work/guard" "$work/guard-incomplete"
+rm "$work/guard-incomplete/guard-reply.ts"
+if "$scripts/install-agy.sh" --user "$(id -un)" --home "$home" --guard "$work/guard-incomplete" --scope-dir "$work/scope" \
+  --prefix "$work/other" --pin "$work/agy.pin" --tarball "$work/release.tar.gz" >/dev/null 2>&1; then
+  fail "install accepted a guard without guard-reply.ts"
+fi
 touch "$work/opt/agy/etc/user-owned-test-install"
 agy="$work/opt/agy/bin/agy"
 
 # The install refuses a release that does not match its pin.
 printf 'tampered' >> "$work/release.tar.gz"
-if "$scripts/install-agy.sh" --user "$(id -un)" --home "$home" --guard "$work/guard" --prefix "$work/other" \
-  --pin "$work/agy.pin" --tarball "$work/release.tar.gz" >/dev/null 2>&1; then
+if "$scripts/install-agy.sh" --user "$(id -un)" --home "$home" --guard "$work/guard" --scope-dir "$work/scope" \
+  --prefix "$work/other" --pin "$work/agy.pin" --tarball "$work/release.tar.gz" >/dev/null 2>&1; then
   fail "install accepted a tarball that does not match the pin"
 fi
 
