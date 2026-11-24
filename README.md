@@ -208,13 +208,19 @@ which accounts qualify, and must print only a home that runs the same hook guard
 as given.
 
 With a helper, `spawn.sh` and `codex-anderton.sh` start on the home it names and start that home's daemon if it is
-not running. When the watch finds a Codex worker's latest turn failed at the usage limit, it moves the worker: the
-Codex client in its pane stops, so no turn starts on the old account, the thread resumes on the new home's daemon,
-the worker's record points there, the pane reopens on that daemon, and the worker is told to continue without
-repeating completed work. A pane showing another conversation is left alone. The watch reports the move, or why the
-worker stayed; a move that could not run is tried again, quietly, once the helper names another home. A Codex
-Anderton's own session is not moved for you: reopen it with `codex resume <id>` under the new home, then run
-`claim.sh` there, which keeps its role and points its claim and watch at the new home.
+not running. When the watch finds a Codex worker's latest turn failed at the usage limit (Codex's structured
+`usageLimitExceeded`, or with no structured kind its own "You've hit your usage limit" message), it moves the worker:
+the Codex client in its pane stops, the move waits for the old daemon to let go of the thread (about a minute after its
+last client leaves), the thread resumes on the new home's daemon, the worker's record points there, the pane reopens
+on that daemon, and the worker is told to continue without repeating completed work. A thread another client still
+has open is not moved, and a pane showing another conversation is left alone. The watch reports the move, or why the
+worker stayed. A move that could not run is retried quietly: the worker continues on its own home once that home's
+limit has reset (`--is-limited` exits 1), or moves once the helper names another home.
+
+A Codex Anderton at its limit moves with `codex-anderton.sh --move <thread-id>` after you close its window: under
+the repository lock the helper moves the thread and the claim moves to the new home with it, so the copy left behind
+never holds the role. The helper also answers `--is-limited`, exiting 0 while `$CODEX_HOME` is marked limited and
+1 once it is not.
 
 **How is it different from firstmate?**
 

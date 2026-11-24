@@ -219,6 +219,10 @@ class WorkerTest(unittest.TestCase):
             ([{"id": "later", "status": "inProgress"}, {"id": "limited", "status": "failed", "error": limit}], False),
             ([{"id": "later", "status": "completed"}, {"id": "limited", "status": "failed", "error": limit}], False),
             ([{"id": "other", "status": "failed", "error": {"message": "stream disconnected"}}], False),
+            ([{"id": "other", "status": "failed",
+               "error": {"message": "Did not hit your usage limit; connection reset"}}], False),
+            ([{"id": "other", "status": "failed",
+               "error": {"message": "You've hit your usage limit.", "codexErrorInfo": "other"}}], False),
         ]:
             with self.subTest(turns=[turn["id"] for turn in turns], moved=moved):
                 for stale in self.state.iterdir():
@@ -247,10 +251,27 @@ class WorkerTest(unittest.TestCase):
             self.assertTrue(worker_api.failover_due(self.worker, "limited"))
             self.worker["codexFailover"]["moved"] = True
             self.assertFalse(worker_api.failover_due(self.worker, "limited"))
+            self.worker["codexFailover"].update(moved=False, resumed=True)
+            self.assertFalse(worker_api.failover_due(self.worker, "limited"))
+            self.worker["codexFailover"].update(moved=True, resumed=False)
             limited = []
             worker_api.sweep_worker(self.worker, self.state, self.stage, limited)
             self.assertEqual([], limited)
             self.assertTrue(worker_api.failover_due(self.worker, "a-later-limit"))
+
+    def test_unloaded_waits_for_the_daemon_to_let_go_of_the_thread(self):
+        self.record.write_text(json.dumps(self.worker))
+        self.client.loaded = [self.worker["id"]]
+
+        def unloaded(*extra):
+            with patch.object(worker_api.sys, "argv", ["codex-worker.py", "unloaded", str(self.record), *extra]):
+                return worker_api.main()
+
+        self.assertEqual(3, unloaded())
+        clock = iter([0, 0, 1, 3])
+        with patch.object(worker_api.time, "monotonic", side_effect=lambda: next(clock)), \
+                patch.object(worker_api.time, "sleep", side_effect=lambda _: self.client.loaded.clear()):
+            self.assertEqual(0, unloaded("--wait", "5"))
 
     def test_limited_names_the_turn_and_limit_only_while_the_thread_waits_on_nothing(self):
         self.record.write_text(json.dumps(self.worker))

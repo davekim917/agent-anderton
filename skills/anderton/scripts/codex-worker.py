@@ -33,7 +33,8 @@ QUEUE_PAGE_SIZE = 100
 # RFC 6455 requires the handshake GUID in uppercase ASCII.
 HANDSHAKE_GUID = str(uuid.UUID("258eafa5-e914-47da-95ca-c5ab0dc85b11")).upper().encode("ascii")
 REPORT = re.compile(r"^(RESULT|QUESTION|BLOCKED|ANSWER):[ \t]*\S")
-USAGE_LIMIT = re.compile(r"hit your usage limit", re.IGNORECASE)
+# Codex's own usage-limit sentence starts so; only a failure with no structured kind is read from its words.
+USAGE_LIMIT = re.compile(r"^You['\N{RIGHT SINGLE QUOTATION MARK}]ve hit your usage limit")
 # A move that could not run (no account free, a daemon that did not start) is tried again after this long.
 FAILOVER_RETRY_SECONDS = 600
 
@@ -265,10 +266,12 @@ def usage_limit(turn):
     """The message of a turn that failed at its account's usage limit, else None."""
     error = turn.get("error") or {}
     message = error.get("message") or ""
-    if turn.get("status") == "failed" and (error.get("codexErrorInfo") == "usageLimitExceeded"
-                                           or USAGE_LIMIT.search(message)):
-        return message or "usage limit"
-    return None
+    if turn.get("status") != "failed":
+        return None
+    kind = error.get("codexErrorInfo")
+    if kind is not None:
+        return (message or "usage limit") if kind == "usageLimitExceeded" else None
+    return message if USAGE_LIMIT.match(message) else None
 
 
 def failover_due(worker, turn):
@@ -277,7 +280,9 @@ def failover_due(worker, turn):
     tried = worker.get("codexFailover") or {}
     if tried.get("turn") != turn:
         return True
-    return not tried.get("moved") and time.time() - tried.get("at", 0) >= FAILOVER_RETRY_SECONDS
+    if tried.get("moved") or tried.get("resumed"):
+        return False
+    return time.time() - tried.get("at", 0) >= FAILOVER_RETRY_SECONDS
 
 
 def limited_turn(client, worker):
@@ -674,6 +679,9 @@ def main():
     watch = commands.add_parser("start-watch")
     watch.add_argument("script", type=Path)
     watch.add_argument("claim", type=Path)
+    unloaded = commands.add_parser("unloaded")
+    unloaded.add_argument("record", type=Path)
+    unloaded.add_argument("--wait", type=int, default=0)
     limit = commands.add_parser("limited")
     limit.add_argument("record", type=Path)
     move = commands.add_parser("move")
@@ -737,6 +745,16 @@ def main():
                 return 0 if deliver_notice(client, claim, args.notice) else 3
             read_thread(client, worker)
             print("live")
+    elif args.command == "unloaded":
+        worker = json.loads(args.record.read_text())
+        deadline = time.monotonic() + args.wait
+        while True:
+            with Codex(Path(worker["codexHome"])) as client:
+                if worker["id"] not in client.pages("thread/loaded/list"):
+                    return 0
+            if time.monotonic() >= deadline:
+                return 3
+            time.sleep(2)
     elif args.command == "limited":
         worker = json.loads(args.record.read_text())
         with Codex(Path(worker["codexHome"])) as client:

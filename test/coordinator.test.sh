@@ -133,6 +133,27 @@ if grep -q 'DEPLOY: catalog fixture' "$tmp/wake"; then exit 1; fi
 rm -f "$claims/"*.json
 codex_role "$script/claim.sh"
 jq -e --arg thread "$FIXTURE_THREAD" '.provider == "codex" and .sessionId == $thread and .scope == null and (has("pid") | not)' "$root_claim" >/dev/null
+# A Codex Anderton at its usage limit moves with its claim: the helper moves the thread, the claim names the new home,
+# and the copy left in the old home no longer holds the role.
+moved_home="$tmp/codex-moved"
+mkdir -p "$moved_home/app-server-control"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$moved_home/app-server-control/app-server-control.sock"
+cat > "$tmp/accounts" <<STUB
+#!/usr/bin/env bash
+echo "\$CODEX_HOME \$*" >> "$tmp/accounts.log"
+case \$1 in --move-thread) echo "$moved_home" ;; --start-home) echo "\$CODEX_HOME" ;; esac
+STUB
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s"\n' "$tmp/codex.args" > "$tmp/bin/codex"
+chmod +x "$tmp/accounts" "$tmp/bin/codex"
+codex_role env ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" "$script/codex-anderton.sh" --move "$FIXTURE_THREAD"
+grep -qxF "$CODEX_HOME --move-thread $FIXTURE_THREAD -- -c tui.terminal_title=[\"thread-id\"]" "$tmp/accounts.log"
+jq -e --arg home "$moved_home" '.codexHome == $home' "$root_claim" >/dev/null
+[ "$(head -n 2 "$tmp/codex.args" | tr '\n' ' ')" = "resume $FIXTURE_THREAD " ]
+grep -qxF "unix://$moved_home/app-server-control/app-server-control.sock" "$tmp/codex.args"
+refused_claim codex_role "$script/claim.sh"
+codex_role env CODEX_HOME="$moved_home" "$script/claim.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/codex"
+jq --arg home "$CODEX_HOME" '.codexHome = $home' "$root_claim" > "$root_claim.tmp" && mv "$root_claim.tmp" "$root_claim"
 refused_claim claude_role "$script/claim.sh"
 NOT_REACHABLE=1 refused_claim claude_role "$script/claim.sh"
 grep -q 'liveness: unknown' "$tmp/refused"

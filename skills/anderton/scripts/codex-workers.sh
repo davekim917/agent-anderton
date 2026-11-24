@@ -81,19 +81,29 @@ EOF
   return 1
 }
 
-# Records on worker record $1 that the move of its limited turn $2 was tried, and whether it moved ($3 true|false).
+# Records on worker record $1 what became of the move of its limited turn $2: $3 is moved, resumed (continued on its
+# own home once that home's limit reset), helper (the helper refused the move, after marking the home limited) or
+# failed.
 note_failover() {
   local updated
   updated=$(mktemp "$1.XXXXXX") || return 0
-  if jq --arg turn "$2" --argjson moved "$3" --argjson at "$(date +%s)" '.codexFailover = {turn: $turn, at: $at, moved: $moved}' \
-    "$1" >"$updated"; then mv -f "$updated" "$1"; else rm -f "$updated"; fi
+  if jq --arg turn "$2" --arg how "$3" --argjson at "$(date +%s)" '.codexFailover = {turn: $turn, at: $at,
+      moved: ($how == "moved"), resumed: ($how == "resumed"), marked: ($how == "moved" or $how == "helper"
+        or ((.codexFailover // {}) | .turn == $turn and .marked == true))}' "$1" >"$updated"; then
+    mv -f "$updated" "$1"
+  else
+    rm -f "$updated"
+  fi
 }
 
 # Moves Codex worker record $1, still on thread $2, whose latest turn failed at its account's usage limit, to the next
 # account the account helper names: its pane's client stops, the thread resumes on the new home's daemon, the pane
-# reopens there and the worker is told to continue. Prints the outcome for the watch to report.
+# reopens there and the worker is told to continue. A move that could not run is retried: on the same home once its
+# limit has reset, else once the helper names another home. Prints the outcome for the watch to report; a retry that
+# changes nothing prints nothing.
 failover() {
-  local record=$1 expected=$2 root name id from helper out to limited turn message reopened retry start stopped=""
+  local record=$1 expected=$2 root name id from helper out to limited turn message reopened retry marked start status
+  local stopped=""
   root=$(invoking_root)
   take_repository_lock "$root"
   lock_worker "$record" || return 0
@@ -106,19 +116,40 @@ failover() {
   limited=$("$scripts/codex-worker.py" limited "$record") || return 0
   turn=${limited%%$'\n'*} message=${limited#*$'\n'}
   retry=$(jq -r --arg turn "$turn" 'if .codexFailover.turn == $turn then "1" else "" end' "$record")
+  marked=$(jq -r --arg turn "$turn" 'if .codexFailover.turn == $turn and .codexFailover.marked == true then "1" else "" end' "$record")
   if ! helper=$(codex_accounts); then
-    note_failover "$record" "$turn" false
+    note_failover "$record" "$turn" failed
     [ -n "$retry" ] || echo "$name (Codex $id) stays at the usage limit of $from: no Codex account helper is installed to move it."
     return 0
   fi
-  # A retry touches the pane only once the helper would start a new session somewhere else: the first try marked $from.
-  if [ -n "$retry" ] && { ! start=$(CODEX_HOME=$from "$helper" --start-home </dev/null 2>/dev/null) ||
-    [ "$(cd "$start" 2>/dev/null && pwd -P)" = "$(cd "$from" && pwd -P)" ]; }; then
-    note_failover "$record" "$turn" false
+  if [ -n "$marked" ]; then
+    status=0
+    CODEX_HOME=$from "$helper" --is-limited </dev/null >/dev/null 2>&1 || status=$?
+    if [ "$status" -eq 1 ]; then
+      # The home's limit has reset since the helper marked it: the worker continues where it is.
+      if "$scripts/codex-worker.py" message "$record" -- "$continue_text" >/dev/null 2>&1; then
+        note_failover "$record" "$turn" resumed
+        echo "$name (Codex $id) continues on $from, whose usage limit has reset."
+      fi
+      return 0
+    fi
+    # Still limited, or a helper that cannot say: retry once the helper names another home.
+    if ! start=$(CODEX_HOME=$from "$helper" --start-home </dev/null 2>/dev/null) ||
+      [ "$(cd "$start" 2>/dev/null && pwd -P)" = "$(cd "$from" && pwd -P)" ]; then
+      note_failover "$record" "$turn" helper
+      return 0
+    fi
+  fi
+  # No client may start a turn on the old account while the thread moves: the pane's client stops, then the old daemon
+  # must let go of the thread, which it does about a minute after its last client leaves. One that does not has
+  # another client.
+  if stop_pane "$record"; then stopped=1; fi
+  if ! "$scripts/codex-worker.py" unloaded "$record" --wait 90 >/dev/null 2>&1; then
+    [ -z "$stopped" ] || reopen_pane "$record" "$from" >/dev/null
+    note_failover "$record" "$turn" failed
+    [ -n "$retry" ] || echo "$name (Codex $id) stays at the usage limit of $from: another Codex client still has thread $id open. Close it to let the move run."
     return 0
   fi
-  # No client may start a turn on the old account while the thread moves; then the thread must still wait on nothing.
-  if stop_pane "$record"; then stopped=1; fi
   if ! "$scripts/codex-worker.py" limited "$record" >/dev/null; then
     [ -z "$stopped" ] || reopen_pane "$record" "$from" >/dev/null
     return 0
@@ -126,17 +157,17 @@ failover() {
   if ! out=$(CODEX_HOME=$from "$helper" --move-thread "$id" --message "$message" </dev/null 2>&1) ||
     ! to=$(cd "$(printf '%s\n' "$out" | tail -n 1)" 2>/dev/null && pwd -P); then
     [ -z "$stopped" ] || reopen_pane "$record" "$from" >/dev/null
-    note_failover "$record" "$turn" false
+    note_failover "$record" "$turn" helper
     [ -n "$retry" ] || echo "$name (Codex $id) stays at the usage limit of $from: $(printf '%s\n' "$out" | tail -n 1)"
     return 0
   fi
   if ! codex_daemon_up "$to" || ! out=$("$scripts/codex-worker.py" move "$record" "$to" 2>&1); then
     [ -z "$stopped" ] || reopen_pane "$record" "$from" >/dev/null
-    note_failover "$record" "$turn" false
+    note_failover "$record" "$turn" helper
     [ -n "$retry" ] || echo "$name (Codex $id) stays on $from: $to did not take its thread. ${out:-Its Codex daemon did not start.}"
     return 0
   fi
-  note_failover "$record" "$turn" true
+  note_failover "$record" "$turn" moved
   if [ -z "$stopped" ]; then
     reopened="Its pane did not show thread $id, so it was left alone. Open the thread with: CODEX_HOME=$to codex resume $id --remote unix://$(codex_socket "$to")"
   elif reopened=$(reopen_pane "$record" "$to"); then

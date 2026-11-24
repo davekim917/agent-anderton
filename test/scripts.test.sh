@@ -2708,6 +2708,10 @@ python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])'
 cat >"$work/accounts" <<'FAKE'
 #!/usr/bin/env bash
 echo "$CODEX_HOME $*" >>"$FAKE_LOG.accounts"
+case $1 in
+  --is-limited) exit "${FAKE_ACCOUNTS_LIMITED:-0}" ;;
+  --start-home) echo "${FAKE_ACCOUNTS_START:-$FAKE_ACCOUNTS_HOME}"; exit 0 ;;
+esac
 if [ -n "${FAKE_ACCOUNTS_REFUSE:-}" ]; then echo "accounts: no account other than $CODEX_HOME is confirmed to dispatch every hook" >&2; exit 3; fi
 echo "$FAKE_ACCOUNTS_HOME"
 FAKE
@@ -2742,6 +2746,7 @@ case $1 in
     [ -d "$2.lock" ] || exit 1
     echo limited >>"$FAKE_LOG.order"
     printf 'turn-9\nYou%sve hit your usage limit. Try again at 9:00 PM.\n' "'" ;;
+  unloaded) echo unloaded >>"$FAKE_LOG.order"; [ -z "${FAKE_STILL_LOADED:-}" ] ;;
   move)
     echo move >>"$FAKE_LOG.order"
     echo "$2 $3" >>"$FAKE_LOG.move"
@@ -2779,14 +2784,26 @@ check "its pane reopened at that thread on the new home's daemon, titled with it
   [ "$(tr '\n' ' ' <"$FAKE_LOG.respawn")" = "respawn-pane -k -t %31 -e CODEX_HOME=$cxnext codex resume $cx_thread --remote unix://$cxnext/app-server-control/app-server-control.sock -c tui.terminal_title=[\"thread-id\"] " ]
 check "and told to continue without repeating completed work" grep -q "Check the current state before repeating" "$FAKE_LOG.direction"
 check "its old client stopped before the thread moved, and the limit checked again after" \
-  [ "$(tr '\n' ' ' <"$FAKE_LOG.order")" = "limited respawn limited move respawn " ]
+  [ "$(tr '\n' ' ' <"$FAKE_LOG.order")" = "limited respawn unloaded limited move respawn " ]
 check "and the move recorded against the limited turn" \
-  [ "$(jq -r '.codexFailover | "\(.turn) \(.moved) \(.at | type)"' "$work/cx-fail.last")" = "turn-9 true number" ]
-CX_PRIOR_FAILOVER='{"turn": "turn-9", "at": 0, "moved": false}' cx_failover "$cx_title" ANDERTON_CODEX_ACCOUNTS="$work/accounts" \
-  FAKE_ACCOUNTS_HOME="$cxhome"
-check "a retry while the helper still names no other home leaves the pane alone and wakes no one" eval \
-  '[ "$status" -eq 0 ] && [ ! -e "$FAKE_LOG.respawn" ] && [ ! -e "$FAKE_LOG.move" ] && ! contains "stays" &&
-   [ "$(cat "$FAKE_LOG.accounts")" = "$cxhome --start-home" ]'
+  [ "$(jq -r '.codexFailover | "\(.turn) \(.moved) \(.marked) \(.at | type)"' "$work/cx-fail.last")" = "turn-9 true true number" ]
+prior='{"turn": "turn-9", "at": 0, "moved": false, "marked": true}'
+CX_PRIOR_FAILOVER=$prior cx_failover "$cx_title" ANDERTON_CODEX_ACCOUNTS="$work/accounts" FAKE_ACCOUNTS_START="$cxhome"
+check "a retry while its home is still limited and the helper names no other leaves the pane alone and wakes no one" eval \
+  '[ "$status" -eq 0 ] && [ ! -e "$FAKE_LOG.respawn" ] && [ ! -e "$FAKE_LOG.move" ] && ! contains "stays" && ! contains "continues" &&
+   [ "$(tr "\n" " " <"$FAKE_LOG.accounts")" = "$cxhome --is-limited $cxhome --start-home " ]'
+CX_PRIOR_FAILOVER=$prior cx_failover "$cx_title" ANDERTON_CODEX_ACCOUNTS="$work/accounts"
+check "and moves once the helper names another home again" eval \
+  '[ -s "$FAKE_LOG.move" ] && contains "continues on $cxnext"'
+CX_PRIOR_FAILOVER=$prior cx_failover "$cx_title" ANDERTON_CODEX_ACCOUNTS="$work/accounts" FAKE_ACCOUNTS_LIMITED=1
+check "a stranded worker whose own home's limit has reset continues there, without a move" eval \
+  '[ ! -e "$FAKE_LOG.move" ] && [ ! -e "$FAKE_LOG.respawn" ] && contains "continues on $cxhome, whose usage limit has reset" &&
+   grep -q "Check the current state before repeating" "$FAKE_LOG.direction" &&
+   [ "$(jq -r .codexFailover.resumed "$work/cx-fail.last")" = true ]'
+cx_failover "$cx_title" ANDERTON_CODEX_ACCOUNTS="$work/accounts" FAKE_STILL_LOADED=1
+check "a thread another client still has open is not moved, and its pane reopens where it was" eval \
+  '[ ! -e "$FAKE_LOG.move" ] && [ ! -e "$FAKE_LOG.accounts" ] && contains "another Codex client still has thread $cx_thread open" &&
+   grep -q -- "-e CODEX_HOME=$cxhome codex resume $cx_thread" "$FAKE_LOG.respawns"'
 cx_failover "$cx_title" ANDERTON_CODEX_ACCOUNTS="$work/accounts" FAKE_SWEPT_THREAD=019a0000-0000-7000-8000-000000000000
 check "a record whose thread changed since the sweep read it is not moved" eval \
   '[ ! -e "$FAKE_LOG.move" ] && [ ! -e "$FAKE_LOG.respawn" ] && [ ! -e "$FAKE_LOG.accounts" ]'
