@@ -195,38 +195,48 @@ owner_of() {
   /usr/bin/stat -c %u "$1"
 }
 
-# agy loads hooks and plugins from the .agents directory of the worktree, which it treats as the workspace root. A
-# hooks.json there would load; a link there, even a dangling one, could point at a file the worker can still write.
-# agy also loads custom agent definitions when it starts: from .agents/agents, ~/.gemini/config/agents and the agents
-# directory of a plugin. One with inheritCustomizations: false, or inheritScopes none or repo_and_org, runs its subagent
-# with no hooks at all, so the guard would not see it.
+# agy treats the worktree as the workspace and reads four names at its root as customization roots, .agents, .agent,
+# _agents and _agent, for hooks, plugins, custom agents, rules, skills and workflows. A hooks.json there can switch the
+# guard off; a plugin can carry hooks and agents; a custom agent with inheritCustomizations: false, or inheritScopes none
+# or repo_and_org, runs its subagent with no hooks at all; skills.json and plugins.json can name customizations
+# anywhere. So a root may hold only real rules, skills and workflows directories, with no link and no hooks.json in
+# them. agy also loads custom agents from ~/.gemini/config/agents and from each plugin there when it starts.
 refuse_workspace_config() {
-  local entry plugin agent_why="a custom agent there can run its subagent with no hooks, so the guard would not see it."
-  for entry in hooks.json plugins plugins.json plugins.txt; do
-    if [ "$entry" = hooks.json ] && { [ -e "$wt/.agents/$entry" ] || [ -L "$wt/.agents/$entry" ]; }; then
-      die "$wt/.agents/hooks.json exists; workspace hooks can switch the guard off."
-    fi
-    if [ -L "$wt/.agents/$entry" ]; then
-      die "$wt/.agents/$entry is a symbolic link; its target could stay writable."
-    fi
-  done
-  if [ -e "$wt/.agents/agents" ] || [ -L "$wt/.agents/agents" ]; then
-    die "$wt/.agents/agents exists; a custom agent defined there can run its subagent with no hooks, so the guard would not see it."
-  fi
-  # The other names agy reads as a workspace root, like .agents. The launcher creates each empty and binds it read-only.
-  for entry in .agent _agents _agent; do
-    refuse_nonempty "$wt/$entry" "agy reads it as a workspace customization root, so its hooks or custom agents could switch the guard off."
-  done
-  refuse_nonempty "$gemini/config/agents" "$agent_why"
-  for plugin in "$gemini/config/plugins" "$wt/.agents/plugins"; do
-    [ -d "$plugin" ] || continue
-    for entry in "$plugin"/* "$plugin"/.[!.]* "$plugin"/..?*; do
-      if [ -L "$entry" ]; then
-        die "$entry is a symbolic link; its target could stay writable, and a plugin's custom agent can run its subagent with no hooks."
-      fi
-      [ ! -d "$entry" ] || refuse_nonempty "$entry/agents" "$agent_why"
+  local root entry name found plugin agent_why="a custom agent there can run its subagent with no hooks, so the guard would not see it."
+  for root in "$wt/.agents" "$wt/.agent" "$wt/_agents" "$wt/_agent"; do
+    [ ! -L "$root" ] || die "$root is a symbolic link, whose target could stay writable; agy reads it as a workspace customization root."
+    [ -e "$root" ] || continue
+    [ -d "$root" ] || die "$root is not a directory; agy reads it as a workspace customization root."
+    [ -r "$root" ] && [ -x "$root" ] || die "$root cannot be listed, so agy-sandbox cannot check what agy would load from it."
+    for entry in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      name=${entry##*/}
+      case $name in
+        rules | skills | workflows)
+          [ ! -L "$entry" ] || die "$entry is a symbolic link; its target could stay writable."
+          [ -d "$entry" ] && [ -r "$entry" ] && [ -x "$entry" ] ||
+            die "$entry is not a directory agy-sandbox can list; only rules, skills and workflows directories may be in $root."
+          found=$(/usr/bin/find "$entry" \( -type l -o -name hooks.json \) -print -quit 2>/dev/null) ||
+            die "could not search $entry for links and hook files."
+          [ -z "$found" ] || die "$found is a link or a hooks.json inside $entry; agy could load hooks from it, or the worker could write through it."
+          ;;
+        *)
+          [ ! -L "$entry" ] || die "$entry exists and is a symbolic link; its target could stay writable."
+          [ "$name" != hooks.json ] || die "$entry exists; workspace hooks can switch the guard off."
+          die "$entry exists; only rules, skills and workflows may be in $root, and $name could carry hooks, plugins or custom agents that switch the guard off."
+          ;;
+      esac
     done
   done
+  refuse_nonempty "$gemini/config/agents" "$agent_why"
+  if [ -d "$gemini/config/plugins" ]; then
+    for plugin in "$gemini/config/plugins"/* "$gemini/config/plugins"/.[!.]* "$gemini/config/plugins"/..?*; do
+      if [ -L "$plugin" ]; then
+        die "$plugin is a symbolic link; its target could stay writable, and a plugin's custom agent can run its subagent with no hooks."
+      fi
+      [ ! -d "$plugin" ] || refuse_nonempty "$plugin/agents" "$agent_why"
+    done
+  fi
 }
 
 # refuse_nonempty <dir> <why>: the directory may be missing or empty, never a link, anything else, or holding an entry.

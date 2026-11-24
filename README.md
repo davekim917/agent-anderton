@@ -265,10 +265,11 @@ Just before agy starts, it refuses to run unless all of these hold, checked insi
   timeout;
 - agy has a non-empty stored login;
 - no `.agents/hooks.json` sits above the worktree;
-- the worktree has no `.agents/agents` at all (directory, file or link), and `.agent`, `_agents` and `_agent`, the
-  other names agy reads as a workspace customization root, are each missing or an empty directory, never a link;
-- `~/.gemini/config/agents`, and the `agents` directory of every plugin in `~/.gemini/config/plugins/` and the
-  worktree's `.agents/plugins/`, is missing or an empty directory, never a link, and no plugin there is a link;
+- each of the four workspace roots (`.agents`, `.agent`, `_agents`, `_agent`) is missing, or a directory holding only
+  `rules/`, `skills/` and `workflows/`, each a real directory with no link and no `hooks.json` at any depth. Anything
+  else there is refused by name: `hooks.json`, `plugins/`, `agents/`, `skills.json` or any other file, and links;
+- `~/.gemini/config/agents`, and the `agents` directory of every plugin in `~/.gemini/config/plugins/`, is missing or
+  an empty directory, never a link, and no plugin there is a link;
 - every protected path is mounted read-only;
 - the guard's policy files are not writable.
 
@@ -295,9 +296,11 @@ Inside, it also checks that `hookbin/` holds only the pinned bun, byte for byte,
 does. A plugin's `agents/` directory loads the same way. These directories are read-only inside the sandbox, but a
 repository can ship `.agents/agents`, and a worker can commit one for a later worktree to check out, so the launcher
 refuses to start instead. agy also reloads a workspace root's `hooks.json` mid-session, so a worker that could create
-`.agent/hooks.json` could switch the guard off for its next turn: all four roots are bound read-only. A repository that
-ships agent definitions, or anything in `.agent`, `_agents` or `_agent` at its root, cannot run agy workers. The
-empty directories the launcher creates are not tracked, so they leave `git status` clean.
+`.agent/hooks.json` could switch the guard off for its next turn: all four roots are bound read-only. A workspace
+plugin can carry hooks and agents, and `skills.json` or `plugins.json` can name customizations anywhere, so a root may
+hold only rules, skills and workflows, which carry none of those. A repository that ships anything else in a workspace
+root cannot run agy workers. The empty directories the launcher creates are not tracked, so they leave `git status`
+clean.
 
 **Known limit, startup window:** the checks inside the sandbox run just before agy starts, and agy discovers agent
 definitions after that. The protected directories are read-only only to the worker: a process on the host that writes
