@@ -172,6 +172,11 @@ The launcher dry-runs its sandbox view before it starts anything. When the view 
 masks closed as it started, it exits 75 having started nothing. `spawn.sh` and the worktree inspection then try again, up
 to three starts in all. A start that ran something is never repeated, and neither is one its 120-second timeout ended.
 
+**Known limit, updates:** `retire.sh` and `waiting.sh` ask the installed launcher (`/opt/agy/bin/agy`) to inspect a worktree. If
+the plugin's scripts are updated before the launcher is reinstalled, a launcher that gives no `clean` answer makes a clean
+retirement exit 3 and keep the worktree. That is safe; reinstall the launcher (`install-agy.sh`) together with the
+plugin.
+
 Installing takes two steps, so root never writes inside a user's home.
 
 1. **As root,** `skills/anderton/scripts/install-agy.sh` writes only under the prefix (`/opt`):

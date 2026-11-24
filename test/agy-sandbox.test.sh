@@ -288,9 +288,10 @@ start_once "$work/launch-once.pid" >/dev/null 2>&1 || fail "the start after one 
 rm -f "$work/launch-once.pid" "$work/wt-example/agy-ran"
 cp "$work/pin.saved" "$prefixroot/opt/agy/etc/pin"
 
-# The inspection sandbox hides the token file too. A required clean filter, which runs there, fails when it can read the
-# token, and then git status, so the inspection, fails.
-printf '#!/bin/sh\nif cat "%s" >/dev/null 2>&1; then exit 1; fi\ncat\n' "$work/tokens/github.token" > "$work/token-filter.sh"
+# The inspection sandbox hides the token file too. A required clean filter, which runs there, fails when it reads the
+# token's contents, and then git status, so the inspection, fails. The same inspection with no gh-token-file configured,
+# so nothing masked, must fail: that proves the filter runs.
+printf '#!/bin/sh\nif grep -q example-token "%s" 2>/dev/null; then exit 1; fi\ncat\n' "$work/tokens/github.token" > "$work/token-filter.sh"
 chmod 0755 "$work/token-filter.sh"
 printf '*.tok filter=tokcheck\n' > "$work/wt-example/.gitattributes"
 echo example > "$work/wt-example/notes.tok"
@@ -298,10 +299,18 @@ git -C "$work/wt-example" add .gitattributes notes.tok
 git -C "$work/wt-example" -c user.name=example -c user.email=example@example.invalid commit -qm "a filtered file"
 git -C "$work/repo" config filter.tokcheck.clean "$work/token-filter.sh"
 git -C "$work/repo" config filter.tokcheck.required true
-touch -d 2001-01-01 "$work/wt-example/notes.tok"
-inspected=$(cd "$work/wt-example" && env -i HOME="$home" PATH=/usr/bin:/bin "$agy" --anderton-worktree-work "$(git rev-parse HEAD)" 2>&1) ||
-  inspected="exit $?: $inspected"
-case $inspected in uncommitted | unpushed | clean) ;; *) fail "the inspection sandbox read the token file, or failed: $inspected" ;; esac
+inspect() { # inspect <day>: the inspection's answer for wt-example, after a stat change that makes git status run the filter
+  touch -d "2001-01-0$1" "$work/wt-example/notes.tok"
+  (cd "$work/wt-example" && env -i HOME="$home" PATH=/usr/bin:/bin "$agy" --anderton-worktree-work "$(git rev-parse HEAD)" 2>&1) ||
+    echo "exit $?"
+}
+cp "$prefixroot/opt/agy/etc/sandbox.conf" "$work/conf.with-token"
+grep -v '^gh-token-file ' "$work/conf.with-token" > "$prefixroot/opt/agy/etc/sandbox.conf"
+inspected=$(inspect 1)
+[ "$inspected" = unreadable ] || fail "with the token file unmasked, the inspection's filter did not fail on reading it: $inspected"
+cp "$work/conf.with-token" "$prefixroot/opt/agy/etc/sandbox.conf"
+inspected=$(inspect 2)
+case $inspected in uncommitted | unpushed | clean) ;; *) fail "the inspection sandbox let the filter read the token file: $inspected" ;; esac
 git -C "$work/repo" config --unset filter.tokcheck.clean
 git -C "$work/repo" config --unset filter.tokcheck.required
 
