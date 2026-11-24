@@ -650,6 +650,23 @@ Claude Code ends the watch at the timeout `hooks.json` gives it (14 days), and o
 starts it again. So a watch that has had nothing to tell for 13 days wakes the holder once with "renewing";
 ending that turn starts a new watch. Without it, a quiet role would stop being watched without a word.
 
+A machine can also be told what its Anderton roles are doing, with no text from them. Set
+**`ANDERTON_EVENT_COMMAND`** in the sessions' environment to a command, and each event runs it once in the
+background with one JSON object on stdin: `{claimId, scope, kind, status?, milestoneKind?, links?, worker?}`.
+Only a role claimed with `--project workgroup:<id>[/<project>]` emits, and its events are:
+- `start`, from the claim (not a rebind) and from each `spawn.sh`, with `worker`;
+- `status` (`working`, `idle` or `waiting`), from the watch each time a Claude holder's or worker's registry
+  status changes;
+- `milestone`, after a worker's `RESULT:`, `QUESTION:` or `BLOCKED:` was sent: its kind and up to ten GitHub
+  URLs from the message, never the message itself;
+- `done`, from `retire.sh`, with `worker`.
+
+Each claim has a `claimId`, kept by the same session through a re-claim, rebind or resume and new for any other
+session, so whatever trusts one claim does not trust the next holder of the same scope. A worker's record names
+its claim as `spawnerClaimId`. The command never holds a script up or fails it: it runs detached, holds none of
+the caller's descriptors, is ended after `ANDERTON_EVENT_TIMEOUT` seconds (3), and its output and exit status are
+ignored. Unset, nothing runs. A Codex holder or worker reports no status, since it has no registry entry.
+
 **`report-gate.sh`** is a hook on `SendMessage`, run before and after each send. It judges two kinds of
 message: a worker's to the session `spawn.sh` started it from, and any session's to its repository's Anderton,
 named in the claim file, checked to be the live process the record names, and addressed by name, by name

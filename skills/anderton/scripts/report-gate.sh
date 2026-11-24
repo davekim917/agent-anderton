@@ -36,6 +36,7 @@ EOF
     local target sum
     [ -n "$id" ] && [ -f "$pending/$id" ] || exit 0
     { read -r target && read -r sum; } < "$pending/$id" 2>/dev/null || exit 0
+    milestone=$(sed -n 3p "$pending/$id" 2>/dev/null)
     rm -f "$pending/$id"
     [ -n "$target" ] && [ -n "$sum" ] || exit 0
     # SendMessage reports a failed delivery as a normal result whose body says "success": false, so PostToolUse runs
@@ -43,6 +44,7 @@ EOF
     if printf '%s' "$input" | jq -e '.tool_response | if type == "object" and has("success") then .success == false
       else tostring | test("\\\\*\"success\\\\*\"\\s*:\\s*false") end' >/dev/null 2>&1; then exit 0; fi
     printf '%s %s\n' "$(date +%s)" "$sum" >| "$target" 2>/dev/null
+    if [ -n "$milestone" ]; then emit_milestone "$milestone"; fi
     exit 0
   fi
 
@@ -147,8 +149,30 @@ EOF
     echo "Not sent: it repeats, word for word, your last message to \"$recipient\". Send again only when something changed, and say what." >&2
     exit 10
   fi
-  [ -z "$id" ] || printf '%s\n%s\n' "$state" "$hash" >| "$pending/$id" 2>/dev/null
+  local milestone=""
+  if [ -n "$worker" ] && [ "$kind" != DIRECTION ]; then
+    milestone=$(jq -c -n --slurpfile w "$wrec" --arg kind "$kind" --arg msg "$(printf '%s' "$input" | jq -r '.tool_input.message // ""' 2>/dev/null)" \
+      '$w[0] | {claim: (.spawnerClaimId // ""), scope: (.spawnerScope // ""), worker: (.name // ""), kind: $kind,
+        links: ([$msg | scan("https://github\\.com/[A-Za-z0-9._/-]+")] | .[0:10])}' 2>/dev/null) || milestone=""
+  fi
+  [ -z "$id" ] || printf '%s\n%s\n%s\n' "$state" "$hash" "$milestone" >| "$pending/$id" 2>/dev/null
   exit 0
+}
+
+# A worker's RESULT:, QUESTION: or BLOCKED: that was sent, to the host as a milestone: its kind and the GitHub links in
+# it, never its text.
+emit_milestone() {
+  local claim scope worker kind links=()
+  claim=$(printf '%s' "$1" | jq -r '.claim // empty') || return 0
+  scope=$(printf '%s' "$1" | jq -r '.scope // empty') || return 0
+  worker=$(printf '%s' "$1" | jq -r '.worker // empty') || return 0
+  kind=$(printf '%s' "$1" | jq -r '.kind // empty') || return 0
+  while IFS= read -r link; do
+    if [ -n "$link" ]; then links+=("link=$link"); fi
+  done <<EOF
+$(printf '%s' "$1" | jq -r '.links[]?')
+EOF
+  emit_event "$claim" "$scope" milestone "milestoneKind=$kind" "worker=$worker" ${links[@]+"${links[@]}"}
 }
 
 gate_stale_worker_report() {

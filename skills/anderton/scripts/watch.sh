@@ -494,6 +494,46 @@ deliver_pending() {
   rm -rf "$pending"
 }
 
+# The role's and its Claude workers' registry statuses, to ANDERTON_EVENT_COMMAND when one changes (see emit_event in
+# session-lib.sh). A Codex session has no registry status, so it reports none.
+status_seen="$holders/$key.statuses"
+registry_status() {
+  [ -n "$1" ] || return 0
+  case $(jq -r '.status // empty' "$sessions/$1.json" 2>/dev/null) in
+    busy) echo working ;;
+    idle) echo idle ;;
+    waiting) echo waiting ;;
+  esac
+}
+emit_statuses() {
+  local claim scope w name wsid now_s="" who st
+  [ -n "${ANDERTON_EVENT_COMMAND:-}" ] || return 0
+  claim=$(jq -r '.claimId // empty' "$record" 2>/dev/null)
+  scope=$(jq -r '.scope // empty' "$record" 2>/dev/null)
+  [ -n "$claim" ] && [ -n "$scope" ] || return 0
+  if [ "$runtime" = claude ]; then now_s="role $(registry_status "$pid")"; fi
+  for w in "$holders"/workers/*.json; do
+    [ -f "$w" ] || continue
+    [ "$(jq -r '.spawnerClaimId // empty' "$w" 2>/dev/null)" = "$claim" ] || continue
+    name=$(jq -r '.name // empty' "$w")
+    wsid=$(jq -r '.claudeSession.id // .claudeLaunchId // empty' "$w")
+    [ -n "$name" ] && [ -n "$wsid" ] || continue
+    now_s="$now_s
+worker:$name $(registry_status "$(session_pid "$wsid")")"
+  done
+  while read -r who st; do
+    [ -n "$who" ] && [ -n "${st:-}" ] || continue
+    if grep -qxF "$who $st" "$status_seen" 2>/dev/null; then continue; fi
+    case $who in
+      role) emit_event "$claim" "$scope" status "status=$st" ;;
+      worker:*) emit_event "$claim" "$scope" status "status=$st" "worker=${who#worker:}" ;;
+    esac
+  done <<EOF
+$now_s
+EOF
+  printf '%s\n' "$now_s" > "$status_seen.tmp" 2>/dev/null && mv -f "$status_seen.tmp" "$status_seen"
+}
+
 while still_holds_role; do
   if orphaned "$$" "$parent_pid"; then exit 0; fi
   if [ "$runtime" = codex ] && [ "$(( $(date +%s) - last_liveness_check ))" -ge 60 ]; then
@@ -502,6 +542,7 @@ while still_holds_role; do
   fi
   # Only the lock's owner watches: a watch that lost it leaves, and one whose lock vanished takes it back.
   if [ "$(watch_owner)" != "$$" ] && ! take_watch; then exit 0; fi
+  emit_statuses
   if [ "$runtime" = codex ] && [ -d "$pending" ]; then
     now=$(cd "$cwd" 2>/dev/null &&
       ANDERTON_PENDING_PROBE_STAGE="$pending/probe/stage" ANDERTON_BLOCKER_BOOKMARKS="$holders/$key.codex-probe/bookmarks" \

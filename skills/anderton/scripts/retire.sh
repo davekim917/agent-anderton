@@ -73,6 +73,7 @@ if [ "$(jq -r '.adopted // false' "$record")" = true ]; then
     fi
   fi
   spawner=$(jq -r '.spawner // "its Anderton"' "$record")
+  emit_worker_done "$record"
   rm -f "$record"
   echo "Released '$name': it keeps running and no longer reports to $spawner."
   exit 0
@@ -350,6 +351,7 @@ if [ "$launcher" = bg ] && ! claude rm "$id" >/dev/null 2>&1; then
   echo "Stopped '$name' and removed its worktree, but claude rm $id failed; kept the record. Rerun to finish." >&2
   exit 1
 fi
+emit_worker_done "$record"
 rm -f "$record" "${record%.json}.agy-launch" "$hold_file"
 # Earlier versions kept a last-report file beside each worker record.
 find "$holders/workers" -maxdepth 1 -name '*.last-report' -exec rm -f {} + 2>/dev/null || true

@@ -162,8 +162,11 @@ fi
 
 sid=$(invoking_session)
 pid=$(invoking_pid)
-role_scope=""
-if [ -n "$role" ]; then role_scope=$(jq -r '.scope // empty' "$role"); fi
+role_scope="" role_claim=""
+if [ -n "$role" ]; then
+  role_scope=$(jq -r '.scope // empty' "$role")
+  role_claim=$(jq -r '.claimId // empty' "$role")
+fi
 if [ "$caller_provider" = codex ]; then
   me=$(claim_name "${role:-/dev/null}")
 else
@@ -273,14 +276,15 @@ write_launch_record() {
   jq -nc --arg name "$name" --arg launcher "$launcher" --arg id "$id" --arg tab "$tab" --arg dir "$dir" --arg root "$root" \
     --arg socket "$socket" --arg server "$server" --arg base "$base" --arg spawner "$me" --arg label "$label" --argjson worktree "$worktree" \
     --arg pane "$pane" --arg spawner_session "$sid" --arg spawner_provider "$caller_provider" \
-    --arg spawner_scope "$role_scope" --arg role "$role" --arg claude_launch "$claude_launch" \
+    --arg spawner_scope "$role_scope" --arg spawner_claim "$role_claim" --arg role "$role" --arg claude_launch "$claude_launch" \
     --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg provider "$provider" --arg codex "$codex_home" --arg launched "$launched_at" --arg token "$launch_token" \
     --arg agy_pid "$agy_pid" --arg agy_start "$agy_start" --arg agy_instance "$agy_instance" --arg agy_common "$agy_common" \
     --slurpfile previous "$record" '
       ($previous[0] // {}) + {name: $name, launcher: $launcher, id: ($previous[0].id // $id), tab: $tab, socket: $socket, server: $server, dir: $dir, root: $root,
       base: $base, worktree: $worktree, spawner: $spawner, spawnerSession: $spawner_session, label: $label, startedAt: ($previous[0].startedAt // $at)}
       + if $pane != "" then {pane: $pane} else {} end
-      + if $role != "" then {spawnerProvider: $spawner_provider, spawnerScope: (if $spawner_scope == "" then null else $spawner_scope end)} else {} end
+      + if $role != "" then {spawnerProvider: $spawner_provider, spawnerScope: (if $spawner_scope == "" then null else $spawner_scope end)}
+          + (if $spawner_claim != "" then {spawnerClaimId: $spawner_claim} else {} end) else {} end
       + if $provider == "claude" then {claudeLaunchId: $claude_launch} else {} end
       + if $provider == "claude" and $spawner_provider == "codex" then {reportTransport: "transcript"} else {} end
       + if $provider == "codex" then {provider: $provider, codexHome: $codex, codexLaunchedAt: ($launched | tonumber), codexLaunchToken: $token} else {} end
@@ -546,4 +550,5 @@ if [ "$provider" = codex ]; then
   lock_worker "$record"
   bind_codex_worker "$record" "$id" "$launch_token"
 fi
+emit_event "$role_claim" "$role_scope" start "worker=$name"
 echo "Started worker '$name' in $where, in $dir ($mode). It reports to '$me'."

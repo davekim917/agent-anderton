@@ -1013,3 +1013,54 @@ take_repository_lock() {
   trap 'exit 1' INT TERM HUP
   echo $$ > "$repository_lock/pid"
 }
+
+# One event about this role or one of its workers, for the host: ANDERTON_EVENT_COMMAND, when the host sets it, runs
+# in the background with the event as JSON on stdin. It never delays a hook: it is detached, killed after
+# ANDERTON_EVENT_TIMEOUT seconds (default 3), and its output and exit status are ignored. Unset, nothing runs.
+# emit_event <claim id> <scope> <kind> [field=value ...], fields being status, milestoneKind and worker, plus
+# link=<url> repeated. Nothing is sent without a claim id or for a scope other than workgroup:<id>[/<project>].
+emit_event() {
+  local claim=$1 scope=$2 kind=$3 json field cmd=${ANDERTON_EVENT_COMMAND:-} timeout=${ANDERTON_EVENT_TIMEOUT:-3}
+  shift 3
+  [ -n "$cmd" ] && [ -n "$claim" ] || return 0
+  # Only a role claimed for a workgroup (--project workgroup:<id>[/<project>]) has anywhere on the host to show.
+  case $scope in workgroup:?*) ;; *) return 0 ;; esac
+  case $timeout in '' | *[!0-9]*) timeout=3 ;; esac
+  json=$(jq -nc --arg claim "$claim" --arg scope "$scope" --arg kind "$kind" '{claimId: $claim, scope: $scope, kind: $kind}') || return 0
+  for field in "$@"; do
+    case $field in
+      link=*) json=$(printf '%s' "$json" | jq -c --arg v "${field#link=}" '.links = ((.links // []) + [$v])') || return 0 ;;
+      status=* | milestoneKind=* | worker=*)
+        json=$(printf '%s' "$json" | jq -c --arg k "${field%%=*}" --arg v "${field#*=}" '.[$k] = $v') || return 0 ;;
+    esac
+  done
+  (
+    printf '%s' "$json" | bash -c "$cmd" >/dev/null 2>&1 &
+    p=$!
+    (sleep "$timeout"; kill "$p" 2>/dev/null) >/dev/null 2>&1 &
+    w=$!
+    wait "$p" 2>/dev/null
+    kill "$w" 2>/dev/null
+    # The caller's descriptors, such as the repository lock on fd 9, stay with the caller: a slow command holds none.
+  ) </dev/null >/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
+  return 0
+}
+
+# The host's last event about a worker leaving its Anderton: retired, or released and no longer reporting.
+emit_worker_done() {
+  emit_event "$(jq -r '.spawnerClaimId // empty' "$1" 2>/dev/null)" "$(jq -r '.spawnerScope // empty' "$1" 2>/dev/null)" done \
+    "worker=$(jq -r '.name // empty' "$1" 2>/dev/null)"
+}
+
+# A fresh id for a new claim: the host binds a claim, not a scope, so a later session claiming the same scope is not
+# bound by an earlier one's approval.
+new_claim_id() {
+  local id
+  id=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null) || return 1
+  printf '%s\n' "$id" | tr 'A-Z' 'a-z'
+}
+
+# Up to ten GitHub URLs in a message, for a milestone event; the host keeps only its own repositories' links.
+github_links() {
+  printf '%s' "$1" | grep -oE 'https://github\.com/[A-Za-z0-9._/-]+' 2>/dev/null | head -n 10 || true
+}
