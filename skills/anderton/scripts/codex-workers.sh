@@ -152,12 +152,11 @@ follow() {
 # helper names another home. Prints the outcome for the watch to report. Returns 10 when it changed something, so the
 # sweep moves at most one worker.
 failover() {
-  local record=$1 id=$2 name from helper out to limited turn message retry marked start status stage stopped_at pane
+  local record=$1 id=$2 name from helper out to limited turn message marked start status stage stopped_at pane
   lock_owned_worker "$record" "$id" || return 0
   name=$(jq -r .name "$record") from=$(jq -r .codexHome "$record")
   limited=$("$scripts/codex-worker.py" limited "$record") || return 0
   turn=${limited%%$'\n'*} message=${limited#*$'\n'}
-  retry=$(jq -r --arg turn "$turn" 'if .codexFailover.turn == $turn then "1" else "" end' "$record")
   marked=$(jq -r --arg turn "$turn" 'if .codexFailover.turn == $turn and .codexFailover.marked == true then "1" else "" end' "$record")
   stage=$(jq -r --arg turn "$turn" 'if .codexFailover.turn == $turn then .codexFailover.stage // "" else "" end' "$record")
   if ! helper=$(codex_accounts); then
