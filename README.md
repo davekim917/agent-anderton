@@ -212,8 +212,9 @@ not running. When the watch finds a Codex worker's latest turn failed at the usa
 Codex client in its pane stops, so no turn starts on the old account, the thread resumes on the new home's daemon,
 the worker's record points there, the pane reopens on that daemon, and the worker is told to continue without
 repeating completed work. A pane showing another conversation is left alone. The watch reports the move, or why the
-worker stayed; a move that could not run is tried again ten minutes later. A Codex Anderton's own session is not moved for you; reopen it with
-`codex resume <id>` under the new home.
+worker stayed; a move that could not run is tried again, quietly, once the helper names another home. A Codex
+Anderton's own session is not moved for you: reopen it with `codex resume <id>` under the new home, then run
+`claim.sh` there, which keeps its role and points its claim and watch at the new home.
 
 **How is it different from firstmate?**
 

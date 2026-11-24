@@ -30,6 +30,7 @@ class FakeCodex:
         self.listings = []
         self.listed = []
         self.others = {}
+        self.loaded = []
 
     def __enter__(self):
         return self
@@ -85,6 +86,8 @@ class FakeCodex:
             return iter(self.turns)
         if method == "thread/queue/list":
             return iter(self.queue)
+        if method == "thread/loaded/list":
+            return iter(self.loaded)
         assert method == "thread/items/list"
         return iter(self.items[params["turnId"]])
 
@@ -278,8 +281,14 @@ class WorkerTest(unittest.TestCase):
                                             "excludeTurns": True}), calls[0])
         self.assertEqual("/next-home", json.loads(self.record.read_text())["codexHome"])
         worker_api.Codex.assert_called_with(Path("/next-home"))
-        self.client.info["cwd"] = "/elsewhere"
         self.record.write_text(json.dumps(self.worker))
+        self.client.loaded = [self.worker["id"]]
+        with patch.object(worker_api.sys, "argv", ["codex-worker.py", "move", str(self.record), "/next-home"]):
+            with self.assertRaisesRegex(ValueError, "still has thread .* loaded"):
+                worker_api.main()
+        self.assertEqual(self.worker["codexHome"], json.loads(self.record.read_text())["codexHome"])
+        self.client.loaded = []
+        self.client.info["cwd"] = "/elsewhere"
         with patch.object(worker_api.sys, "argv", ["codex-worker.py", "move", str(self.record), "/next-home"]):
             with self.assertRaisesRegex(ValueError, "identity does not match"):
                 worker_api.main()

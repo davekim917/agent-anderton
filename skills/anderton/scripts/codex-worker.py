@@ -296,6 +296,10 @@ def limited_turn(client, worker):
 def move_worker(record, worker, home):
     """Resumes the worker's thread on the daemon of home and records it there; the caller holds the worker lock."""
     with Codex(home) as client:
+        # A daemon that still holds the thread from an earlier stay would resume its own copy, not the moved rollout.
+        for loaded in client.pages("thread/loaded/list"):
+            if loaded == worker["id"]:
+                raise ValueError(f"{home}'s daemon still has thread {worker['id']} loaded from an earlier stay")
         client.call("thread/resume", {"threadId": worker["id"], "cwd": worker["dir"], "excludeTurns": True},
                     timeout=60)
         read_thread(client, worker)

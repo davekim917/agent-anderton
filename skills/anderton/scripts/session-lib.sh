@@ -178,12 +178,12 @@ record_provider() {
 }
 
 caller_matches_claim() {
-  local p codex
+  local p
   [ -f "$1" ] && [ "$(record_provider "$1")" = "$(invoking_provider)" ] || return 1
   if [ "$(invoking_provider)" = codex ]; then
-    codex=$(invoking_codex_home) || return 1
-    jq -e --arg sid "${CODEX_THREAD_ID:-}" --arg codex "$codex" '
-      $sid != "" and .sessionId == $sid and .codexHome == $codex' "$1" >/dev/null 2>&1
+    # A thread id names one conversation in any home: a thread moved to another account (codex resume under another
+    # home) still holds its claim, and a re-claim from there records the new home.
+    jq -e --arg sid "${CODEX_THREAD_ID:-}" '$sid != "" and .sessionId == $sid' "$1" >/dev/null 2>&1
   else
     p=$(invoking_pid)
     [ -n "$p" ] && is_holder "$sessions/$p.json" "$1"

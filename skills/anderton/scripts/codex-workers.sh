@@ -93,7 +93,7 @@ note_failover() {
 # account the account helper names: its pane's client stops, the thread resumes on the new home's daemon, the pane
 # reopens there and the worker is told to continue. Prints the outcome for the watch to report.
 failover() {
-  local record=$1 expected=$2 root name id from helper out to limited turn message reopened stopped=""
+  local record=$1 expected=$2 root name id from helper out to limited turn message reopened retry start stopped=""
   root=$(invoking_root)
   take_repository_lock "$root"
   lock_worker "$record" || return 0
@@ -105,9 +105,16 @@ failover() {
   name=$(jq -r .name "$record") id=$expected from=$(jq -r .codexHome "$record")
   limited=$("$scripts/codex-worker.py" limited "$record") || return 0
   turn=${limited%%$'\n'*} message=${limited#*$'\n'}
+  retry=$(jq -r --arg turn "$turn" 'if .codexFailover.turn == $turn then "1" else "" end' "$record")
   if ! helper=$(codex_accounts); then
     note_failover "$record" "$turn" false
-    echo "$name (Codex $id) stays at the usage limit of $from: no Codex account helper is installed to move it."
+    [ -n "$retry" ] || echo "$name (Codex $id) stays at the usage limit of $from: no Codex account helper is installed to move it."
+    return 0
+  fi
+  # A retry touches the pane only once the helper would start a new session somewhere else: the first try marked $from.
+  if [ -n "$retry" ] && { ! start=$(CODEX_HOME=$from "$helper" --start-home </dev/null 2>/dev/null) ||
+    [ "$(cd "$start" 2>/dev/null && pwd -P)" = "$(cd "$from" && pwd -P)" ]; }; then
+    note_failover "$record" "$turn" false
     return 0
   fi
   # No client may start a turn on the old account while the thread moves; then the thread must still wait on nothing.
@@ -120,13 +127,13 @@ failover() {
     ! to=$(cd "$(printf '%s\n' "$out" | tail -n 1)" 2>/dev/null && pwd -P); then
     [ -z "$stopped" ] || reopen_pane "$record" "$from" >/dev/null
     note_failover "$record" "$turn" false
-    echo "$name (Codex $id) stays at the usage limit of $from: $(printf '%s\n' "$out" | tail -n 1)"
+    [ -n "$retry" ] || echo "$name (Codex $id) stays at the usage limit of $from: $(printf '%s\n' "$out" | tail -n 1)"
     return 0
   fi
   if ! codex_daemon_up "$to" || ! out=$("$scripts/codex-worker.py" move "$record" "$to" 2>&1); then
     [ -z "$stopped" ] || reopen_pane "$record" "$from" >/dev/null
     note_failover "$record" "$turn" false
-    echo "$name (Codex $id) stays on $from: $to did not take its thread. ${out:-Its Codex daemon did not start.}"
+    [ -n "$retry" ] || echo "$name (Codex $id) stays on $from: $to did not take its thread. ${out:-Its Codex daemon did not start.}"
     return 0
   fi
   note_failover "$record" "$turn" true

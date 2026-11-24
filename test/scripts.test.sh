@@ -2755,8 +2755,9 @@ cx_failover() { # cx_failover <pane title> [env...]: a sweep of worker cx-fail, 
   shift
   rm -f "$FAKE_LOG.accounts" "$FAKE_LOG.move" "$FAKE_LOG.respawn" "$FAKE_LOG.respawns" "$FAKE_LOG.direction" "$FAKE_LOG.order"
   rho_worker cx-fail
-  jq -c --arg id "$cx_thread" --arg home "$cxhome" '. + {provider: "codex", launcher: "tmux", id: $id, tab: "@31", pane: "%31",
-    socket: "/tmp/fake-codex-tmux", server: "4", label: "cx-fail", codexHome: $home}' \
+  jq -c --arg id "$cx_thread" --arg home "$cxhome" --argjson prior "${CX_PRIOR_FAILOVER:-null}" '. + {provider: "codex", launcher: "tmux",
+    id: $id, tab: "@31", pane: "%31", socket: "/tmp/fake-codex-tmux", server: "4", label: "cx-fail", codexHome: $home}
+    + if $prior == null then {} else {codexFailover: $prior} end' \
     "$CLAUDE_CONFIG_DIR/anderton/workers/cx-fail.json" >"$work/cx.tmp"
   mv "$work/cx.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/cx-fail.json"
   tmux_pane %31 "$title"
@@ -2781,6 +2782,11 @@ check "its old client stopped before the thread moved, and the limit checked aga
   [ "$(tr '\n' ' ' <"$FAKE_LOG.order")" = "limited respawn limited move respawn " ]
 check "and the move recorded against the limited turn" \
   [ "$(jq -r '.codexFailover | "\(.turn) \(.moved) \(.at | type)"' "$work/cx-fail.last")" = "turn-9 true number" ]
+CX_PRIOR_FAILOVER='{"turn": "turn-9", "at": 0, "moved": false}' cx_failover "$cx_title" ANDERTON_CODEX_ACCOUNTS="$work/accounts" \
+  FAKE_ACCOUNTS_HOME="$cxhome"
+check "a retry while the helper still names no other home leaves the pane alone and wakes no one" eval \
+  '[ "$status" -eq 0 ] && [ ! -e "$FAKE_LOG.respawn" ] && [ ! -e "$FAKE_LOG.move" ] && ! contains "stays" &&
+   [ "$(cat "$FAKE_LOG.accounts")" = "$cxhome --start-home" ]'
 cx_failover "$cx_title" ANDERTON_CODEX_ACCOUNTS="$work/accounts" FAKE_SWEPT_THREAD=019a0000-0000-7000-8000-000000000000
 check "a record whose thread changed since the sweep read it is not moved" eval \
   '[ ! -e "$FAKE_LOG.move" ] && [ ! -e "$FAKE_LOG.respawn" ] && [ ! -e "$FAKE_LOG.accounts" ]'
