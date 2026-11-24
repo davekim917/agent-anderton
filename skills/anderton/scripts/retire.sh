@@ -3,17 +3,34 @@
 # keeps running and stops reporting to its Anderton. A worktree with uncommitted work, or
 # commits since it started that no remote branch has, is kept and the worker stays recorded: push or discard
 # that work, then rerun.
-# usage: retire.sh <name>   Exit 0: retired. Exit 3: stopped, worktree kept.
+# Before closing anything it reads the worker's conversation: a message there since its last report to its Anderton, from
+# anyone but that Anderton (the user in its tab, a voice relay, another session), holds the retirement, and so does a
+# conversation it cannot read. The hold is written beside the record for waiting.sh to list until it is cleared.
+# usage: retire.sh <name> [--reviewed-through <ISO time>]   Exit 0: retired. Exit 3: stopped, worktree kept.
+# Exit 4: held for messages since the last report; --reviewed-through clears those up to that time.
 # Portable to macOS's bash 3.2 and BSD userland.
 set -euo pipefail
 # shellcheck source=SCRIPTDIR/session-lib.sh
 . "$(dirname "$0")/session-lib.sh"
 
 require_tools retire.sh
+usage() { echo "usage: retire.sh <name> [--reviewed-through <ISO time>]" >&2; exit 2; }
 name="${1:-}"
 case $name in
-  '' | -* | *[!a-z0-9-]*) echo "usage: retire.sh <name>" >&2; exit 2 ;;
+  '' | -* | *[!a-z0-9-]*) usage ;;
 esac
+shift
+reviewed=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --reviewed-through) [ $# -ge 2 ] || usage; reviewed=$2; shift 2 ;;
+    *) usage ;;
+  esac
+done
+if [ -n "$reviewed" ] && ! out=$("$anderton_scripts/claude-worker.py" reviewed-time "$reviewed" 2>&1); then
+  echo "${out#Claude worker: }" >&2
+  exit 2
+fi
 record="$holders/workers/$name.json"
 if [ ! -f "$record" ]; then
   echo "No worker named '$name' was started by spawn.sh; nothing to retire." >&2
@@ -60,6 +77,58 @@ if [ "$(jq -r '.adopted // false' "$record")" = true ]; then
   echo "Released '$name': it keeps running and no longer reports to $spawner."
   exit 0
 fi
+
+# hold <why> [messages JSON] [advice]: records the hold for waiting.sh and refuses. What is recorded stays the same
+# across retries, so the watch tells it once.
+hold_file="${record%.json}.held"
+hold() {
+  local updated messages=${2:-[]}
+  updated=$(mktemp "$hold_file.XXXXXX")
+  jq -n --arg name "$name" --arg why "$1" --argjson messages "$messages" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{name: $name, why: $why, heldAt: $at, messages: $messages}' > "$updated" && mv -f "$updated" "$hold_file"
+  {
+    echo "Not retiring '$name': $1"
+    if [ "$messages" != "[]" ]; then
+      printf '%s' "$messages" | jq -r '.[] | "  \(.at)  \(.from): \(.line)"'
+      echo "Read them first. If nothing in them is still open, run: retire.sh $name --reviewed-through $(printf '%s' "$messages" | jq -r '[.[].at] | max')"
+    else
+      echo "${3:-Read it yourself}, then run: retire.sh $name --reviewed-through $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    fi
+  } >&2
+  exit 4
+}
+# conversation_gate: holds the retirement when the worker's conversation has a message since its last report from anyone
+# but its Anderton, or cannot be read. Run before anything is closed, and again just before the close, so a message that
+# arrives while retire.sh works holds it too.
+conversation_gate() {
+  local check errors status=0 found error
+  case $provider in
+    agy)
+      [ -n "$reviewed" ] || hold "agy keeps no transcript these scripts read, so nothing shows what it was told since its last report." "[]" "Read its pane"
+      return 0
+      ;;
+    codex) check=("$anderton_scripts/codex-worker.py" inbound-since-report "$record") ;;
+    *) check=("$anderton_scripts/claude-worker.py" inbound-since-report "$record" --home "$home") ;;
+  esac
+  if [ -n "$reviewed" ]; then check+=(--reviewed-through "$reviewed"); fi
+  errors=$(mktemp "$hold_file.err.XXXXXX")
+  found=$("${check[@]}" 2>"$errors") || status=$?
+  error=$(head -c 400 "$errors")
+  rm -f "$errors"
+  case $status in
+    0) rm -f "$hold_file" ;;
+    4) hold "it has messages since its last report to its Anderton, from someone other than that Anderton:" "$(printf '%s' "$found" | jq -c '.messages')" ;;
+    *)
+      [ -n "$reviewed" ] || hold "its conversation could not be read (${error:-no reason given}), so nothing shows it has no messages since its last report." "[]" "Read its conversation yourself"
+      if [ -z "$unread_noted" ]; then
+        echo "Its conversation could not be read (${error:-no reason given}); retiring on your review through $reviewed alone." >&2
+        unread_noted=1
+      fi
+      ;;
+  esac
+}
+unread_noted=""
+conversation_gate
 
 mixed_claude_pane() {
   local registry sid pid
@@ -135,7 +204,9 @@ if [ "$launcher" != bg ] && [ "$provider" = codex ]; then
   elif now=$(codex_pane "$launcher" "$socket" "$pane" "$server") && [ "$now" != gone ]; then
     shows_thread "$now" "$id" ||
       refuse_pane "its $launcher pane $pane does not show thread ${id:-(none registered)} (another conversation was opened there, Codex left it, or $launcher cannot say)"
-    # The check above took time: a direction or a turn that started since stops the close.
+    # A turn typed and finished since the first read leaves the thread inactive again: its conversation is read again.
+    conversation_gate
+    # Those checks took time: a direction or a turn that started since, even during that read, stops the close.
     "$scripts/codex-worker.py" inactive "$record" || refuse_pane "thread $id became active while retiring"
     # The last read before the close, after the slow daemon call: only a change made after it goes unseen.
     now=$(codex_pane "$launcher" "$socket" "$pane" "$server")
@@ -219,6 +290,7 @@ elif [ "$launcher" != bg ] && [ -n "$mixed" ] && [ -n "$pane" ]; then
       echo "Could not verify '$name' still runs in its original pane. Close it directly, then retry." >&2
       exit 1
     fi
+    conversation_gate
     case $launcher in
       herdr) HERDR_SOCKET_PATH="$socket" herdr pane close "$pane" >/dev/null 2>&1 || true ;;
       tmux) tmux -S "$socket" kill-pane -t "$pane" >/dev/null 2>&1 || true ;;
@@ -238,6 +310,7 @@ elif [ "$launcher" != bg ]; then
   # A session in a herdr tab or tmux window has no id for claude stop; closing its tab or window ends it. Only
   # a tab or window place_state recognises as the worker's is closed, in the server it was opened in.
   if [ -z "$mixed" ] && [ "$(place_state "$launcher" "$socket" "$tab" "$label" "$server")" = present ]; then
+    conversation_gate
     case $launcher in
       herdr) HERDR_SOCKET_PATH="$socket" herdr tab close "$tab" >/dev/null 2>&1 || true ;;
       tmux) tmux -S "$socket" kill-window -t "$tab" >/dev/null 2>&1 || true ;;
@@ -252,6 +325,7 @@ else
     echo "The record for '$name' has no session id; stop it by hand (claude agents), then rerun." >&2
     exit 1
   fi
+  conversation_gate
   if ! claude stop "$id" >/dev/null 2>&1; then
     if ! listed=$(claude agents --json 2>/dev/null) ||
       ! printf '%s' "$listed" | jq -e --arg id "$id" 'all(.[]; .id != $id)' >/dev/null 2>&1; then
@@ -276,7 +350,7 @@ if [ "$launcher" = bg ] && ! claude rm "$id" >/dev/null 2>&1; then
   echo "Stopped '$name' and removed its worktree, but claude rm $id failed; kept the record. Rerun to finish." >&2
   exit 1
 fi
-rm -f "$record" "${record%.json}.agy-launch"
+rm -f "$record" "${record%.json}.agy-launch" "$hold_file"
 # Earlier versions kept a last-report file beside each worker record.
 find "$holders/workers" -maxdepth 1 -name '*.last-report' -exec rm -f {} + 2>/dev/null || true
 echo "Retired '$name'."

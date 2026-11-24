@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+import datetime
 import hashlib
 import json
 import os
@@ -478,12 +479,12 @@ def queue_direction(client, record, worker, text):
                  "sentAt": int(time.time()), "unconfirmed": True}
     directions.append(direction)
     worker["codexDirections"] = directions
+    record_sent_direction(worker, token)
     save_worker(record, worker)
     try:
         submission = client.call("thread/queue/add", {
             "threadId": thread, "clientUserMessageId": token,
-            "input": [{"type": "text", "text_elements": [], "text":
-                       "Direction from your Anderton. Follow the existing approval policy.\n\n" + text}],
+            "input": [{"type": "text", "text_elements": [], "text": DIRECTION_PREFIX + text}],
         })["queuedSubmission"]["id"]
     except (OSError, ValueError, KeyError) as error:
         # These errors reject the request before Codex writes the queue.
@@ -503,6 +504,58 @@ def queue_direction(client, record, worker, text):
     except (OSError, ValueError, KeyError) as error:
         print(f"Direction was queued. Could not update direction tracking: {error}", file=sys.stderr)
     return int(not ready)
+
+
+DIRECTION_PREFIX = "Direction from your Anderton. Follow the existing approval policy.\n\n"
+# The Anderton's sent directions kept for retire.sh; the oldest go first past this many.
+DIRECTION_LEDGER_SIZE = 500
+
+
+def record_sent_direction(worker, client_id):
+    ledger = worker.setdefault("codexDirectionLedger", {"ids": []})
+    ledger["ids"] = [*ledger["ids"], client_id][-DIRECTION_LEDGER_SIZE:]
+
+
+def inbound_since_report(client, worker, through_ms=None):
+    """The user messages in the worker's thread since its last report that its Anderton did not send, oldest first:
+    a completed turn whose final message is a report ends the scan. The Anderton's are its launch brief and the
+    directions worker.sh recorded sending, known by their client ids. Only on a record from before that ledger, whose
+    finished directions left no id behind, does the text worker.sh adds mark a direction."""
+    if not worker.get("id"):
+        raise ValueError("the record names no Codex thread")
+    thread = worker["id"]
+    read_thread(client, worker)
+    legacy = "codexDirectionLedger" not in worker
+    ledger = worker.get("codexDirectionLedger") or {}
+    sent = set(ledger.get("ids", [])) | {entry.get("clientUserMessageId", entry["id"]) for entry in pending_directions(worker)}
+    marker = f"Anderton launch {uuid.UUID(worker['codexLaunchToken'])}" if worker.get("codexLaunchToken") else None
+    first = client.call("thread/turns/list", {"threadId": thread, "sortDirection": "asc", "limit": 1,
+                                              "itemsView": "notLoaded"})["data"]
+    first = first[0]["id"] if first else None
+    held = []
+    for turn in client.pages("thread/turns/list", threadId=thread, sortDirection="desc", limit=20, itemsView="notLoaded"):
+        if turn["status"] == "completed" and final_report(client, thread, turn["id"]):
+            break
+        # An item without a time of its own may have arrived any time until its turn ended.
+        turn_end = (turn.get("completedAt") or 0) * 1000 or int(time.time() * 1000)
+        launch_turn = turn["id"] == first
+        for entry in client.pages("thread/items/list", threadId=thread, turnId=turn["id"], limit=50):
+            item = entry["item"]
+            if item["type"] != "userMessage":
+                continue
+            text = "\n".join(part["text"] for part in item["content"] if part.get("type") == "text")
+            # A time no earlier than the message's own, so a review through it covers the message.
+            at = entry.get("completedAtMs") or entry.get("startedAtMs") or turn_end
+            if item.get("clientId") in sent or (marker and launch_turn and text.partition("\n")[0] == marker):
+                continue
+            if legacy and text.startswith(DIRECTION_PREFIX):
+                continue
+            if through_ms is not None and at <= through_ms:
+                continue
+            line = next((part.strip() for part in text.splitlines() if part.strip()), "(no text)")[:200]
+            held.append({"at": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(at / 1000)) + f".{at % 1000:03d}Z",
+                         "from": "the user", "line": line})
+    return sorted(held, key=lambda message: message["at"])
 
 
 def deliver_notice(client, claim, notice):
@@ -694,6 +747,9 @@ def main():
     resume = commands.add_parser("resume-on")
     resume.add_argument("record", type=Path)
     resume.add_argument("home", type=Path)
+    inbound = commands.add_parser("inbound-since-report")
+    inbound.add_argument("record", type=Path)
+    inbound.add_argument("--reviewed-through")
     for command in ("state", "inactive", "output", "message"):
         action = commands.add_parser(command)
         action.add_argument("record", type=Path)
@@ -787,6 +843,15 @@ def main():
             if client.call("thread/queue/list", {"threadId": worker["id"], "limit": 1})["data"]:
                 return 3
             return 0 if read_thread(client, worker)["status"]["type"] in QUIET_AFTER_FAILURE else 3
+    elif args.command == "inbound-since-report":
+        through = None
+        if args.reviewed_through:
+            through = int(datetime.datetime.fromisoformat(args.reviewed_through.replace("Z", "+00:00")).timestamp() * 1000)
+        worker = json.loads(args.record.read_text())
+        with Codex(Path(worker["codexHome"])) as client:
+            held = inbound_since_report(client, worker, through)
+        print(json.dumps({"messages": held}))
+        return 4 if held else 0
     elif args.command == "resume-on":
         resume_on(json.loads(args.record.read_text()), args.home)
     elif args.command == "blocker-during-notice":
