@@ -6,7 +6,7 @@
 #                       [--replace-hooks]
 #   --home       the user's home, default from the passwd database.
 #   --guard      plugins/workflow-agents/hooks of a reviewed bootstrap checkout; it is copied, not referenced.
-#   --scope-dir  where the guard reads its untracked *-scope.local.json and response-secrets.local.json, default the
+#   --scope-dir  where the guard reads its untracked merge-scope.local.json and response-secrets.local.json, default the
 #                root of the --guard checkout. The installed copy has no checkout above it, so the hook names them.
 #   --prefix   default /opt. The release, launcher and pin go under PREFIX/agy, the guard under PREFIX/agy-guard.
 #   --pin      default agy.pin beside this script.
@@ -105,8 +105,10 @@ fi
 
 # agy runs every hook in this file; the launcher refuses to start unless it still has exactly these bytes.
 hooks="$home/.gemini/config/hooks.json"
-scope_env="BOOTSTRAP_MERGE_SCOPE_FILE=$scope/merge-scope.local.json BOOTSTRAP_DEV_SCOPE_FILE=$scope/dev-scope.local.json"
-scope_env="$scope_env BOOTSTRAP_LAB_SCOPE_FILE=$scope/lab-scope.local.json BOOTSTRAP_RESPONSE_SECRETS_FILE=$scope/response-secrets.local.json"
+# Dev and lab scope only exempt commands from approval, and agy has no approval channel, so its guard reads neither:
+# an empty value is the guard's "no file". Merge scope and response secrets only tighten it.
+scope_env="BOOTSTRAP_MERGE_SCOPE_FILE=$scope/merge-scope.local.json BOOTSTRAP_RESPONSE_SECRETS_FILE=$scope/response-secrets.local.json"
+scope_env="$scope_env BOOTSTRAP_DEV_SCOPE_FILE= BOOTSTRAP_LAB_SCOPE_FILE="
 registration=$(printf '{"agent-anderton-agy-guard":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=%s %s /bin/bash %s/agy-guard.sh PreToolUse","timeout":%s}]}]}}' "$home" "$scope_env" "$dest" "$hook_timeout")
 expected=$(printf '%s' "$registration" | sha256sum | cut -d' ' -f1)
 if [ -f "$hooks" ] && [ "$(sha256sum "$hooks" | cut -d' ' -f1)" != "$expected" ] && [ -z "$replace" ]; then

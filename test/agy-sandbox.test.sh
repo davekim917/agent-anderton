@@ -39,13 +39,16 @@ home="$work/home"
 "$scripts/install-agy.sh" --user "$(id -un)" --home "$home" --guard "$work/guard" --scope-dir "$work/scope" \
   --prefix "$work/opt" --pin "$work/agy.pin" --tarball "$work/release.tar.gz" >/dev/null
 
-# The registration outlasts the wrapper's watchdog and names the scope files, which the installed copy cannot find.
+# The registration outlasts the wrapper's watchdog and names the files that tighten the guard, which the installed
+# copy cannot find; the dev and lab scopes, which only exempt commands from approval, are set empty so none is read.
 hook=$(jq -r '.["agent-anderton-agy-guard"].PreToolUse[0].hooks[0]' "$home/.gemini/config/hooks.json")
 [ "$(jq '.timeout' <<<"$hook")" -gt 3630 ] || fail "the hook timeout does not outlast the guard's watchdog"
-for name in MERGE_SCOPE_FILE=merge-scope DEV_SCOPE_FILE=dev-scope LAB_SCOPE_FILE=lab-scope RESPONSE_SECRETS_FILE=response-secrets; do
-  case $(jq -r '.command' <<<"$hook") in
-    *" BOOTSTRAP_${name%%=*}=$work/scope/${name#*=}.local.json "*) ;;
-    *) fail "the hook command does not set BOOTSTRAP_${name%%=*}" ;;
+hook_words=" $(jq -r '.command' <<<"$hook") "
+for want in "BOOTSTRAP_MERGE_SCOPE_FILE=$work/scope/merge-scope.local.json" \
+  "BOOTSTRAP_RESPONSE_SECRETS_FILE=$work/scope/response-secrets.local.json" BOOTSTRAP_DEV_SCOPE_FILE= BOOTSTRAP_LAB_SCOPE_FILE=; do
+  case $hook_words in
+    *" $want "*) ;;
+    *) fail "the hook command does not set $want" ;;
   esac
 done
 [ -f "$(sed -n 's/^guard=//p' "$work/opt/agy/etc/pin")/guard-reply.ts" ] || fail "the installed guard has no guard-reply.ts"
