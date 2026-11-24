@@ -67,7 +67,7 @@ awk 'NR == 1 { if ($0 != "---") exit; next }
   END { exit (closed && found) ? 0 : 1 }' "$root/skills/anderton/SKILL.md" ||
   fail "SKILL.md frontmatter must set disable-model-invocation: true"
 
-for script in claim.sh waiting.sh spawn.sh retire.sh adopt.sh watch.sh prompt.sh report-gate.sh codex-anderton.sh worker.sh role-message.sh; do
+for script in claim.sh waiting.sh spawn.sh retire.sh adopt.sh watch.sh prompt.sh report-gate.sh codex-anderton.sh worker.sh role-message.sh install-agy.sh register-agy.sh agy-sandbox.sh; do
   [ -x "$root/skills/anderton/scripts/$script" ] || fail "scripts/$script must exist and be executable"
 done
 [ -f "$root/skills/anderton/scripts/session-lib.sh" ] || fail "scripts/session-lib.sh must exist"
