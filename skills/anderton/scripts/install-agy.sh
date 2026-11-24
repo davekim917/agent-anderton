@@ -121,14 +121,14 @@ while :; do
   dir=$(dirname "$dir")
 done
 # What an earlier install left under the prefix is read back (sandbox.conf) or kept (a complete guard copy), so all of
-# it must be the installer's own too: owned by root (or by you, when not root), writable by no one else, no file a link.
+# it must be the installer's own too: owned by root (or by you, when not root), writable by no one else, and no link.
 for top in "$prefix/agy" "$prefix/agy-guard"; do
   [ -e "$top" ] || [ -L "$top" ] || continue
-  bad=$(find "$top" \( ! -user "$(id -u)" -o \( ! -type l -perm /022 \) \) -print -quit) || die "could not check $top."
+  # A link is followed by what reads it, and its target is not checked here, so the install holds none.
+  bad=$(find "$top" -type l -print -quit) || die "could not check $top."
+  [ -z "$bad" ] || die "$bad, under the prefix, is a symbolic link; remove it, then rerun."
+  bad=$(find "$top" \( ! -user "$(id -u)" -o -perm /022 \) -print -quit) || die "could not check $top."
   [ -z "$bad" ] || die "$bad, under the prefix, is not owned by $(id -un) or is writable by others; remove it, then rerun."
-done
-for path in "$prefix/agy/etc/sandbox.conf" "$prefix/agy/etc"; do
-  [ ! -L "$path" ] || die "$path is a symbolic link; remove it, then rerun."
 done
 [ -n "$bwrap" ] || bwrap=$(command -v bwrap) || die "bwrap is not installed; pass --bwrap."
 bwrap=$(readlink -f "$bwrap")
@@ -185,7 +185,10 @@ dest="$prefix/agy-guard/$digest"
 if [ ! -f "$dest/.complete" ]; then
   if [ -f "$copy/package.json" ]; then
     (cd "$copy" && "$bun" install --production --frozen-lockfile --ignore-scripts >/dev/null) || die "could not install the guard's dependencies."
+    # bun's install cache, which nothing runs from, links into this installer's temporary directory under /tmp.
+    rm -rf "$copy/node_modules/.cache"
   fi
+  [ -z "$(find "$copy" -type l -print -quit)" ] || die "the guard's dependencies hold a symbolic link: $(find "$copy" -type l -print -quit)"
   install -d -m 0755 "$prefix/agy-guard"
   rm -rf "$dest"
   cp -a "$copy" "$dest"

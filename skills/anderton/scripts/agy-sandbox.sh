@@ -263,7 +263,8 @@ while IFS= read -r -d '' path; do included+=("$path"); done < <(
   for file in "${config_files[@]}"; do include_targets "$file" 0; done)
 for path in "${included[@]}"; do [ ! -f "$path" ] || config_files+=("$path"); done
 for path in "${config_files[@]}"; do
-  [ "$(stat -c %h "$path")" -le 1 ] || die "git configuration file $path has another hard link; remove it before starting agy."
+  # git reads the file a link names, so its links are what count.
+  [ "$(stat -L -c %h "$path")" -le 1 ] || die "git configuration file $path has another hard link; remove it before starting agy."
 done
 for path in "${included[@]}"; do
   for check in "$path" "$(readlink -f "$path")"; do
@@ -286,15 +287,13 @@ for path in "${config_files[@]}"; do
     case $(printf '%s' "$value" | tr '[:upper:]' '[:lower:]') in true | false | yes | no | on | off | 1 | 0 | '') continue ;; esac
     resolves_writable "${value%% *}" && die "git configuration sets core.fsmonitor $value, inside a directory agy can write."
   done < <(config_values "$path" '^core\.fsmonitor$')
+  # A filter command can name a script the worker writes later, so only git-lfs's own commands are let through.
   while IFS= read -r -d '' value; do
     read -r -a words <<<"$value"
-    for word in "${words[@]}"; do
-      case $word in
-        */*) resolves_writable "$word" || continue ;;
-        *) [ -e "$wt/$word" ] || continue ;;
-      esac
-      die "git configuration runs the filter command '$value', which names $word inside a directory agy can write."
-    done
+    case ${words[*]} in
+      "git-lfs filter-process" | "git-lfs clean -- %f" | "git-lfs smudge -- %f") ;;
+      *) die "git configuration runs the filter command '$value'; only git-lfs's filter-process, clean -- %f and smudge -- %f may run where agy works." ;;
+    esac
   done < <(config_values "$path" '^filter\..*\.(clean|smudge|process)$')
 done
 

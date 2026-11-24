@@ -325,6 +325,15 @@ if got=$(install_root "$prefixroot/opt" 2>&1); then fail "install read back a li
 fi
 rm "$prefixroot/opt/agy/etc/sandbox.conf"
 cp "$work/conf.installed" "$prefixroot/opt/agy/etc/sandbox.conf"
+# A guard directory that is a link the installer owns, to a directory someone else could write, is refused too.
+mv "$prefixroot/opt/agy-guard" "$work/agy-guard.installed"
+mkdir "$work/guard-elsewhere"
+ln -s "$work/guard-elsewhere" "$prefixroot/opt/agy-guard"
+if got=$(install_root "$prefixroot/opt" 2>&1); then fail "install used a linked agy-guard directory"; else
+  case $got in *"is a symbolic link"*) ;; *) fail "install refused a linked agy-guard directory for another reason: $got" ;; esac
+fi
+rm "$prefixroot/opt/agy-guard"
+mv "$work/agy-guard.installed" "$prefixroot/opt/agy-guard"
 (umask 022 && touch "$prefixroot/opt/agy/etc/user-owned-test-install")
 cp "$prefixroot/opt/agy/libexec/agy-guard-hook" "$work/hook.saved"
 echo "# changed" >> "$prefixroot/opt/agy/libexec/agy-guard-hook"
@@ -343,9 +352,14 @@ echo '[example]' > "$common/config.local"
 ln "$common/config.local" "$work/wt-example/config-local-alias"
 refuses "an included git configuration file has another hard link" "another hard link"
 rm "$work/wt-example/config-local-alias" "$common/config.local"
+# The same through a link: the included name is a symbolic link to a file with a second hard link in the worktree.
+echo '[example]' > "$work/config-target"
+ln "$work/config-target" "$work/wt-example/config-target-alias"
+ln -s "$work/config-target" "$common/config.local"
+refuses "an included git configuration file links to a file with another hard link" "another hard link"
+rm "$work/wt-example/config-target-alias" "$common/config.local" "$work/config-target"
 # Commands git would run from a writable root: a hook directory, an fsmonitor and a filter, relative or not.
-for setting in "core.hooksPath .githooks" "core.hooksPath $work/wt-example/hooks" "core.fsmonitor ./fsmonitor.sh" \
-  "filter.example.clean sh ./fmt.sh" "filter.example.process $home/.cache/example-filter"; do
+for setting in "core.hooksPath .githooks" "core.hooksPath $work/wt-example/hooks" "core.fsmonitor ./fsmonitor.sh"; do
   key=${setting%% *}
   git -C "$work/repo" config "$key" "${setting#* }"
   echo x > "$work/wt-example/fmt.sh"
@@ -353,10 +367,20 @@ for setting in "core.hooksPath .githooks" "core.hooksPath $work/wt-example/hooks
   git -C "$work/repo" config --unset "$key"
   rm "$work/wt-example/fmt.sh"
 done
+# A filter command can name a script the worker writes after launch, so only git-lfs's commands may run.
+for value in "sh ./fmt.sh" "$home/.cache/example-filter" "sh formatter.sh" "git-lfs filter-process --verbose"; do
+  git -C "$work/repo" config filter.example.clean "$value"
+  refuses "git configuration sets the filter command '$value'" "only git-lfs's filter-process"
+  git -C "$work/repo" config --unset filter.example.clean
+done
 git -C "$work/repo" config filter.example.process "git-lfs filter-process"
+git -C "$work/repo" config filter.example.clean "git-lfs clean -- %f"
+git -C "$work/repo" config filter.example.smudge "git-lfs smudge -- %f"
 git -C "$work/repo" config core.fsmonitor false
 run true >/dev/null 2>&1 || fail "the launcher refused a filter run from PATH and core.fsmonitor false"
 git -C "$work/repo" config --unset filter.example.process
+git -C "$work/repo" config --unset filter.example.clean
+git -C "$work/repo" config --unset filter.example.smudge
 git -C "$work/repo" config --unset core.fsmonitor
 # Everything above the hook, the guard and the bun must be the installer's own and writable by no one else, and
 # outside every writable root.

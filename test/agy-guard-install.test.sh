@@ -48,6 +48,10 @@ installed=$(sed -n 's/^guard=//p' "$prefixroot/opt/agy/etc/pin")
 for file in agy-guard.sh agy-guard.ts agy-supervisor.ts guard-policy.ts; do
   cmp -s "$AGY_GUARD_CHECKOUT/plugins/workflow-agents/hooks/$file" "$installed/$file" || fail "the installed $file differs from the checkout's"
 done
+# bun's install cache linked into the installer's temporary directory; the installed tree holds no link, and the guard
+# below still answers without it.
+link=$(find "$prefixroot/opt" -type l -print -quit)
+[ -z "$link" ] || fail "the install holds a symbolic link: $link -> $(readlink "$link")"
 
 # The hook command as agy runs it, by a shell or as words split on spaces: both must reach the guard.
 command=$(jq -r '.["agent-anderton-agy-guard"].PreToolUse[0].hooks[0].command' "$home/.gemini/config/hooks.json")
