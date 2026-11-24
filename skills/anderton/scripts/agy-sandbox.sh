@@ -74,14 +74,23 @@ scope_files() {
 }
 
 inside() {
-  local wt common gitdir path options guard bun bun_version deadline hook_timeout
+  local wt common gitdir path options guard bun bun_version deadline hook_timeout overflow
   # The caller's PATH chose nothing so far; every tool below is named by its path.
   [ "$(/usr/bin/tr -d '\0' < /proc/1/comm 2>/dev/null)" = bwrap ] || die "--inside runs only as bwrap's child."
   case ,$(/usr/bin/findmnt -rn -o OPTIONS --mountpoint / | /usr/bin/head -n 1), in *,ro,*) ;; *) die "/ is not read-only here." ;; esac
   wt=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || die "not inside a git worktree."
   common=$(cd "$(/usr/bin/git rev-parse --git-common-dir)" && pwd -P)
   gitdir=$(cd "$(/usr/bin/git rev-parse --absolute-git-dir)" && pwd -P)
-  [ "$(owner_of "$base")" = 0 ] || [ -e "$base/etc/user-owned-test-install" ] || die "$base is not root-owned."
+  # In this user namespace only the worker's uid is mapped, so a root-owned install shows as the overflow uid (0 only
+  # under a setuid bwrap, which makes none). The launcher proved the real owner before bwrap started; here the install
+  # must still not be the worker's own, apart from a test install.
+  overflow=$(/usr/bin/cat /proc/sys/kernel/overflowuid 2>/dev/null) || overflow=""
+  case $(owner_of "$base") in
+    0) ;;
+    "$(/usr/bin/id -u)") [ -e "$base/etc/user-owned-test-install" ] || die "$base is not root-owned." ;;
+    "$overflow") ;;
+    *) die "$base is not root-owned." ;;
+  esac
   [ "$(sha256 "$agy")" = "$(pinned binary_sha256)" ] || die "$agy does not match its pinned digest."
   [ "$(sha256 "$gemini/config/hooks.json")" = "$(pinned hooks_sha256)" ] ||
     die "$gemini/config/hooks.json is not the guard registration install-agy.sh wrote."
