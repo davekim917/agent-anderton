@@ -197,10 +197,11 @@ owner_of() {
 
 # agy loads hooks and plugins from the .agents directory of the worktree, which it treats as the workspace root. A
 # hooks.json there would load; a link there, even a dangling one, could point at a file the worker can still write.
-# agy also loads custom agent definitions from .agents/agents and ~/.gemini/config/agents when it starts, and one with
-# inheritCustomizations: false, or inheritScopes none or repo_and_org, runs its subagent with no hooks at all.
+# agy also loads custom agent definitions when it starts: from .agents/agents, ~/.gemini/config/agents and the agents
+# directory of a plugin. One with inheritCustomizations: false, or inheritScopes none or repo_and_org, runs its subagent
+# with no hooks at all, so the guard would not see it.
 refuse_workspace_config() {
-  local entry agents="$gemini/config/agents"
+  local entry plugin
   for entry in hooks.json plugins plugins.json plugins.txt; do
     if [ "$entry" = hooks.json ] && { [ -e "$wt/.agents/$entry" ] || [ -L "$wt/.agents/$entry" ]; }; then
       die "$wt/.agents/hooks.json exists; workspace hooks can switch the guard off."
@@ -212,15 +213,36 @@ refuse_workspace_config() {
   if [ -e "$wt/.agents/agents" ] || [ -L "$wt/.agents/agents" ]; then
     die "$wt/.agents/agents exists; a custom agent defined there can run its subagent with no hooks, so the guard would not see it."
   fi
-  if [ -L "$agents" ]; then
-    die "$agents is a symbolic link; its target could stay writable, and a custom agent there can run its subagent with no hooks."
+  # The other names agy reads as a workspace root, like .agents, and which are not read-only in the sandbox.
+  for entry in .agent _agents _agent; do
+    if [ -e "$wt/$entry" ] || [ -L "$wt/$entry" ]; then
+      die "$wt/$entry exists; agy reads it as a workspace customization root, so its hooks or custom agents could switch the guard off."
+    fi
+  done
+  refuse_agent_definitions "$gemini/config/agents"
+  for plugin in "$gemini/config/plugins" "$wt/.agents/plugins"; do
+    [ -d "$plugin" ] || continue
+    for entry in "$plugin"/* "$plugin"/.[!.]* "$plugin"/..?*; do
+      if [ -L "$entry" ]; then
+        die "$entry is a symbolic link; its target could stay writable, and a plugin's custom agent can run its subagent with no hooks."
+      fi
+      [ ! -d "$entry" ] || refuse_agent_definitions "$entry/agents"
+    done
+  done
+}
+
+# refuse_agent_definitions <dir>: the directory may be missing or empty, never a link or anything holding a definition.
+refuse_agent_definitions() {
+  local dir=$1 entry
+  if [ -L "$dir" ]; then
+    die "$dir is a symbolic link; its target could stay writable, and a custom agent there can run its subagent with no hooks."
   fi
-  [ -e "$agents" ] || return 0
-  [ -d "$agents" ] && [ -r "$agents" ] && [ -x "$agents" ] ||
-    die "$agents is not a directory agy-sandbox can list; a custom agent there can run its subagent with no hooks."
-  for entry in "$agents"/* "$agents"/.[!.]* "$agents"/..?*; do
+  [ -e "$dir" ] || return 0
+  [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] ||
+    die "$dir is not a directory agy-sandbox can list; a custom agent there can run its subagent with no hooks."
+  for entry in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
     if [ -e "$entry" ] || [ -L "$entry" ]; then
-      die "$agents is not empty ($entry); a custom agent there can run its subagent with no hooks, so the guard would not see it."
+      die "$dir is not empty ($entry); a custom agent there can run its subagent with no hooks, so the guard would not see it."
     fi
   done
 }
@@ -517,7 +539,11 @@ mkdir -p "$wt/.agents"
 for path in "$gemini/hooks.json" "$state/hooks.json"; do
   [ -f "$path" ] || die "$path is missing; run install-agy.sh."
 done
-for entry in agents plugins rules skills workflows secplugins builtin; do mkdir -p "$state/$entry"; done
+for entry in agents plugins rules skills workflows secplugins; do mkdir -p "$state/$entry"; done
+# agy unpacks its built-ins there on a run outside the sandbox, and rewrites them only when their checksum changes. Read
+# only here, an empty stand-in would leave agy without them.
+[ -d "$state/builtin" ] && [ ! -L "$state/builtin" ] ||
+  die "$state/builtin is missing; run agy once outside the sandbox ($agy, as the owner signs in) to seed it, then start the worker."
 while IFS= read -r path; do add_ro "$path"; done <<EOF
 $(read_only_paths "$wt" "$gitdir")
 EOF

@@ -460,6 +460,51 @@ mkdir "$work/agents-target"
 ln -s "$work/agents-target" "$home/.gemini/config/agents"
 refuses "the user's config/agents is a link to an empty directory" "config/agents is a symbolic link"
 rm "$home/.gemini/config/agents"
+# agy also reads .agent, _agents and _agent as customization roots, like .agents; the worktree may hold none of them.
+for alias in .agent _agents _agent; do
+  mkdir "$work/wt-example/$alias"
+  refuses "the worktree has a $alias directory" "/$alias exists;"
+  rmdir "$work/wt-example/$alias"
+  : > "$work/wt-example/$alias"
+  refuses "the worktree has a $alias file" "/$alias exists;"
+  rm "$work/wt-example/$alias"
+  ln -s ../alias-elsewhere "$work/wt-example/$alias"
+  refuses "the worktree has a dangling $alias link" "/$alias exists;"
+  rm "$work/wt-example/$alias"
+done
+# A plugin's agents directory loads its definitions too, in the user's plugins and the worktree's; empty, it may stay.
+mkdir -p "$home/.gemini/config/plugins/example/agents"
+echo '{}' > "$home/.gemini/config/plugins/example/plugin.json"
+run true >/dev/null 2>&1 || fail "the launcher refused a user plugin with an empty agents directory: $(run true 2>&1)"
+printf -- '---\nname: example-agent\n---\n' > "$home/.gemini/config/plugins/example/agents/example-agent.md"
+refuses "a user plugin holds an agent definition" "plugins/example/agents is not empty"
+mv "$home/.gemini/config/plugins/example" "$work/plugin-elsewhere"
+ln -s "$work/plugin-elsewhere" "$home/.gemini/config/plugins/example"
+refuses "a user plugin is a link" "plugins/example is a symbolic link"
+rm "$home/.gemini/config/plugins/example"
+rm -r "$work/plugin-elsewhere"
+mkdir -p "$work/wt-example/.agents/plugins/example/agents"
+printf -- '---\nname: example-agent\n---\n' > "$work/wt-example/.agents/plugins/example/agents/example-agent.md"
+refuses "a worktree plugin holds an agent definition" ".agents/plugins/example/agents is not empty"
+rm -r "$work/wt-example/.agents/plugins"
+# agy unpacks its built-ins on an unsandboxed run; the launcher never stands an empty directory in for them.
+mv "$home/.gemini/antigravity-cli/builtin" "$work/builtin.saved"
+refuses "agy's built-ins are missing" "builtin is missing; run"
+[ ! -e "$home/.gemini/antigravity-cli/builtin" ] || fail "the launcher created a missing builtin directory"
+mv "$work/builtin.saved" "$home/.gemini/antigravity-cli/builtin"
+# A definition that appears after the checks before bwrap, as the sandbox starts, is refused by the checks inside it:
+# the pinned bwrap, wrapped, plants one on the host just before it builds the real (not the dry-run) view.
+cp "$prefixroot/opt/agy/etc/pin" "$work/pin.saved"
+printf '#!/bin/sh\ncase " $* " in *" --inside "*) mkdir -p "%s" ;; esac\nexec "%s" "$@"\n' \
+  "$work/wt-example/.agents/agents" "$(sed -n 's/^bwrap=//p' "$work/pin.saved")" > "$work/bwrap-plant"
+chmod 0755 "$work/bwrap-plant"
+sed -i "s|^bwrap=.*|bwrap=$work/bwrap-plant|" "$prefixroot/opt/agy/etc/pin"
+if got=$(run "echo ran > agy-ran" 2>&1); then fail "started although a custom agent directory appeared as the sandbox started"; fi
+case $got in *".agents/agents exists"*) ;; *) fail "the inside check refused a definition planted as the sandbox started for the wrong reason: $got" ;; esac
+[ -d "$work/wt-example/.agents/agents" ] && [ ! -e "$work/wt-example/agy-ran" ] ||
+  fail "the planted definition was not there, or agy ran, when the inside check ran"
+rm -rf "$work/wt-example/.agents/agents" "$work/wt-example/agy-ran"
+cp "$work/pin.saved" "$prefixroot/opt/agy/etc/pin"
 ln -s ../outside-hooks.json "$work/wt-example/.agents/hooks.json"
 rm "$work/wt-example/.agents/hooks.json"
 mv "$home/.cache" "$home/cache-target"

@@ -226,6 +226,11 @@ than this one left there can still hold bun's `node_modules/.cache` links, and t
 names the link. Remove that copy, `<prefix>/agy-guard/<digest>`, and rerun. Nothing is installed in `/opt` yet, so no
 such copy exists today.
 
+**Known limit, agy versions:** agy unpacks its built-in plugins and skills into `~/.gemini/antigravity-cli/builtin` on a
+run, and rewrites them only when their checksum changes. The launcher keeps that directory read-only and refuses to
+start without it, so after any change of agy version, run agy once unsandboxed, as the worker user (the login command
+above), to reseed it before any worker starts.
+
 `test/agy-guard-install.test.sh` installs from the bootstrap commit in `test/agy-guard.commit` and checks the installed
 hook's replies, run both by a shell and as split words. CI runs it.
 
@@ -259,13 +264,17 @@ Just before agy starts, it refuses to run unless all of these hold, checked insi
   timeout;
 - agy has a non-empty stored login;
 - no `.agents/hooks.json` sits above the worktree;
-- the worktree has no `.agents/agents` at all (directory, file or link), and `~/.gemini/config/agents` is missing or an
-  empty directory, never a link;
+- the worktree has no `.agents/agents` at all (directory, file or link), and no `.agent`, `_agents` or `_agent`, the
+  other names agy reads as a workspace customization root;
+- `~/.gemini/config/agents`, and the `agents` directory of every plugin in `~/.gemini/config/plugins/` and the
+  worktree's `.agents/plugins/`, is missing or an empty directory, never a link, and no plugin there is a link;
 - every protected path is mounted read-only;
 - the guard's policy files are not writable.
 
 Before that it also refuses:
 - a policy file inside a writable root;
+- a missing `~/.gemini/antigravity-cli/builtin` (agy's built-in plugins and skills); it never stands an empty, read-only
+  directory in for them;
 - a second hard link to any protected file;
 - a git configuration include (plain or conditional, from the system, global or repository config, followed
   recursively) of a file inside a writable root, and any git configuration file with a second hard link;
@@ -282,9 +291,15 @@ Inside, it also checks that `hookbin/` holds only the pinned bun, byte for byte,
 **Agent definitions.** agy loads custom agent definitions (`<name>.md` or `<name>/agent.md`) from the worktree's
 `.agents/agents/` and from `~/.gemini/config/agents/`. One whose frontmatter sets `inheritCustomizations: false`, or
 `inheritScopes` to `none` or `repo_and_org`, runs its subagent with no hooks, so the guard never sees what that subagent
-does. Both directories are read-only inside the sandbox, but a repository can ship `.agents/agents`, and a worker can
-commit one for a later worktree to check out, so the launcher refuses to start instead. A repository that ships agent
-definitions cannot run agy workers.
+does. A plugin's `agents/` directory loads the same way. These directories are read-only inside the sandbox, but a
+repository can ship `.agents/agents`, and a worker can commit one for a later worktree to check out, so the launcher
+refuses to start instead. A repository that ships agent definitions, or uses `.agent`, `_agents` or `_agent` at its
+root, cannot run agy workers.
+
+**Known limit, startup window:** the checks inside the sandbox run just before agy starts, and agy discovers agent
+definitions after that. The protected directories are read-only only to the worker: a process on the host that writes
+one in that window (a checkout into the worktree, say) gets its definition loaded, and the read-only bind keeps it
+there. Nothing on the host should write a worker's worktree or `~/.gemini/config` while the worker starts.
 
 `/opt/agy/etc/sandbox.conf` starts with masks for the credential stores and, with `--nanoclaw`, that install's `data/` and
 `.env`. Add lines, owned by root. A leading `~/` is the home; every other character, brackets and `*` and `?` included,
