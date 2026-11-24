@@ -50,7 +50,16 @@ bundir=$(mktemp -d /tmp/agy-sandbox-bun.XXXXXX)
 # which the launcher keeps writable) is not: a directory of this user's own home is.
 prefixroot=$(mktemp -d "$HOME/.agy-sandbox-prefix.XXXXXX")
 chmod 0755 "$prefixroot"
-trap 'rm -rf "$work" "$bundir" "$prefixroot"' EXIT
+rootdir=""
+cleanup() {
+  chmod u+w "$home/.bun" 2>/dev/null || true
+  if [ -n "$rootdir" ]; then
+    sudo -n chown -R "$(id -u)" "$home/.bun" 2>/dev/null || true
+    sudo -n rm -rf "$rootdir"
+  fi
+  rm -rf "$work" "$bundir" "$prefixroot"
+}
+trap cleanup EXIT
 printf '#!/bin/sh\necho 1.4.2\n' > "$bundir/bun"
 chmod 0755 "$bundir/bun"
 install_root() { # install_root <prefix> [args...]: the root stage, as this user
@@ -64,9 +73,20 @@ chmod 0555 "$home"
 install_root "$prefixroot/opt" >/dev/null || fail "the root stage failed with the home unwritable"
 chmod 0755 "$home"
 [ -z "$(ls -A "$home")" ] || fail "the root stage wrote in the home: $(ls -A "$home")"
-HOME="$home" "$scripts/register-agy.sh" --prefix "$prefixroot/opt" >/dev/null
-# The owner's login leaves this file; the launcher refuses to start agy without it.
+# Before the owner's first login, agy has not migrated its configuration, and that migration would replace a
+# registration written now: register-agy.sh refuses, and writes nothing.
+if got=$(HOME="$home" "$scripts/register-agy.sh" --prefix "$prefixroot/opt" 2>&1); then
+  fail "register-agy.sh registered before agy's first login"
+else
+  case $got in *"log in once"*) ;; *) fail "register-agy.sh refused before agy's first login for another reason: $got" ;; esac
+fi
+[ ! -e "$home/.gemini" ] || fail "register-agy.sh wrote in the home before agy's first login: $(find "$home/.gemini")"
+# The owner's login leaves agy's migration marker and its stored login; the launcher refuses to start agy without the
+# login.
+mkdir -p "$home/.gemini/config" "$home/.gemini/antigravity-cli"
+: > "$home/.gemini/config/.migrated"
 echo example-token > "$home/.gemini/antigravity-cli/antigravity-oauth-token"
+HOME="$home" "$scripts/register-agy.sh" --prefix "$prefixroot/opt" >/dev/null
 
 # The registration outlasts the supervisor's deadline and runs a hook that names the files that tighten the guard, which
 # the installed copy cannot find; the dev and lab scopes, which only exempt commands from approval, are set empty so
@@ -100,11 +120,12 @@ rm "$home/.gemini/config/hooks.json"
 mv "$work/hooks.json.saved" "$home/.gemini/config/hooks.json"
 mv "$home/.gemini/config" "$work/config.saved"
 mkdir "$work/config-elsewhere"
+: > "$work/config-elsewhere/.migrated"
 ln -s "$work/config-elsewhere" "$home/.gemini/config"
 if HOME="$home" "$scripts/register-agy.sh" --prefix "$prefixroot/opt" >/dev/null 2>&1; then
   fail "register-agy.sh accepted a linked ~/.gemini/config"
 fi
-[ -z "$(ls -A "$work/config-elsewhere")" ] || fail "register-agy.sh wrote through a linked ~/.gemini/config"
+[ "$(ls -A "$work/config-elsewhere")" = .migrated ] || fail "register-agy.sh wrote through a linked ~/.gemini/config"
 rm "$home/.gemini/config"
 mv "$work/config.saved" "$home/.gemini/config"
 mv "$home/.gemini/hooks.json" "$work/gemini-hooks.saved"
@@ -114,6 +135,30 @@ if HOME="$home" "$scripts/register-agy.sh" --prefix "$prefixroot/opt" >/dev/null
 fi
 rm "$home/.gemini/hooks.json"
 mv "$work/gemini-hooks.saved" "$home/.gemini/hooks.json"
+# agy's migration, after a registration written before the first login, moves the legacy antigravity-cli/hooks.json
+# ({}) over config/hooks.json and leaves a link to it in its place. Rerun then, register-agy.sh writes the registration
+# back and replaces the link, relative or absolute, with an empty file of its own.
+pinned_hooks=$(sed -n 's/^hooks_sha256=//p' "$prefixroot/opt/agy/etc/pin")
+for target in "$home/.gemini/config/hooks.json" ../config/hooks.json; do
+  printf '{}' > "$home/.gemini/config/hooks.json"
+  rm "$home/.gemini/antigravity-cli/hooks.json"
+  ln -s "$target" "$home/.gemini/antigravity-cli/hooks.json"
+  got=$(HOME="$home" "$scripts/register-agy.sh" --prefix "$prefixroot/opt" 2>&1) || fail "register-agy.sh refused agy's migration link to $target: $got"
+  [ -f "$home/.gemini/antigravity-cli/hooks.json" ] && [ ! -L "$home/.gemini/antigravity-cli/hooks.json" ] &&
+    [ "$(cat "$home/.gemini/antigravity-cli/hooks.json")" = '{}' ] ||
+    fail "register-agy.sh did not replace agy's migration link to $target with an empty hook file"
+  [ "$(sha256sum "$home/.gemini/config/hooks.json" | cut -d' ' -f1)" = "$pinned_hooks" ] ||
+    fail "register-agy.sh did not write the registration back over agy's migration (link to $target)"
+done
+# A link there to anything else is refused, and nothing is written through it.
+rm "$home/.gemini/antigravity-cli/hooks.json"
+ln -s "$work/canary" "$home/.gemini/antigravity-cli/hooks.json"
+if HOME="$home" "$scripts/register-agy.sh" --prefix "$prefixroot/opt" >/dev/null 2>&1; then
+  fail "register-agy.sh accepted a link to another file where agy's state hook file goes"
+fi
+[ "$(cat "$work/canary")" = canary ] || fail "register-agy.sh wrote through a link to $(cat "$work/canary")"
+rm "$home/.gemini/antigravity-cli/hooks.json"
+printf '{}' > "$home/.gemini/antigravity-cli/hooks.json"
 HOME="$home" "$scripts/register-agy.sh" --prefix "$prefixroot/opt" >/dev/null || fail "register-agy.sh did not rerun cleanly"
 
 # The install refuses a guard checkout without the supervisor its wrapper execs, or whose deadline falls outside the
@@ -249,6 +294,26 @@ done
 [ ! -e "$home/.cache/example" ] && [ ! -e "$home/.cache/pre-commit-example" ] ||
   fail "a write to the worker's ~/.cache reached the host's"
 ls "$home"/.cache/anderton-agy/*/cache/pre-commit-example >/dev/null 2>&1 || fail "the worker's private cache kept nothing"
+# A ~/.bun this user cannot write (one root installed bun into) and that holds no install cache yet: the launcher
+# writes nothing under it and still starts, the worker gets a private bun cache there, and sees the rest read-only.
+mkdir -p "$home/.bun/bin"
+printf '#!/bin/sh\necho example-bun-tool\n' > "$home/.bun/bin/example-tool"
+chmod 0755 "$home/.bun/bin/example-tool"
+rm -rf "$home/.bun/install"
+chmod 0555 "$home/.bun"
+# shellcheck disable=SC2016 # expanded inside the sandbox
+bun_attempts='
+"$HOME"/.bun/bin/example-tool
+if echo x > "$HOME"/.bun/install/cache/example-package; then echo "wrote bun-cache"; fi
+if (echo x > "$HOME"/.bun/planted) 2>/dev/null; then echo "wrote bun-home"; else echo "denied bun-home"; fi
+'
+out=$(run "$bun_attempts" 2>&1) || fail "the launcher did not start with an unwritable ~/.bun: $out"
+for line in example-bun-tool "wrote bun-cache" "denied bun-home"; do
+  printf '%s\n' "$out" | grep -qx "$line" || fail "with an unwritable ~/.bun, the worker did not report '$line': $out"
+done
+[ "$(ls -A "$home/.bun")" = bin ] || fail "the launcher or worker wrote under an unwritable ~/.bun: $(ls -A "$home/.bun")"
+ls "$home"/.cache/anderton-agy/*/bun/example-package >/dev/null 2>&1 || fail "the worker's bun cache under an unwritable ~/.bun is not its private one"
+chmod 0755 "$home/.bun"
 
 # The pid the launcher writes to the file spawn.sh names is its bwrap, with the sandbox in a child of it, started from
 # the pane herdr placed it in: what spawn.sh proves before it sends a brief.
@@ -512,6 +577,48 @@ printf '#!/bin/sh\necho rw,ro\n' > "$work/fakebin/findmnt"
 chmod +x "$work/fakebin/findmnt"
 if (cd "$work/wt-example" && HOME="$home" PATH="$work/fakebin:$PATH" "$agy" --inside true) >/dev/null 2>&1; then
   fail "--inside started agy outside the sandbox"
+fi
+
+# A real install is root's, and inside the sandbox's user namespace root is unmapped: the checks there see the install
+# as owned by the overflow uid. Installed by root with no test marker, the launcher must still start agy, also with
+# the ~/.bun root owns on such a host. Root is needed, so this runs only where AGY_SANDBOX_SUDO=1 says passwordless sudo
+# may install as root (CI's Linux runner); asked for and unavailable, it fails.
+if [ "${AGY_SANDBOX_SUDO:-}" != 1 ]; then
+  echo "agy-sandbox: root-owned install skipped (set AGY_SANDBOX_SUDO=1 where passwordless sudo may install as root)"
+elif ! sudo -n true 2>/dev/null; then
+  fail "AGY_SANDBOX_SUDO=1, but sudo needs a password, so the root-owned install was not checked"
+else
+  # The install needs a parent that root owns, with every directory above it, and no one else can write.
+  root_parent=""
+  for candidate in /opt /srv /var/lib /usr/local; do
+    check=$candidate
+    while [ -d "$check" ] && [ "$(stat -c %u "$check")" = 0 ] && [ $((0$(stat -c %a "$check") & 022)) -eq 0 ]; do
+      if [ "$check" = / ]; then root_parent=$candidate; break; fi
+      check=$(dirname "$check")
+    done
+    [ -z "$root_parent" ] || break
+  done
+  if [ -z "$root_parent" ]; then
+    fail "no root-owned parent for the root-owned install: $(stat -c '%U %a %n' /opt /srv /var/lib /usr/local / 2>&1 | tr '\n' ';')"
+  else
+    rootdir=$(sudo -n mktemp -d "$root_parent/agy-sandbox-root.XXXXXX")
+    sudo -n chmod 0755 "$rootdir"
+    sudo -n install -d -m 0755 "$rootdir/bun"
+    sudo -n install -m 0755 "$bundir/bun" "$rootdir/bun/bun"
+    sudo -n "$scripts/install-agy.sh" --user "$(id -un)" --home "$home" --guard "$work/guard" --scope-dir "$work/scope" \
+      --bun "$rootdir/bun/bun" --prefix "$rootdir/opt" --pin "$work/agy.pin" --tarball "$work/release.good.tar.gz" >/dev/null ||
+      fail "the root stage failed as root"
+    [ "$(stat -c %u "$rootdir/opt/agy")" = 0 ] && [ ! -e "$rootdir/opt/agy/etc/user-owned-test-install" ] ||
+      fail "the root stage as root did not leave a root-owned install without the test marker"
+    HOME="$home" "$scripts/register-agy.sh" --prefix "$rootdir/opt" --replace-hooks >/dev/null || fail "register-agy.sh failed for the root-owned install"
+    rm -rf "$home/.bun/install"
+    sudo -n chown 0:0 "$home/.bun"
+    got=$(cd "$work/wt-example" && env -i HOME="$home" PATH=/usr/bin:/bin "$rootdir/opt/agy/bin/agy" 'echo started-from-root-install' \
+      2>"$work/root-launch.err") || fail "the launcher did not start agy from a root-owned install: $(cat "$work/root-launch.err")"
+    [ "$got" = started-from-root-install ] ||
+      fail "the launcher from a root-owned install printed something else: $got $(cat "$work/root-launch.err")"
+    sudo -n chown -R "$(id -u)" "$home/.bun"
+  fi
 fi
 
 if [ "$failures" -gt 0 ]; then

@@ -42,6 +42,9 @@ printf 'version=0.0.0-test\nurl=https://example.invalid/agy.tar.gz\nsha256=%s\n'
   "$(sha256sum "$work/release.tar.gz" | cut -d' ' -f1)" > "$work/agy.pin"
 "$scripts/install-agy.sh" --user "$(id -un)" --home "$home" --guard "$AGY_GUARD_CHECKOUT/plugins/workflow-agents/hooks" \
   --scope-dir "$work/scope" --bun "$bundir/bun" --prefix "$prefixroot/opt" --pin "$work/agy.pin" --tarball "$work/release.tar.gz" >/dev/null
+# The owner's first login leaves agy's migration marker, which register-agy.sh requires.
+mkdir -p "$home/.gemini/config"
+: > "$home/.gemini/config/.migrated"
 HOME="$home" "$scripts/register-agy.sh" --prefix "$prefixroot/opt" >/dev/null
 
 installed=$(sed -n 's/^guard=//p' "$prefixroot/opt/agy/etc/pin")
