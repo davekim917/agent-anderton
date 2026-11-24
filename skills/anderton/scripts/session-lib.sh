@@ -817,22 +817,32 @@ agy_unlaunched_gone() {
   worktree_unused "$dir"
 }
 
-# The launcher's --anderton-worktree-<$1> answer for agy worker record $2's worktree. A start is tried three times: one
-# fails when a socket the launcher listed to mask closes before bwrap mounts over it. One that runs out its two minutes
-# is not retried.
-agy_inspect() {
-  local dir base out status _
-  dir=$(jq -r '.dir // empty' "$2") base=$(jq -r '.base // empty' "$2")
+# Runs "$@" up to three times while it answers 75, the agy launcher's "the sandbox could not be set up, so nothing
+# started". Any other answer is final: a start that ran something is never repeated, nor one killed by its timeout.
+agy_until_started() {
+  local status _
   for _ in 1 2 3; do
-    if out=$(cd "$dir" 2>/dev/null && timeout -s KILL 120 "$(agy_root)/bin/agy" "--anderton-worktree-$1" "$base" 2>/dev/null); then
-      printf '%s\n' "$out"
-      return 0
-    else
-      status=$?
-    fi
-    [ "$status" -ne 137 ] || return 1
+    if "$@"; then return 0; else status=$?; fi
+    [ "$status" -eq 75 ] || return "$status"
   done
-  return 1
+  return "$status"
+}
+
+# The launcher's --anderton-worktree-<$1> answer for agy worker record $2's worktree, given two minutes per start.
+agy_inspect() {
+  agy_until_started agy_inspect_once "$1" "$(jq -r '.dir // empty' "$2")" "$(jq -r '.base // empty' "$2")"
+}
+# One start of it. A mask target can still vanish between the launcher's dry run and its real start, and then bwrap
+# itself fails before it runs anything, saying so first on stderr: that start set up nothing either (75). Rerunning an
+# inspection only reads the worktree again.
+agy_inspect_once() { # agy_inspect_once <work|refs> <dir> <base>
+  local out err status=0
+  err=$(mktemp) || return 1
+  out=$(cd "$2" 2>/dev/null && timeout -s KILL 120 "$(agy_root)/bin/agy" "--anderton-worktree-$1" "$3" 2>"$err") || status=$?
+  if [ "$status" -ne 0 ] && [ "$status" -ne 137 ] && [ -z "$out" ] && head -n 1 "$err" | grep -q '^bwrap: '; then status=75; fi
+  rm -f "$err"
+  [ "$status" -eq 0 ] || return "$status"
+  printf '%s\n' "$out"
 }
 
 # What worktree_work says of agy worker record $1's worktree, worked out by the launcher inside its sandbox, as the

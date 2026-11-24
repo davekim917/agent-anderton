@@ -396,6 +396,20 @@ agy_launch_verified() {
   write_record
 }
 
+# One start of agy in the pane, then its proof. 75 when herdr's start failed and the launcher wrote that it set up no
+# sandbox, so nothing ran in the pane and the start may be tried again (agy_until_started); never after anything ran.
+agy_start_attempt() {
+  if [ "$(cat "$agy_launch" 2>/dev/null)" = unstarted ]; then rm -f "$agy_launch"; fi
+  if ! out=$(herdr agent start "$name" --kind "$provider" --pane "$pane" --timeout 120000 -- "$@" 2>&1); then
+    if [ "$(cat "$agy_launch" 2>/dev/null)" = unstarted ]; then
+      out="the sandbox could not be set up (a path it masks changed as it started), so agy did not start."
+      return 75
+    fi
+    return 1
+  fi
+  agy_launch_verified
+}
+
 # True once the pane is gone and any launcher process this launch recorded has exited, waiting up to 5 seconds.
 agy_launch_undone() {
   local launched answer _
@@ -432,9 +446,14 @@ if [ "$launcher" = herdr ]; then
   write_record
   # A startup prompt (folder trust, a new permission mode) leaves the agent blocked: show it, then undo.
   # The brief goes to the pane, whose id herdr never reuses, not to the name, which the user can rename and reuse.
-  if ! out=$(herdr agent start "$name" --kind "$provider" --pane "$pane" --timeout 120000 -- "$@" 2>&1) ||
-    { [ "$provider" = agy ] && ! agy_launch_verified; } ||
-    ! out=$(herdr agent prompt "$pane" "$brief" 2>&1); then
+  if [ "$provider" = agy ]; then
+    if agy_until_started agy_start_attempt "$@"; then started=0; else started=1; fi
+  elif out=$(herdr agent start "$name" --kind "$provider" --pane "$pane" --timeout 120000 -- "$@" 2>&1); then
+    started=0
+  else
+    started=1
+  fi
+  if [ "$started" -ne 0 ] || ! out=$(herdr agent prompt "$pane" "$brief" 2>&1); then
     screen=$(herdr agent read "$pane" 2>/dev/null | tail -n 20 || true)
     if [ "$provider" = agy ]; then
       herdr pane close "$pane" >/dev/null 2>&1 || true

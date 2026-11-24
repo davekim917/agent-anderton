@@ -286,6 +286,14 @@ EOF
   fi
 }
 
+# bwrap mounts the whole view before it runs anything, and fails when a path it was given to mask has gone by then (a
+# socket that closed after it was listed). A dry run of the same view, running only true, tells that apart from a start
+# that ran something: the launcher then exits 75, having started nothing, and the caller may try again.
+unstarted=75
+view_sets_up() { # view_sets_up <bwrap args...>
+  env -i PATH=/usr/bin:/bin "$bwrap" "$@" -- /bin/true >/dev/null 2>&1
+}
+
 [ "$(uname -s)" = Linux ] || die "Linux only."
 bwrap=$(pinned bwrap)
 [ -n "$bwrap" ] && [ -x "$bwrap" ] || die "the bwrap install-agy.sh pinned (${bwrap:-none}) is not installed."
@@ -294,6 +302,10 @@ if [ -n "$inspect" ]; then
   # everywhere, no network, and the credential masks, so a helper the worktree names can run here and reach nothing.
   args=(--ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-net --die-with-parent)
   add_credential_masks
+  if ! view_sets_up "${args[@]}" --chdir "$(pwd -P)"; then
+    echo "agy-sandbox: the sandbox could not be set up; nothing started." >&2
+    exit "$unstarted"
+  fi
   exec python3 -I -c 'import os, sys; os.closerange(3, 1 << 30); os.execvp(sys.argv[1], sys.argv[1:])' \
     env -i HOME="$HOME" PATH=/usr/bin:/bin "$bwrap" "${args[@]}" --chdir "$(pwd -P)" -- "$self" --inspect-inside "$inspect" "$inspect_base"
 fi
@@ -466,6 +478,12 @@ if [ -n "$token_file" ] && [ -r "$token_file" ]; then
   env+=("GH_TOKEN=$(tr -d '[:space:]' < "$token_file")")
 fi
 
+# The launch file says which happened: this pid, which is about to become bwrap, or "unstarted".
+if ! view_sets_up "${args[@]}" --chdir "$wt"; then
+  [ -z "$launch_file" ] || (set -C && echo unstarted > "$launch_file") 2>/dev/null || true
+  echo "agy-sandbox: the sandbox could not be set up (a path it masks changed as it started); nothing started." >&2
+  exit "$unstarted"
+fi
 if [ -n "$launch_file" ]; then
   (set -C && printf '%s\n' "$$" > "$launch_file") 2>/dev/null || die "could not create $launch_file; it may belong to an earlier launch."
 fi

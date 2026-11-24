@@ -65,10 +65,18 @@ case "$1 $2" in
     # bwrap sandboxing a sleep, its pid in the launch file. With $FAKE_AGY_FOREIGN some other agy answers and writes
     # nothing; $FAKE_AGY_KIND=script runs a shell script named bwrap instead, =same-ns a process whose child shares its
     # mount namespace; $FAKE_AGY_PANE names another pane in its environment, and $FAKE_AGY_NOTE adds a variable.
-    # $FAKE_AGY_WRITE is a script run in the tab's directory first, for what the worker writes there.
+    # $FAKE_AGY_WRITE is a script run in the tab's directory first, for what the worker writes there. While the file
+    # $FAKE_AGY_UNSTARTED_ONCE is missing, the start makes it and fails as a launcher that set up no sandbox does.
     if [ "$5" = agy ] && [ "${11:-}" = --anderton-launch-file ] && [ -z "${FAKE_AGY_FOREIGN:-}" ]; then
       launch_file=${12} agy_pane=$7 agent_name=$3
+      if [ -n "${FAKE_AGY_UNSTARTED_ONCE:-}" ] && [ ! -e "$FAKE_AGY_UNSTARTED_ONCE" ]; then
+        : > "$FAKE_AGY_UNSTARTED_ONCE"
+        (set -C && echo unstarted > "$launch_file")
+        echo '{"error":{"code":"agent_exited"}}'
+        exit 1
+      fi
       if [ -n "${FAKE_AGY_WRITE:-}" ]; then (cd "$(cat "$FAKE_LOG.tab-cwd")" && sh "$FAKE_AGY_WRITE"); fi
+      echo "$agy_pane" >> "$FAKE_LOG.sandboxes"
       case ${FAKE_AGY_KIND:-sandbox} in
         sandbox) set -- "$FAKE_BWRAP" --ro-bind / / --dev /dev --proc /proc --unshare-pid -- sleep 600 ;;
         script) set -- "$FAKE_SCRIPT_BWRAP" ;;
@@ -86,7 +94,7 @@ case "$1 $2" in
     if [ -n "${FAKE_HERDR_START_LIVE:-}" ]; then printf '[{"kind":"interactive","name":"%s","id":null}]\n' "$3" > "$FAKE_AGENTS"; fi
     if [ -n "${FAKE_HERDR_START_FAIL:-}" ]; then echo '{"error":{"code":"agent_not_ready"}}'; exit 1; fi
     ;;
-  "agent prompt") printf '%s' "$4" > "$FAKE_LOG.prompt"; printf '%s\n' "$3" > "$FAKE_LOG.prompt-target" ;;
+  "agent prompt") printf '%s' "$4" > "$FAKE_LOG.prompt"; printf '%s\n' "$3" > "$FAKE_LOG.prompt-target"; echo "$3" >> "$FAKE_LOG.prompts" ;;
   "agent list") cat "$FAKE_LOG.herdr-agents" 2>/dev/null || echo '{"result":{"agents":[]}}' ;;
   "agent get")
     # The agent in pane $3 of this server: a "<server socket> <json>" line in $FAKE_LOG.agent-get.<pane>, or agent_not_found.
@@ -3137,9 +3145,11 @@ else
   agy_spawn "${agy_env[@]}" FAKE_AGY_KIND=script -- --provider agy --effort high agy-refused
   check "a shell script named bwrap, in the pane and the worktree, is not the sandbox" eval '[ "$status" -eq 1 ] &&
     contains "is not the pinned bwrap" && [ ! -e "$FAKE_LOG.prompt" ]'
+  : > "$FAKE_LOG.sandboxes"
   agy_spawn "${agy_env[@]}" FAKE_AGY_PANE=w9:p99 -- --provider agy --effort high agy-refused
   check "the pinned bwrap started from another pane is not this worker's sandbox" eval '[ "$status" -eq 1 ] &&
     contains "is not the pinned bwrap" && [ ! -e "$FAKE_LOG.prompt" ]'
+  check "and a start that ran something is not tried again" [ "$(wc -l < "$FAKE_LOG.sandboxes")" -eq 1 ]
   agy_pin "$(readlink -f "$(command -v python3)")"
   agy_spawn "${agy_env[@]}" FAKE_AGY_KIND=same-ns -- --provider agy --effort high agy-refused
   check "the pinned executable with no child in a mount namespace of its own is not the sandbox" eval '[ "$status" -eq 1 ] &&
@@ -3341,6 +3351,19 @@ WRITES
   run "$scripts/retire.sh" agy-worker
   check "and retires it once nothing has its directory there" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-worker" ]'
 
+  # A launch that set up no sandbox started nothing, so spawn.sh starts agy in the pane again, up to two more times:
+  # the brief goes out once, to the one agy that started.
+  : > "$FAKE_LOG.sandboxes"
+  : > "$FAKE_LOG.prompts"
+  agy_agent agy idle "$work/wt-agy-retried"
+  agy_spawn "${agy_env[@]}" "FAKE_AGY_UNSTARTED_ONCE=$work/agy-unstarted-once" -- --provider agy --effort high agy-retried
+  check "spawn.sh starts agy again after a launch that set up no sandbox" eval '[ "$status" -eq 0 ] &&
+    [ -e "$work/agy-unstarted-once" ]'
+  check "sending the brief once, to the one agy that started" eval '[ "$(wc -l < "$FAKE_LOG.prompts")" -eq 1 ] &&
+    [ "$(wc -l < "$FAKE_LOG.sandboxes")" -eq 1 ]'
+  run "$scripts/retire.sh" agy-retried
+  check "which retires" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-agy-retried" ]'
+
   # waiting.sh reads an agy worktree's refs only inside the sandbox: a git first on PATH that logs where it runs is never
   # run in or on the worktree, and the ready list still finds the worker's landed commit.
   agy_agent agy idle "$work/wt-agy-landed"
@@ -3360,13 +3383,13 @@ WRITES
   check "waiting.sh lists the agy worker's landed commit" contains "- agy-landed: branch merged into origin/main"
   check "running host git neither in nor on its worktree" eval '[ -s "$work/host-git.log" ] &&
     ! grep -qF "$work/wt-agy-landed" "$work/host-git.log"'
-  # A launcher start that fails once, as one does when a socket it listed to mask closes before bwrap mounts over it.
+  # A launcher start that sets up no sandbox once (75), as when a socket it listed to mask closes before bwrap mounts it.
   mv "$agyroot/bin/agy" "$agyroot/bin/agy.real"
-  printf '#!/bin/sh\nif [ ! -e "%s" ]; then : > "%s"; exit 1; fi\nexec "%s" "$@"\n' "$work/agy-failed-once" "$work/agy-failed-once" \
+  printf '#!/bin/sh\nif [ ! -e "%s" ]; then : > "%s"; exit 75; fi\nexec "%s" "$@"\n' "$work/agy-failed-once" "$work/agy-failed-once" \
     "$agyroot/bin/agy.real" > "$agyroot/bin/agy"
   chmod +x "$agyroot/bin/agy"
   run "$scripts/retire.sh" agy-landed
-  check "and retire.sh retires it, trying again a sandbox start that failed" eval '[ "$status" -eq 0 ] &&
+  check "and retire.sh retires it, trying again a sandbox start that set up nothing" eval '[ "$status" -eq 0 ] &&
     [ ! -e "$work/wt-agy-landed" ] && [ -e "$work/agy-failed-once" ]'
   mv "$agyroot/bin/agy.real" "$agyroot/bin/agy"
   git -C "$alpha" remote remove origin

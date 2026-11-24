@@ -262,6 +262,25 @@ proven w9:p5 || fail "the launcher's recorded pid is not proven to be its sandbo
 if proven w9:p6; then fail "the launcher's sandbox was proven for a pane it did not start in"; fi
 kill "$launcher" 2>/dev/null || true
 wait "$launcher" 2>/dev/null || true
+# A start whose view cannot be set up (a pinned bwrap that fails once, as one does when a socket it masks closes as it
+# starts) ends with 75 and "unstarted" in the launch file, having run nothing; the next start runs.
+printf '#!/bin/sh\nif [ ! -e "%s" ]; then : > "%s"; exit 1; fi\nexec "%s" "$@"\n' "$work/bwrap-failed" "$work/bwrap-failed" \
+  "$pinned_bwrap" > "$work/bwrap-once"
+chmod 0755 "$work/bwrap-once"
+cp "$prefixroot/opt/agy/etc/pin" "$work/pin.saved"
+sed -i "s|^bwrap=.*|bwrap=$work/bwrap-once|" "$prefixroot/opt/agy/etc/pin"
+start_once() { # start_once <launch file>: the launcher, from the worktree, running a command that leaves a mark there
+  (cd "$work/wt-example" && env -i HOME="$home" PATH=/usr/bin:/bin "$agy" --anderton-launch-file "$1" "echo ran > agy-ran")
+}
+status=0
+start_once "$work/launch-once.pid" >/dev/null 2>&1 || status=$?
+[ "$status" -eq 75 ] && [ "$(cat "$work/launch-once.pid")" = unstarted ] && [ ! -e "$work/wt-example/agy-ran" ] ||
+  fail "a start whose sandbox could not be set up did not end with 75 and 'unstarted', having run nothing (status $status)"
+rm -f "$work/launch-once.pid"
+start_once "$work/launch-once.pid" >/dev/null 2>&1 || fail "the start after one that set up no sandbox did not run"
+[ -e "$work/wt-example/agy-ran" ] || fail "the start after one that set up no sandbox ran nothing"
+rm -f "$work/launch-once.pid" "$work/wt-example/agy-ran"
+cp "$work/pin.saved" "$prefixroot/opt/agy/etc/pin"
 
 # The checks inside the namespace refuse to start agy when the guard could be off.
 refuses() {
