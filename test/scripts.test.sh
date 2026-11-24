@@ -2779,8 +2779,8 @@ check "its pane reopened at that thread on the new home's daemon, titled with it
 check "and told to continue without repeating completed work" grep -q "Check the current state before repeating" "$FAKE_LOG.direction"
 check "its old client stopped before the thread moved, and the limit checked again after" \
   [ "$(tr '\n' ' ' <"$FAKE_LOG.order")" = "limited respawn limited move respawn " ]
-check "and the move recorded against the limited turn" eval \
-  '[ "$(jq -c .codexFailover "$work/cx-fail.last")" = "$(jq -nc --argjson at "$(jq .codexFailover.at "$work/cx-fail.last")" "{turn: \"turn-9\", at: \$at, moved: true}")" ]'
+check "and the move recorded against the limited turn" \
+  [ "$(jq -r '.codexFailover | "\(.turn) \(.moved) \(.at | type)"' "$work/cx-fail.last")" = "turn-9 true number" ]
 cx_failover "$cx_title" ANDERTON_CODEX_ACCOUNTS="$work/accounts" FAKE_SWEPT_THREAD=019a0000-0000-7000-8000-000000000000
 check "a record whose thread changed since the sweep read it is not moved" eval \
   '[ ! -e "$FAKE_LOG.move" ] && [ ! -e "$FAKE_LOG.respawn" ] && [ ! -e "$FAKE_LOG.accounts" ]'
