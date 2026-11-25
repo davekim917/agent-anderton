@@ -45,6 +45,7 @@ cat > "$tmp/bin/herdr" <<'FAKEHERDR'
 case "$1 $2" in
   "tab create") echo '{"result":{"root_pane":{"pane_id":"w9:p5","tab_id":"w9:t5"},"tab":{"tab_id":"w9:t5"}}}' ;;
   "agent start") printf '%s\n' "$@" > "$FAKE/start" ;;
+  "agent read") printf 'Antigravity CLI example\n? for shortcuts\n' ;;
   "agent prompt") printf '%s %s\n' "$3" "$(printf '%s' "$4" | tr '\n' ' ')" >> "$FAKE/prompts" ;;
   "agent get") cat "$FAKE/agent-get.$3" 2>/dev/null || { echo '{"error":{"code":"agent_not_found"}}' >&2; exit 1; } ;;
   "pane get")
