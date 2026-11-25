@@ -192,8 +192,13 @@ herdr reports agy ready while agy still shows a screen only you may answer: its 
 its sign-in. So `spawn.sh` sends the brief only once agy shows its prompt (the footer `? for shortcuts`), within 30
 seconds (`ANDERTON_AGY_READY_WAIT`, in half-seconds). On any other screen it closes the tab, undoes the spawn, and
 says which screen it found when it knows it ("agy is waiting for its terms screen: run agy once yourself and complete
-it."). agy also asks whether to trust each new worktree, which herdr reports as a startup block, so `spawn.sh`
-undoes that spawn the same way. With `--model`, the model id names the effort (`gemini-4-neon-low`), and
+it."). agy asks whether to trust each new folder, and the trust it saves for a folder does not reach the folders under it
+when that folder is your home, where worktrees of a repository at `~/<repo>` sit. So `spawn.sh` trusts the new
+worktree for that agy session only, with agy's `--settings`, which is never saved. `--settings` replaces each key it
+names for the session, so it carries your saved `~/.gemini/antigravity-cli/settings.json` with the worktree added to
+its `trustedWorkspaces`. In a trusted workspace agy loads the worktree's `.agents`, `.agent`, `_agents` and
+`_agent` with no prompt, as Claude Code does in a trusted folder; `agy-hooks.sh check --workspace` runs on the
+worktree before agy starts, and refuses one whose workspace hooks would replace the guard's. With `--model`, the model id names the effort (`gemini-4-neon-low`), and
 `--effort` is not passed, since agy rejects it beside one.
 
 agy runs with `--dangerously-skip-permissions`. Its prompting mode would stop on routine commands, which a Claude
