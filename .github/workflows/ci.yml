@@ -30,6 +30,8 @@ jobs:
         run: python3 -B test/codex.test.py
       - name: agy guard registration
         run: /bin/bash test/agy-hooks.test.sh
+      - name: agy Anderton
+        run: /bin/bash test/agy-anderton.test.sh
       - name: shellcheck
         if: runner.os == 'Linux'
         run: shellcheck skills/anderton/scripts/*.sh test/*.sh

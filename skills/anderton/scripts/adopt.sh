@@ -94,8 +94,8 @@ jq -nc --arg name "$name" --arg dir "$cwd" --arg root "$root" --arg spawner "$me
   '{name: $name, launcher: "adopted", dir: $dir, root: $root, worktree: false, adopted: true, spawner: $spawner, spawnerSession: $spawner_session,
     spawnerProvider: $provider, spawnerScope: (if $scope == "" then null else $scope end),
     sessionId: $reg[0].sessionId, pid: $reg[0].pid, sessionStartedAt: $reg[0].startedAt, startedAt: $at}
-    + if $provider == "codex" then {reportTransport: "transcript"} else {} end' >| "$record"
-if [ "$caller_provider" = codex ]; then
+    + if $provider == "codex" or $provider == "agy" then {reportTransport: "transcript"} else {} end' >| "$record"
+if [ "$caller_provider" = codex ] || [ "$caller_provider" = agy ]; then
   echo "Adopted '$name': tell it to report milestones in its final reply with worker.sh message."
 else
   echo "Adopted '$name': it now reports to $me, and $me hears when it blocks. Tell it so by SendMessage."

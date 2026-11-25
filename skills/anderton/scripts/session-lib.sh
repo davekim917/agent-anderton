@@ -75,8 +75,10 @@ holders="$home/anderton"
 legacy_holder="$home/anderton.json"
 anderton_scripts="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# agy-anderton.sh gives an agy Anderton's tool shells ANDERTON_AGY_SESSION, and clears the other two runtimes' variables.
 invoking_provider() {
-  if [ -n "${CLAUDE_CODE_SESSION_ID:-}${CLAUDE_PID:-}" ]; then printf 'claude\n'
+  if [ -n "${ANDERTON_AGY_SESSION:-}" ]; then printf 'agy\n'
+  elif [ -n "${CLAUDE_CODE_SESSION_ID:-}${CLAUDE_PID:-}" ]; then printf 'claude\n'
   elif [ -n "${CODEX_THREAD_ID:-}" ]; then printf 'codex\n'
   else printf 'claude\n'; fi
 }
@@ -84,6 +86,7 @@ invoking_provider() {
 invoking_session() {
   case $(invoking_provider) in
     codex) printf '%s\n' "${CODEX_THREAD_ID:-}" ;;
+    agy) printf '%s\n' "${ANDERTON_AGY_SESSION:-}" ;;
     *) printf '%s\n' "${CLAUDE_CODE_SESSION_ID:-}" ;;
   esac
 }
@@ -231,7 +234,11 @@ record_provider() {
 caller_matches_claim() {
   local p codex
   [ -f "$1" ] && [ "$(record_provider "$1")" = "$(invoking_provider)" ] || return 1
-  if [ "$(invoking_provider)" = codex ]; then
+  if [ "$(invoking_provider)" = agy ]; then
+    # The claim names the launch and the herdr pane it runs in.
+    jq -e --arg sid "${ANDERTON_AGY_SESSION:-}" --arg pane "${HERDR_PANE_ID:-}" '
+      $sid != "" and .sessionId == $sid and .pane == $pane' "$1" >/dev/null 2>&1
+  elif [ "$(invoking_provider)" = codex ]; then
     # The claim names the conversation and the home it runs on: the same thread opened on another account's home does
     # not hold it until codex-anderton.sh --move hands the claim over.
     codex=$(invoking_codex_home) || return 1
@@ -265,13 +272,17 @@ claim_state() {
     codex)
       if state=$("$anderton_scripts/codex-worker.py" claim-state "$1" 2>/dev/null); then echo "$state"
       else echo unknown; fi ;;
+    agy)
+      # Live while herdr shows agy in the claim's pane, in its repository; gone once the pane is gone or runs anything else.
+      agy_check "$1"
+      case $agy_state in running) echo live ;; gone | elsewhere) echo gone ;; *) echo unknown ;; esac ;;
     *) echo unknown ;;
   esac
 }
 
 claim_name() {
   local p
-  if [ "$(record_provider "$1")" = codex ]; then
+  if [ "$(record_provider "$1")" != claude ]; then
     jq -r '.name // .sessionId // empty' "$1" 2>/dev/null
   else
     p=$(jq -r '.pid // empty' "$1" 2>/dev/null)
@@ -315,7 +326,7 @@ worker_belongs() {
 
 uses_claude_transcript() {
   jq -e --arg owner "$2" '(.provider // "claude") == "claude" and
-    ($owner == "codex" or .reportTransport == "transcript" or .spawnerProvider == "codex")' "$1" >/dev/null 2>&1
+    ($owner != "claude" or .reportTransport == "transcript" or (.spawnerProvider // "claude") != "claude")' "$1" >/dev/null 2>&1
 }
 
 # Call under the repository lock. Only a conclusive mismatch clears a candidate pending launch.
@@ -367,6 +378,8 @@ bind_codex_worker() {
 managed_invoker() {
   local root=$1 provider=$2 sid=$3 identity=$4 dir=$5 r p reg name cwd started file
   if [ "$provider" = codex ]; then codex_worker_record "$identity" "$sid" "$dir"; return; fi
+  # An agy session is an Anderton only through agy-anderton.sh, which no worker runs under.
+  [ "$provider" != agy ] || return 0
   p=$identity
   reg="$sessions/$p.json"
   name=$(jq -r '.name // empty' "$reg" 2>/dev/null || true)
@@ -706,18 +719,18 @@ place_state() {
   esac
 }
 
-# Where agy worker record $1 stands, from one herdr snapshot of its pane. Sets:
-#   agy_state: running (herdr shows agy in the recorded pane, in the worktree, and as the agy session the record bound,
-#     when it bound one), gone (herdr says the pane is gone), elsewhere (the pane shows no agent, another one, or another
+# Where agy record $1 (a worker or an agy Anderton's claim) stands, from one herdr snapshot of its pane. Sets:
+#   agy_state: running (herdr shows agy in the recorded pane, in the worktree, as the agy session the record bound when
+#     it bound one, and, for a claim, while the agy process it recorded still runs), gone (herdr says the pane is gone), elsewhere (the pane shows no agent, another one, or another
 #     session) or unknown (herdr gave no answer these scripts can read);
 #   agy_status: herdr's status for the pane (idle, working, blocked, done), or nothing;
 #   agy_agent, agy_cwd: what that snapshot shows in the pane, or nothing.
 # shellcheck disable=SC2034 # the scripts that source this file read what it sets
 agy_check() {
-  local socket pane dir instance out got_instance got_pane
+  local socket pane dir instance apid astart out got_instance got_pane
   agy_state=unknown agy_status="" agy_agent="" agy_cwd=""
   socket=$(jq -r '.socket // empty' "$1") pane=$(jq -r '.pane // empty' "$1") dir=$(jq -r '.dir // empty' "$1")
-  instance=$(jq -r '.agyInstance // empty' "$1")
+  instance=$(jq -r '.agyInstance // empty' "$1") apid=$(jq -r '.agyPid // empty' "$1") astart=$(jq -r '.agyStart // empty' "$1")
   [ -n "$socket" ] && [ -n "$pane" ] && command -v herdr >/dev/null 2>&1 || return 0
   # herdr exits non-zero, with its error on stderr, for a pane with no agent and for a missing pane.
   out=$(HERDR_SOCKET_PATH="$socket" herdr agent get "$pane" 2>&1) || true
@@ -736,7 +749,8 @@ $(printf '%s' "$out" | jq -r '(.result.agent // empty) | [.agent // "", .agent_s
 EOF
   [ -n "$got_pane" ] || return 0
   if [ "$got_pane" = "$pane" ] && [ "$agy_agent" = agy ] && { [ -z "$instance" ] || [ "$got_instance" = "$instance" ]; } &&
-    { [ "$agy_cwd" = "$dir" ] || case $agy_cwd in "$dir"/*) true ;; *) false ;; esac; }; then
+    { [ "$agy_cwd" = "$dir" ] || case $agy_cwd in "$dir"/*) true ;; *) false ;; esac; } &&
+    { [ -z "$apid" ] || process_start_matches "$apid" "$astart"; }; then
     agy_state=running
   else
     agy_state=elsewhere

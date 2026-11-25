@@ -18,7 +18,7 @@ if [ "$action" = sweep ] && [ "$#" -eq 1 ]; then
   while IFS= read -r record; do
     [ -n "$record" ] || continue
     args=(sweep "$record" --claim "$role")
-    if [ "$(record_provider "$role")" = codex ] &&
+    if case $(record_provider "$role") in codex | agy) true ;; *) false ;; esac &&
       jq -e '.claudeSession == null and .claudeLaunchId == null and .adopted != true' "$record" >/dev/null; then
       args+=(--legacy-home "$home")
     fi
@@ -91,7 +91,7 @@ if [ "$action" = status ]; then
   jq '{sessionId, status, waitingFor, cwd}' "$reg"
   exit 0
 fi
-if [ "$(invoking_provider)" != codex ]; then
+if [ "$(invoking_provider)" = claude ]; then
   echo "Use Claude Code SendMessage to the verified Claude session in this registry entry: $reg" >&2
   exit 2
 fi

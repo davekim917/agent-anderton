@@ -126,7 +126,7 @@ watch_claude_worker() {
   while [ -f "$worker" ] && claude_stop_matches "$worker" "$worker_sid" "$worker_pid" "$worker_start"; do
     owner=$(answering_claim "$worker" "$root")
     now=$(date +%s)
-    if [ -n "$owner" ] && [ "$(record_provider "$owner")" = codex ] &&
+    if [ -n "$owner" ] && [ "$(record_provider "$owner")" != claude ] &&
       pending=$(jq -er --arg sid "$worker_sid" --arg from "$(jq -r '.sessionId // empty' "$owner")" --argjson now "$now" '
       .claudeDirection | select(.target == $sid and .from == $from and ($now - (.attemptedAt // 0)) >= 60) | .id // empty
       ' "$worker" 2>/dev/null) && claude_direction_unreceived "$worker"; then
@@ -154,6 +154,21 @@ if [ "${1:-}" = --codex ]; then
   CODEX_HOME=$(jq -r '.codexHome // empty' "$record") || exit 0
   export CODEX_HOME
   unset CLAUDE_PID CLAUDE_CODE_SESSION_ID
+  pid=$sid
+  reg=""
+elif [ "${1:-}" = --agy ]; then
+  # claim.sh starts this for an agy Anderton, which has no Stop hook: it runs as long as the role, and tells the holder
+  # by prompting its herdr pane.
+  runtime=agy
+  record=$2
+  [ -f "$record" ] && [ "$(record_provider "$record")" = agy ] || exit 0
+  sid=$(jq -r '.sessionId // empty' "$record") || exit 0
+  cwd=$(jq -r '.dir // empty' "$record") || exit 0
+  ANDERTON_AGY_SESSION=$sid
+  HERDR_PANE_ID=$(jq -r '.pane // empty' "$record") || exit 0
+  HERDR_SOCKET_PATH=$(jq -r '.socket // empty' "$record") || exit 0
+  export ANDERTON_AGY_SESSION HERDR_PANE_ID HERDR_SOCKET_PATH
+  unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
   pid=$sid
   reg=""
 else
@@ -206,7 +221,14 @@ EOF
   fi
 fi
 still_holds_role() {
-  if [ "$runtime" = codex ]; then caller_matches_claim "$record"; else is_holder "$reg" "$record"; fi
+  if [ "$runtime" != claude ]; then caller_matches_claim "$record"; else is_holder "$reg" "$record"; fi
+}
+# agy_deliver <text>: prompts the agy holder's pane with <text>, only while herdr shows that agy there, idle.
+agy_deliver() {
+  agy_check "$record"
+  [ "$agy_state" = running ] || return 1
+  case $agy_status in idle | done) ;; *) return 1 ;; esac
+  herdr agent prompt "$HERDR_PANE_ID" "$1" >/dev/null 2>&1
 }
 
 key=$(basename "$record" .json)
@@ -399,7 +421,7 @@ commit_probe() {
 }
 
 select_worker_probe() {
-  if [ "$runtime" = codex ]; then
+  if [ "$runtime" != claude ]; then
     probe=$worker_probe
     [ -n "$(cd "$cwd" && "$scripts/waiting.sh" --workers)" ]
   elif grep -qE '"(reportTransport|spawnerProvider)"[[:space:]]*:[[:space:]]*"(transcript|codex)"' "$holders"/workers/*.json 2>/dev/null &&
@@ -548,7 +570,7 @@ emit_statuses() {
 
 while still_holds_role; do
   if orphaned "$$" "$parent_pid"; then exit 0; fi
-  if [ "$runtime" = codex ] && [ "$(( $(date +%s) - last_liveness_check ))" -ge 60 ]; then
+  if [ "$runtime" != claude ] && [ "$(( $(date +%s) - last_liveness_check ))" -ge 60 ]; then
     last_liveness_check=$(date +%s)
     if [ "$(claim_state "$record")" = gone ]; then exit 0; fi
   fi
@@ -617,6 +639,19 @@ while still_holds_role; do
       if stage_delivery; then
         rm -f "$blocked_backlog"
         deliver_pending
+      fi
+    elif [ "$runtime" = agy ]; then
+      if agy_deliver "$(message)"; then
+        if [ -n "$peer" ]; then (take_repository_lock "$(project_root "$cwd")"; still_holds_role && clear_peer "$peer"); fi
+        rm -f "$blocked_backlog"
+        commit_blocked
+        commit_probe
+      else
+        # A busy or unreadable pane takes nothing: the blocks wait in the backlog, and the probe runs again later.
+        { cat "$blocked_backlog" 2>/dev/null; printf '%s\n' "$new"; } | grep . | sort -u > "$blocked_backlog.tmp" &&
+          mv -f "$blocked_backlog.tmp" "$blocked_backlog"
+        rm -rf "$probe_run"
+        probe_run=""
       fi
     else
       if [ -n "$peer" ]; then

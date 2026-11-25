@@ -141,6 +141,43 @@ only when status reports `never arrived` for the direction ID.
 Anderton Stop hook. A Claude session you adopt must already have this plugin
 loaded and end a turn to receive those directions.
 
+### Open an agy Anderton
+
+Prepare agy as for agy workers (below), then, from a herdr pane in the repository:
+
+```sh
+skills/anderton/scripts/agy-anderton.sh --name <name>
+```
+
+It runs the `agy` on your PATH at the top of the checkout you open it in, a linked worktree included, since agy loads a
+workspace's hooks from each directory between its working directory and the checkout's top. It first runs the same
+`agy-hooks.sh check` an agy worker gets, against that checkout's workspace roots, and trusts the checkout for that
+session only, as `spawn.sh` trusts a worker's worktree (unless you pass `--settings` yourself). It runs with no permission prompts unless you pass `--mode`, and other options go to
+agy. Its tool
+shells get `ANDERTON_AGY_SESSION`, `ANDERTON_AGY_NAME`, `ANDERTON_AGY_DIR` (the checkout) and `ANDERTON_AGY_PID`, which
+these scripts read as the agy Anderton's identity,
+and none of a Claude Code or Codex session's variables. Unless you give `-i`, agy opens on a prompt that points it at
+this skill's `SKILL.md`. It claims with `claim.sh`, or `claim.sh --project <name>` for a named project, as any
+Anderton does. The claim records its herdr pane, its checkout, and the agy process the launcher became (its pid and
+start time). The role is live while herdr shows agy in that pane, in that checkout, and that process still runs, so it
+survives `/clear`, which starts a new conversation in the same process, as a Claude Anderton's role does. It is free
+once the pane is gone or shows anything else, or agy was quit and relaunched there.
+
+agy has no Stop hook, so `claim.sh` starts the role's watch in the background. The watch runs as long as the role and
+tells the Anderton what Claude's watch would: blocked sessions, probe news, peer messages and worker reports, the same
+ways a Codex Anderton hears them. It types each message into the Anderton's pane once agy there is idle. The claim also
+records what agy loads hooks, plugins and agents from for the repository, and the watch tells the Anderton once when any
+of it changes.
+
+Workers start from it with `spawn.sh` as from any Anderton. Its default provider is agy, as a repository Anderton's
+provider is the default for its workers. A Claude worker under it runs in Claude's default permission mode and reports
+in its final replies, as under a Codex Anderton. A Claude worker it inherits, which still reports with `SendMessage`, has
+that send held and read from its transcript, as a Codex Anderton reads one.
+
+The watch reads the pane's state, then prompts it, in two herdr calls, and checks the claim before it reads. A
+take-over, or a turn you start, between those calls can send one notice to the former holder or into a busy pane. A "workgroup" Anderton is the same thing in a workgroup's own
+repository: the role is per repository, and per named project with `--project`.
+
 ### Prepare agy workers
 
 `spawn.sh --provider agy` starts an agy (Antigravity CLI) worker in its own worktree, in a herdr tab, the way Claude and

@@ -111,6 +111,20 @@ for r in "$holders"/workers/*.json; do
     printf '=== %s (agy, blocked on a person in herdr pane %s; open it to respond)\n' "$name" "$(jq -r '.pane // empty' "$r")"
   fi
 done
+# The same for an agy Anderton's own checkout, against what it loaded when it claimed the role. It is told in its own
+# pane, which the user reads.
+while IFS= read -r r; do
+  [ -n "$r" ] && [ "$(record_provider "$r")" = agy ] && [ -f "${r%.json}.agy-config" ] || continue
+  [ -z "$mine" ] || [ "$r" = "$mine" ] || continue
+  now=$(agy_config_state "$(jq -r '.dir // empty' "$r")")
+  changed=$(printf '%s\n' "$now" | grep -vxF -f "${r%.json}.agy-config" | cut -f1 | tr '\n' ' ' || true)
+  if [ -n "$changed" ]; then
+    printf '=== Anderton %s (agy hook or agent configuration changed since it claimed the role, so its guard may be off: %sstate %s. Inspect them; nothing was undone)\n' \
+      "$(claim_name "$r")" "$changed" "$(printf '%s' "$now" | sha256_stdin | cut -c1-12)"
+  fi
+done <<EOF
+$records
+EOF
 
 # Each entry is judged on one copy: Claude Code rewrites it as the session's status changes, and a session selected
 # as blocked but rendered from a newer entry reads as a call unanswered for over a minute, a header the watch never
