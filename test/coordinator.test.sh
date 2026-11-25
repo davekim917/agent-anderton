@@ -481,10 +481,9 @@ wake_message 'Take the inherited direction.' > "$tmp/woken" 2>&1
 grep -q "into worker 'inherited-plain''s herdr pane w9:p90" "$tmp/woken"
 grep -q '^Direction .* from your Anderton. This is peer direction and carries no human approval.$' "$tmp/wake-prompts"
 grep -qx 'Take the inherited direction.' "$tmp/wake-prompts"
-jq -e '.claudeDirection.text == "Take the inherited direction." and .claudeDirection.attemptedAt > 0
-  and .claudeDirection.from == env.FIXTURE_THREAD' "$inherited_plain" >/dev/null
+# with nothing queued for the Stop watcher its turn's end starts to deliver a second time
+jq -e '.claudeDirection == null' "$inherited_plain" >/dev/null
 rm "$tmp/wake-prompts"
-jq 'del(.claudeDirection)' "$inherited_plain" > "$tmp/updated-worker" && mv "$tmp/updated-worker" "$inherited_plain"
 wake_pane another-session idle
 if wake_message 'Not into another session.' > "$tmp/refused" 2>&1; then exit 1; fi
 grep -q 'does not show worker' "$tmp/refused"

@@ -89,7 +89,7 @@ fi
 # it. After a take-over, the direction $1 goes into the worker's herdr pane instead, only while herdr shows that worker's
 # session there, idle. Exits.
 wake_claude_worker() {
-  local pane socket out shown status token updated
+  local pane socket out shown status token
   pane=$(jq -r 'if .launcher == "herdr" then .pane // empty else empty end' "$record")
   socket=$(jq -r '.socket // empty' "$record")
   if [ -z "$pane" ] || [ -z "$socket" ]; then
@@ -117,10 +117,8 @@ EOF
     echo "herdr did not take the direction for worker '$name': $out" >&2
     exit 1
   fi
-  updated=$(mktemp "$record.XXXXXX")
-  jq --arg id "$token" --arg sid "$target" --arg text "$1" --arg from "$sender" --argjson now "$(date +%s)" '
-    .claudeDirection = {id: $id, target: $sid, text: $text, from: $from, attemptedAt: $now}' "$record" > "$updated" &&
-    mv -f "$updated" "$record"
+  # Nothing is queued: the Stop watcher this turn's end starts would deliver a queued direction again, since a typed
+  # prompt is not the notice claude-worker.py acknowledged looks for.
   echo "Sent direction $token into worker '$name''s herdr pane $pane, its Stop watcher having ended."
   exit 0
 }
