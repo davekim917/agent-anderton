@@ -31,14 +31,20 @@ ANDERTON_AGY_NAME=$name
 export ANDERTON_AGY_SESSION ANDERTON_AGY_NAME
 # A launch from inside a Claude Code or Codex session would otherwise be read as that session.
 unset CLAUDE_CODE_SESSION_ID CLAUDE_PID CODEX_THREAD_ID
-mode="" prompt=""
+mode="" prompt="" settings=""
 for arg; do
   case $arg in
     --mode | --mode=*) mode=1 ;;
     -i | --prompt-interactive | --prompt-interactive=*) prompt=1 ;;
+    --settings | --settings=*) settings=1 ;;
   esac
 done
 if [ -z "$mode" ]; then set -- --dangerously-skip-permissions "$@"; fi
+# The repository the user opened it in is trusted for this session, as a worker's worktree is.
+if [ -z "$settings" ]; then
+  trust=$(agy_session_settings "$root") || { echo "$trust" >&2; exit 1; }
+  set -- "$@" --settings "$trust"
+fi
 if [ -z "$prompt" ]; then
   set -- "$@" --prompt-interactive "You are the Anderton named $name for $root. Read $(cd "$anderton_scripts/.." && pwd)/SKILL.md and follow it. Its scripts are in $anderton_scripts. Claim the role with claim.sh (add --project <name> only if the user names a project), then wait for the user."
 fi

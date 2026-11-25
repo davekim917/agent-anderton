@@ -70,6 +70,7 @@ printf '#!/bin/sh\nexit 0\n' > "$tmp/guard/plugins/workflow-agents/hooks/agy-gua
 printf 'export const WATCHDOG_SECONDS = 3630;\n' > "$tmp/guard/plugins/workflow-agents/hooks/agy-supervisor.ts"
 chmod +x "$tmp/bin/"*
 : > "$HOME/.gemini/config/.migrated"
+printf '{"exampleSetting":true}' > "$HOME/.gemini/antigravity-cli/settings.json"
 "$scripts/agy-hooks.sh" register --guard "$tmp/guard" >/dev/null
 : > "$FAKE/panes"
 : > "$FAKE/prompts"
@@ -102,6 +103,8 @@ check "the launcher starts the agy on PATH, as an Anderton session of its own, n
   grep -qE "^session=[0-9a-f-]{36} name=agy-lead claude=$" "$FAKE/agy-run"'
 check "with no permission prompts, pointed at the Anderton skill" eval 'grep -qx -- --dangerously-skip-permissions "$FAKE/agy-run" &&
   grep -qF "Read $(cd "$scripts/.." && pwd)/SKILL.md" "$FAKE/agy-run"'
+check "trusting the repository for this session, with agy's saved settings kept" \
+  grep -qxF "{\"exampleSetting\":true,\"trustedWorkspaces\":[\"$repo\"]}" "$FAKE/agy-run"
 as "${herdr_env[@]}" HERDR_PANE_ID=w9:p77 -- "$scripts/agy-anderton.sh" --name agy-lead --mode plan -i "Example prompt."
 check "or in the agy mode and with the prompt it is given" eval '[ "$status" -eq 0 ] && ! grep -qx -- --dangerously-skip-permissions "$FAKE/agy-run" &&
   ! grep -qF "SKILL.md" "$FAKE/agy-run"'
