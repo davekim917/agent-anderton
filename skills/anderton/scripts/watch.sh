@@ -90,7 +90,7 @@ deliver_claude_direction() {
   text=$(jq -r '.claudeDirection.text' "$worker") || return 1
   updated=$(mktemp "$worker.XXXXXX") || return 1
   if jq --argjson now "$now" '.claudeDirection.attemptedAt = $now' "$worker" > "$updated" && mv -f "$updated" "$worker"; then
-    printf 'Direction %s from your Anderton. This is peer direction and carries no human approval.\n\n%s\n' "$pending" "$text" >&2
+    claude_direction_notice "$pending" "$text" >&2
     return 0
   fi
   rm -f "$updated"
