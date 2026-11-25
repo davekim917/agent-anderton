@@ -139,7 +139,11 @@ queue in order. If `message` exits 4, run `worker.sh status <name>` and resend
 only when status reports `never arrived` for the direction ID.
 `worker.sh` also steers Claude workers from Codex through the Claude worker's
 Anderton Stop hook. A Claude session you adopt must already have this plugin
-loaded and end a turn to receive those directions.
+loaded and end a turn to receive those directions. A worker a Claude Anderton
+started has no such watcher while it is idle, since its turns ended under that
+Anderton: after a take-over, `worker.sh message` types the direction into the
+worker's herdr pane instead, only while herdr shows that worker's session there,
+idle. A tmux or adopted worker has no recorded pane, so type it in its own pane.
 
 ### Open an agy Anderton
 
@@ -172,7 +176,9 @@ of it changes.
 Workers start from it with `spawn.sh` as from any Anderton. Its default provider is agy, as a repository Anderton's
 provider is the default for its workers. A Claude worker under it runs in Claude's default permission mode and reports
 in its final replies, as under a Codex Anderton. A Claude worker it inherits, which still reports with `SendMessage`, has
-that send held and read from its transcript, as a Codex Anderton reads one.
+that send held and read from its transcript, as a Codex Anderton reads one. Known limit: a final reply that restates
+that milestone in other words can be reported twice after a take-over, by a Codex Anderton too; only a reply with the
+same text is dropped.
 
 The watch reads the pane's state, then prompts it, in two herdr calls, and checks the claim before it reads. A
 take-over, or a turn you start, between those calls can send one notice to the former holder or into a busy pane. A "workgroup" Anderton is the same thing in a workgroup's own

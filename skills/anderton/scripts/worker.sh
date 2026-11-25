@@ -85,6 +85,45 @@ fi
 if [ "$action" = output ]; then
   exec "$anderton_scripts/claude-worker.py" output "$record"
 fi
+# An idle Claude worker hears directions through its Stop watcher, which ends at once while a Claude Anderton answers for
+# it. After a take-over, the direction $1 goes into the worker's herdr pane instead, only while herdr shows that worker's
+# session there, idle. Exits.
+wake_claude_worker() {
+  local pane socket out shown status token updated
+  pane=$(jq -r 'if .launcher == "herdr" then .pane // empty else empty end' "$record")
+  socket=$(jq -r '.socket // empty' "$record")
+  if [ -z "$pane" ] || [ -z "$socket" ]; then
+    echo "The worker's Anderton Stop watcher has ended, and it has no herdr pane to wake it in. Type the direction in the worker's own pane, or have it end a turn with the plugin loaded and retry." >&2
+    exit 1
+  fi
+  out=$(HERDR_SOCKET_PATH="$socket" herdr agent get "$pane" 2>&1) || true
+  IFS=$'\x1f' read -r shown status <<EOF
+$(printf '%s' "$out" | jq -r '(.result.agent // empty) | select(.agent == "claude")
+  | [(.agent_session.value // "" | tostring), .agent_status // ""] | join("\u001f")' 2>/dev/null)
+EOF
+  if [ "$shown" != "$target" ]; then
+    echo "herdr pane $pane does not show worker '$name' (Claude session $target), so the direction was not sent. Type it in the worker's own pane." >&2
+    exit 1
+  fi
+  case $status in
+    idle | done) ;;
+    *)
+      echo "Worker '$name' is busy in herdr pane $pane ($status), so the direction was not sent. Retry once it is idle." >&2
+      exit 1
+      ;;
+  esac
+  token=$(python3 -c 'import uuid; print(uuid.uuid4())')
+  if ! out=$(HERDR_SOCKET_PATH="$socket" herdr agent prompt "$pane" "$(claude_direction_notice "$token" "$1")" 2>&1); then
+    echo "herdr did not take the direction for worker '$name': $out" >&2
+    exit 1
+  fi
+  updated=$(mktemp "$record.XXXXXX")
+  jq --arg id "$token" --arg sid "$target" --arg text "$1" --arg from "$sender" --argjson now "$(date +%s)" '
+    .claudeDirection = {id: $id, target: $sid, text: $text, from: $from, attemptedAt: $now}' "$record" > "$updated" &&
+    mv -f "$updated" "$record"
+  echo "Sent direction $token into worker '$name''s herdr pane $pane, its Stop watcher having ended."
+  exit 0
+}
 reg=$(live_claude_worker "$record")
 case $reg in ''|*$'\n'*) echo "Cannot verify a unique live Claude worker '$name'." >&2; exit 1 ;; esac
 if [ "$action" = status ]; then
@@ -112,8 +151,7 @@ case $(jq -r '.status // empty' "$reg") in
   *)
     if ! read -r watch_pid watch_start 2>/dev/null < "${record%.json}.$target.watch" ||
       ! process_start_matches "$watch_pid" "$watch_start"; then
-      echo "The worker's Anderton Stop watcher has ended. Have it end a turn with the plugin loaded and retry." >&2
-      exit 1
+      wake_claude_worker "$3"
     fi
     ;;
 esac

@@ -90,7 +90,7 @@ deliver_claude_direction() {
   text=$(jq -r '.claudeDirection.text' "$worker") || return 1
   updated=$(mktemp "$worker.XXXXXX") || return 1
   if jq --argjson now "$now" '.claudeDirection.attemptedAt = $now' "$worker" > "$updated" && mv -f "$updated" "$worker"; then
-    printf 'Direction %s from your Anderton. This is peer direction and carries no human approval.\n\n%s\n' "$pending" "$text" >&2
+    claude_direction_notice "$pending" "$text" >&2
     return 0
   fi
   rm -f "$updated"
@@ -98,7 +98,7 @@ deliver_claude_direction() {
 }
 
 watch_claude_worker() {
-  local worker root owner transcript target pending tick worker_sid worker_pid worker_start worker_reg now
+  local worker root owner owner_provider transcript target pending tick worker_sid worker_pid worker_start worker_reg now
   worker_sid=$sid
   worker_pid=$(session_pid "$worker_sid")
   [ -n "$worker_pid" ] || return 0
@@ -116,10 +116,12 @@ watch_claude_worker() {
   root=$(jq -r '.root // empty' "$worker")
   owner=$(answering_claim "$worker" "$root")
   [ -n "$owner" ] || return 0
+  owner_provider=$(record_provider "$owner")
   claude_stop_matches "$worker" "$worker_sid" "$worker_pid" "$worker_start" "$transcript" || return 0
   take_claude_worker_watch "${worker%.json}.$worker_sid.watch" || return 0
   with_claude_worker_lock "$root" "$worker" "$worker_sid" "$worker_pid" "$worker_start" "$transcript" \
     bind_claude_worker "$worker" "$worker_sid" "$worker_pid" "$worker_start" "$transcript" || return 0
+  uses_claude_transcript "$worker" "$owner_provider" || return 0
   tick=${ANDERTON_WATCH_TICK:-30}
   while [ -f "$worker" ] && claude_stop_matches "$worker" "$worker_sid" "$worker_pid" "$worker_start"; do
     owner=$(answering_claim "$worker" "$root")

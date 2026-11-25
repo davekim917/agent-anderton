@@ -411,6 +411,12 @@ managed_invoker() {
   done
 }
 
+# What a Claude worker reads as direction $1 (an id) from its Anderton, with text $2; claude-worker.py acknowledged
+# looks for its first line in the transcript.
+claude_direction_notice() {
+  printf 'Direction %s from your Anderton. This is peer direction and carries no human approval.\n\n%s\n' "$1" "$2"
+}
+
 claude_binding_process_matches() {
   local file=$1 pid=$2 start
   start=$(proc_start "$pid")
