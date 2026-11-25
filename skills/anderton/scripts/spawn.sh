@@ -365,6 +365,16 @@ if [ "$launcher" = herdr ]; then
   else
     started=1
   fi
+  # herdr reports agy ready while agy waits on a screen only a person may answer: its terms, after an update too, or
+  # its sign-in. A brief typed there would answer it.
+  if [ "$provider" = agy ] && [ "$started" -eq 0 ]; then
+    case $(herdr agent read "$pane" --source recent --lines 60 2>/dev/null || true) in
+      *"Terms of Service"* | *"Data Use"*)
+        started=1 out="agy is waiting for its terms screen: run agy once yourself and complete it." ;;
+      *"not signed in"* | *"Select login method"*)
+        started=1 out="agy is not signed in: run agy once yourself and sign in." ;;
+    esac
+  fi
   if [ "$started" -ne 0 ] || ! out=$(herdr agent prompt "$pane" "$brief" 2>&1); then
     screen=$(herdr agent read "$pane" 2>/dev/null | tail -n 20 || true)
     if [ "$provider" = codex ]; then

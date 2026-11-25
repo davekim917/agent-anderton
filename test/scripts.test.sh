@@ -3519,6 +3519,21 @@ agy_refused "an agy worker is refused in a worktree whose workspace hooks would 
 git -C "$alpha" rm -q -r .agent
 git -C "$alpha" -c user.name=t -c user.email=t@example.invalid commit -q -m "drop example workspace hooks"
 
+# agy opens on its terms screen after an update, and herdr still reports it ready: the brief must not go into it.
+cat > "$work/agy-terms-screen" <<'SCREEN'
+Terms of Service & Data Use
+
+  > [x] Yes, I agree to help improve Antigravity CLI by allowing
+      Google to collect and use my Interactions data,
+    [Previous]      [Done]
+SCREEN
+rm -f "$FAKE_LOG.prompt"
+: > "$FAKE_LOG.closed"
+agy_spawn "${agy_env[@]}" "FAKE_SCREEN=$work/agy-terms-screen" -- --provider agy --effort high --base HEAD agy-refused
+agy_refused "an agy worker whose agy waits at its terms screen is refused, its tab closed" 1 \
+  "agy is waiting for its terms screen: run agy once yourself and complete it"
+check "with no brief typed into the screen" eval '[ ! -e "$FAKE_LOG.prompt" ] && grep -qx w9:t40 "$FAKE_LOG.closed"'
+
 rm -f "$FAKE_LOG.prompt" "$FAKE_LOG.agent-get.w9:p5"
 agy_agent agy
 agy_spawn "${agy_env[@]}" -- --provider agy --effort xhigh --model gemini-example --base HEAD agy-worker
