@@ -874,6 +874,16 @@ check "nor the first report's call and result appended again under new entry ids
   eval '[ "$status" -eq 4 ]'
 hc_retire hc-delivery --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+hc_spawn hc-peer
+hc_report
+hc_typed "Hold the merge until I check the export."
+hc_add '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"send-peer","name":"SendMessage","input":{"to":"lead-session","message":"Can you check whether the host backup includes transcripts?"}}]}}'
+hc_add '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send-peer","content":[{"type":"text","text":"{\"success\":true,\"message\":\"sent\"}"}]}]}}'
+hc_retire hc-peer
+check "a delivered send to the Anderton that opens with no kind is no report, so the typed message still holds it" \
+  eval '[ "$status" -eq 4 ] && contains "the user: Hold the merge until I check the export."'
+hc_retire hc-peer --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 hc_spawn hc-resumed
 hc_typed "Use the staging bucket."
 hc_report
@@ -1576,6 +1586,14 @@ check "reporting to the session that started it, it has a worker's kinds" [ "$st
 gate eea-1 "$epsilon" epsilon-other '"Got it."'
 check "and is held like a worker" [ "$status" -eq 2 ]
 rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-host.json" "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
+# A worker record whose session now holds a live Anderton role is a peer: its Anderton never sweeps it.
+jq -nc --arg d "$epsilon" --argjson p "$p_ea" '{name: "epsilon-fleet-a", dir: $d, root: $d, spawner: "epsilon-host", claudeSession: {id: "eea-1", pid: $p}}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
+jq -nc --arg d "$epsilon" --argjson p "$p_ew" '{name: "eps-worker", dir: $d, root: $d, spawner: "epsilon-host", claudeSession: {id: "eew-1", pid: $p}}' > "$CLAUDE_CONFIG_DIR/anderton/workers/eps-worker.json"
+out=$(env CLAUDE_PID="$p_eh" "$scripts/waiting.sh" --workers)
+check "waiting.sh --workers lists the repository's holder's worker" contains "eps-worker.json"
+check "but not a worker record whose session holds a project's role" eval '! contains "epsilon-fleet-a.json"'
+rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
+jq -nc --arg d "$epsilon" '{name: "eps-worker", dir: $d, spawner: "epsilon-fleet-a"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/eps-worker.json"
 
 # Without ps, a holder cannot be proven live, so nothing is held, a scope's holder's repeat included.
 send eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nMira asks: one more?"'

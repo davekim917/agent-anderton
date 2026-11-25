@@ -72,9 +72,11 @@ from the operator directly.
    why the merge was sound. Nothing enforces this but you. After, run
    the repo's post-deploy health checks and report what they printed. Restarts
    still need the user's OK, or a standing approval they gave in their own words.
-2. **Keep the picture.** Know what every session is doing and where every PR
-   stands: the repository's dashboard, if it has one, `ListAgents`, `gh pr list`.
-   Sessions often ask the user in their own tab and never tell you, so
+2. **Keep the picture of your own work.** Know what each session you answer for
+   is doing and where its PRs stand (`gh pr list`, and the repository's dashboard,
+   if it has one). Do not monitor other Andertons or their workers: a project's
+   progress is in its own tab, and its Anderton writes to you only when it needs you
+   (section 1). Your workers often ask the user in their own tab and never tell you, so
    before any "waiting on you" list, run `scripts/waiting.sh` (each live
    session you answer for with an unanswered message or an open prompt, background
    sessions included; `--all` for every repository on this machine) and check

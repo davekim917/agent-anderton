@@ -355,7 +355,8 @@ def delivered(event, block):
 
 def scan_inbound(events, anderton, launch, final_replies_report, held, seen):
     """Walks one transcript in order, keeping in held the messages that arrived since the worker's last report: a message
-    it delivered to its Anderton, or under a Codex Anderton, which reads its final replies, one that opens with a kind.
+    it delivered to its Anderton, or under a Codex Anderton, which reads its final replies, a reply, either one opening
+    with a kind.
     An entry, or a tool call, Claude Code appends again (a resumed or forked session) counts once, where it first
     appeared."""
     sends = {}
@@ -375,7 +376,8 @@ def scan_inbound(events, anderton, launch, final_replies_report, held, seen):
                         continue
                     seen["tools"].add(block.get("id"))
                     args = block.get("input") or {}
-                    if isinstance(args.get("message"), str) and args["message"].strip() and anderton.addressed(args.get("to")):
+                    if isinstance(args.get("message"), str) and REPORT.match(report_text(args["message"])) and \
+                            anderton.addressed(args.get("to")):
                         sends[block.get("id")] = True
             if final_replies_report and message.get("stop_reason") == "end_turn" and \
                     REPORT.match(report_text(entry_text(message.get("content")))):
