@@ -443,6 +443,36 @@ clearable_pid=""
 register_clearable "$replacement_pid" after-clear
 if codex_role "$script/worker.sh" message clearable 'Refuse before the resumed Stop hook.' > "$tmp/refused" 2>&1; then exit 1; fi
 grep -q 'has not registered its Anderton Stop hook' "$tmp/refused"
+# A worker a Claude Anderton started, whose last turn ended under that Anderton, takes directions from the holder that
+# takes the role over.
+claude_role "$script/claim.sh" --take-over
+inherited_plain="$claims/workers/inherited-plain.json"
+jq '.name = "inherited-plain" | .spawnerProvider = "claude" | .claudeLaunchId = "inherited-plain-id"
+  | del(.claudeSession, .reportTransport, .claudeDirection)' "$clearable" > "$inherited_plain"
+sleep 60 &
+inherited_plain_pid=$!
+jq -nc --argjson pid "$inherited_plain_pid" --arg dir "$clearable_dir" '
+  {pid:$pid, sessionId:"inherited-plain-id", name:"inherited-plain", cwd:$dir}' > "$CLAUDE_CONFIG_DIR/sessions/$inherited_plain_pid.json"
+touch "$CLAUDE_CONFIG_DIR/projects/fixture/inherited-plain-id.jsonl"
+jq -nc --arg dir "$clearable_dir" --arg file "$CLAUDE_CONFIG_DIR/projects/fixture/inherited-plain-id.jsonl" '
+  {session_id:"inherited-plain-id", cwd:$dir, transcript_path:$file, hook_event_name:"Stop"}' |
+  env CLAUDE_PID="$inherited_plain_pid" CLAUDE_CODE_SESSION_ID=inherited-plain-id ANDERTON_WATCH_TICK=1 "$script/watch.sh" \
+  > "$tmp/inherited-plain-hook" 2>&1 &
+inherited_plain_watch=$!
+for _ in $(seq 1 50); do
+  if jq -e '.claudeSession.id == "inherited-plain-id"' "$inherited_plain" >/dev/null; then break; fi
+  sleep 0.2
+done
+sleep 1
+codex_role "$script/claim.sh" --take-over
+codex_role "$script/worker.sh" message inherited-plain 'Take the inherited direction.'
+watch_status=0
+wait "$inherited_plain_watch" || watch_status=$?
+[ "$watch_status" = 2 ]
+grep -q 'Take the inherited direction.' "$tmp/inherited-plain-hook"
+kill "$inherited_plain_pid"
+wait "$inherited_plain_pid" 2>/dev/null || true
+rm -f "$inherited_plain" "$CLAUDE_CONFIG_DIR/sessions/$inherited_plain_pid.json"
 
 jq -nc --arg dir "$PWD" '
   {name:"another-name",root:$dir,dir:$dir,adopted:true,sessionId:"fixture-claude"}' > "$claims/workers/another-name.json"
@@ -483,7 +513,10 @@ jq -nc --arg dir "$clearable_dir" '
   user("turn-two";"3";"Report the next milestone."),
   send("outbound-two";"3";"former-claude";"RESULT: same milestone"),
   send("prior-socket";"3";"uds:/run/claude/984.sock";"RESULT: scoped socket milestone"),
-  send("wrong-socket";"3";"uds:/run/claude/985.sock";"RESULT: unrelated socket")
+  send("wrong-socket";"3";"uds:/run/claude/985.sock";"RESULT: unrelated socket"),
+  user("turn-three";"3";"Report the third milestone."),
+  send("outbound-three";"3";"former-claude";"RESULT: third milestone"),
+  reply("restated-final";"RESULT: the third milestone, restated in other words")
 ' > "$legacy_transcript"
 TZ=UTC touch -t 203001030100 "$legacy_transcript"
 jq -nc --argjson pid "$replacement_pid" --arg dir "$clearable_dir" '
@@ -500,6 +533,7 @@ native_gate() {
 native_gate outbound-one former-claude 'RESULT: same milestone'
 native_gate outbound-two former-claude 'RESULT: same milestone'
 native_gate prior-socket 'uds:/run/claude/984.sock' 'RESULT: scoped socket milestone'
+native_gate outbound-three former-claude 'RESULT: third milestone'
 # An agy holder of the role holds the same native sends for its sweep.
 mkdir "$tmp/agybin"
 cat > "$tmp/agybin/herdr" <<'STUB'
@@ -521,6 +555,7 @@ mv "$claims/reports/routes" "$tmp/codex-routes"
 PATH="$tmp/agybin:$PATH" native_gate outbound-one former-claude 'RESULT: same milestone'
 PATH="$tmp/agybin:$PATH" native_gate outbound-two former-claude 'RESULT: same milestone'
 PATH="$tmp/agybin:$PATH" native_gate prior-socket 'uds:/run/claude/984.sock' 'RESULT: scoped socket milestone'
+PATH="$tmp/agybin:$PATH" native_gate outbound-three former-claude 'RESULT: third milestone'
 diff -r "$tmp/codex-routes" "$claims/reports/routes"
 rm -rf "$tmp/codex-routes"
 mv "$tmp/codex-claim" "$root_claim"
@@ -538,6 +573,9 @@ grep -qx 'RESULT: scoped socket milestone' "$tmp/native-output"
 grep -qx 'RESULT: fallback final' "$tmp/native-output"
 grep -qx 'RESULT: old unread final' "$tmp/native-output"
 if grep -Eq 'historical transport|old delivered echo|unrelated message|unrelated socket' "$tmp/native-output"; then exit 1; fi
+# A final reply that restates a milestone its turn already sent natively, in other words, is not a second report.
+grep -qx 'RESULT: third milestone' "$tmp/native-output"
+if grep -q 'restated in other words' "$tmp/native-output"; then exit 1; fi
 as_agy_holder
 mkdir "$tmp/agy-native-state" "$tmp/agy-native-stage"
 agy_role env ANDERTON_PROBE_STATE="$tmp/agy-native-state" ANDERTON_PROBE_STAGE="$tmp/agy-native-stage" "$script/worker.sh" sweep \
@@ -548,6 +586,8 @@ grep -qx 'RESULT: scoped socket milestone' "$tmp/agy-native-output"
 grep -qx 'RESULT: fallback final' "$tmp/agy-native-output"
 grep -qx 'RESULT: old unread final' "$tmp/agy-native-output"
 if grep -Eq 'historical transport|old delivered echo|unrelated message|unrelated socket' "$tmp/agy-native-output"; then exit 1; fi
+grep -qx 'RESULT: third milestone' "$tmp/agy-native-output"
+if grep -q 'restated in other words' "$tmp/agy-native-output"; then exit 1; fi
 if codex_role "$script/worker.sh" message legacy-reporter 'Refuse legacy transcript-only identity.' > "$tmp/refused" 2>&1; then exit 1; fi
 mv "$tmp/native-stage/"*.json "$tmp/native-state/"
 codex_role env ANDERTON_PROBE_STATE="$tmp/native-state" ANDERTON_PROBE_STAGE="$tmp/native-stage" "$script/worker.sh" sweep > "$tmp/native-output"

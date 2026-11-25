@@ -190,10 +190,12 @@ def sweep_transcript(worker, claim, routes):
     started = instant(worker["startedAt"])
     latest = checkpoint
     native = set()
+    native_kinds = set()
     last_turn = None
     for event_id, timestamp, text, sent, turn, eligible in reports_and_replies(worker, claim, routes):
         if turn != last_turn:
             native.clear()
+            native_kinds.clear()
             last_turn = turn
         if event_id == checkpoint:
             passed_checkpoint = True
@@ -202,9 +204,12 @@ def sweep_transcript(worker, claim, routes):
         if not eligible:
             continue
         text = report_text(text)
-        duplicate = text in native
-        if sent and REPORT.match(text):
+        kind = REPORT.match(text)
+        # A final reply that restates, in other words, a milestone this turn already sent natively.
+        duplicate = text in native or (not sent and kind is not None and kind.group(1) in native_kinds)
+        if sent and kind:
             native.add(text)
+            native_kinds.add(kind.group(1))
         if event_id == checkpoint:
             continue
         if not passed_checkpoint:
