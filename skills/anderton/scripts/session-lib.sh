@@ -783,12 +783,17 @@ agy_config_paths() {
 agy_config_state() {
   local path entry
   while IFS= read -r path; do
+    # No config.json enables no plugins, as one without the key does; one jq cannot read is digested whole.
+    if [ "$path" = "$HOME/.gemini/config/config.json" ]; then
+      entry=null
+      if [ -e "$path" ] || [ -L "$path" ]; then entry=$(jq -cS '.plugins // null' "$path" 2>/dev/null) || entry=""; fi
+      if [ -n "$entry" ]; then
+        printf '%s\tplugins %s\n' "$path" "$(printf '%s' "$entry" | sha256_stdin)"
+        continue
+      fi
+    fi
     if [ ! -e "$path" ] && [ ! -L "$path" ]; then
       printf '%s\tabsent\n' "$path"
-      continue
-    fi
-    if [ "$path" = "$HOME/.gemini/config/config.json" ] && entry=$(jq -cS '.plugins // null' "$path" 2>/dev/null); then
-      printf '%s\tplugins %s\n' "$path" "$(printf '%s' "$entry" | sha256_stdin)"
       continue
     fi
     printf '%s\t%s\n' "$path" "$(

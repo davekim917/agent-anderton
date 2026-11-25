@@ -3444,6 +3444,15 @@ mkdir -p "$agyhome/.gemini/config" "$agyhome/.gemini/antigravity-cli" "$work/agy
 printf '{}' > "$agyhome/.gemini/hooks.json"
 printf '{}' > "$agyhome/.gemini/antigravity-cli/hooks.json"
 printf '{"plugins":{"example-plugin":{"enabled":false}},"exampleSetting":1}' > "$agyhome/.gemini/config/config.json"
+# Without config.json agy enables no plugins, as with a config.json that saves only settings; an unreadable one counts.
+# shellcheck source=SCRIPTDIR/../skills/anderton/scripts/session-lib.sh
+plugins_state() { (HOME="$work/cfghome" && . "$scripts/session-lib.sh" && agy_config_state "$work/cfghome" | grep -F config/config.json); }
+mkdir -p "$work/cfghome/.gemini/config"
+no_config=$(plugins_state)
+printf '{"exampleSetting":1}' > "$work/cfghome/.gemini/config/config.json"
+check "a config.json that saves only settings is the same plugin state as none" [ "$(plugins_state)" = "$no_config" ]
+printf '{"plugins":' > "$work/cfghome/.gemini/config/config.json"
+check "and one that is not JSON is not" [ "$(plugins_state)" != "$no_config" ]
 printf '#!/bin/sh\nexit 0\n' > "$work/agyguard/plugins/workflow-agents/hooks/agy-guard.sh"
 printf 'export const WATCHDOG_SECONDS = 3630;\n' > "$work/agyguard/plugins/workflow-agents/hooks/agy-supervisor.ts"
 # herdr runs agy by name, and agy-guard.sh runs bun: both only need to be on PATH here.
