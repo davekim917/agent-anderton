@@ -171,6 +171,15 @@ agent_in w9:p78 agy
 as ANDERTON_AGY_SESSION=agy-proj-1 ANDERTON_AGY_NAME=agy-proj "${herdr_env[@]}" HERDR_PANE_ID=w9:p78 -- "$scripts/claim.sh" --project example
 check "an agy session claims a named project's role" eval '[ "$status" -eq 0 ] && contains "project example claimed by agy session agy-proj-1"'
 
+# A workgroup's role on agy is a workgroup-scoped claim, which tells the host it started as any holder's does.
+agent_in w9:p80 agy
+printf '#!/bin/sh\ncat >> "%s"\n' "$FAKE/events" > "$tmp/bin/event-log"
+chmod +x "$tmp/bin/event-log"
+as ANDERTON_AGY_SESSION=agy-wg-1 ANDERTON_AGY_NAME=agy-wg "${herdr_env[@]}" HERDR_PANE_ID=w9:p80 \
+  "ANDERTON_EVENT_COMMAND=$tmp/bin/event-log" -- "$scripts/claim.sh" --project workgroup:example/demo
+check "an agy session claims a workgroup project's role" eval '[ "$status" -eq 0 ] && contains "project workgroup:example/demo claimed by agy session agy-wg-1"'
+check "and the host hears it started" eventually grep -q '"scope":"workgroup:example/demo","kind":"start"' "$FAKE/events"
+
 # Once herdr no longer shows the holder in its pane, the role is free, and its watch leaves.
 rm -f "$FAKE/agent-get.w9:p77"
 grep -vx w9:p77 "$FAKE/panes" > "$FAKE/panes.tmp" || true
