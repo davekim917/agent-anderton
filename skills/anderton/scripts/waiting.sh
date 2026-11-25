@@ -62,7 +62,7 @@ if [ -n "$worker_list" ]; then
       codex) [ "$(record_provider "$r")" = codex ] || continue ;;
       transcript) uses_claude_transcript "$r" "$(invoking_provider)" || continue ;;
     esac
-    if worker_belongs "$r" "$root" "$mine" && ! live_anderton_session "$r"; then printf '%s\n' "$r"; fi
+    if worker_belongs "$r" "$root" "$mine"; then printf '%s\n' "$r"; fi
   done
   exit 0
 fi
@@ -363,7 +363,6 @@ EOF
     if [ -z "$name" ] || [ -z "$dir" ]; then continue; fi
     if [ -z "$all" ] && [ "$(jq -r '.root // empty' "$r")" != "$root" ]; then continue; fi
     [ -z "$mine" ] || worker_belongs "$r" "$root" "$mine" || continue
-    ! live_anderton_session "$r" || continue
     provider=$(jq -r '.provider // "claude"' "$r")
     if [ "$provider" = codex ]; then
       "$(dirname "$0")/codex-worker.py" inactive "$r" || continue

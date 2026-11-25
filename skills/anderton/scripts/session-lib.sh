@@ -429,41 +429,6 @@ claude_worker_identity_matches() {
   [ -n "$(claude_worker_identities "$2" "$3" "$4" "$1")" ]
 }
 
-# live_anderton_session <worker record>: true when the session the record names now holds a live Anderton role in the
-# record's repository. That session is a peer, not a worker: no sweep reads it, Ready to retire never lists it and
-# retire.sh refuses it. A Claude holder's session is matched as claude_worker_identities matches one, by session id or
-# by pid with that process's start time, and a record from before launch ids by its launch brief in the holder's
-# transcript; a Codex or agy holder by its thread or session id.
-live_anderton_session() {
-  local worker=$1 r p reg sid started t
-  while IFS= read -r r; do
-    [ -n "$r" ] || continue
-    case $(record_provider "$r") in
-      claude)
-        p=$(jq -r '.pid // empty' "$r" 2>/dev/null)
-        reg="$sessions/$p.json"
-        if [ -z "$p" ] || ! is_holder "$reg" "$r"; then continue; fi
-        sid=$(jq -r '.sessionId // empty' "$reg" 2>/dev/null)
-        started=$(jq -r '.startedAt // empty | floor' "$reg" 2>/dev/null)
-        if claude_worker_identity_matches "$worker" "$sid" "$p" "$started"; then return 0; fi
-        jq -e '.claudeSession == null and .claudeLaunchId == null and .adopted != true' "$worker" >/dev/null 2>&1 || continue
-        case $sid in '' | *[!a-zA-Z0-9-]*) continue ;; esac
-        for t in "$home"/projects/*/"$sid.jsonl"; do
-          if [ -f "$t" ] && "$anderton_scripts/claude-worker.py" legacy-launch-matches "$worker" "$t" >/dev/null 2>&1; then return 0; fi
-        done
-        ;;
-      codex | agy)
-        jq -en --slurpfile w "$worker" --slurpfile h "$r" '$h[0].sessionId as $s
-          | ($s // "") != "" and ($w[0].id == $s or $w[0].sessionId == $s)' >/dev/null 2>&1 || continue
-        [ "$(claim_state "$r")" = gone ] || return 0
-        ;;
-    esac
-  done <<EOF
-$(project_holders "$(jq -r '.root // empty' "$worker" 2>/dev/null)")
-EOF
-  return 1
-}
-
 claude_worker_identities() {
   local sid=$1 pid=$2 started=$3 process_start="" result file
   local -a args
