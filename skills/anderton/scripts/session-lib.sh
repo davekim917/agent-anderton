@@ -1028,6 +1028,8 @@ emit_event() {
   # Only a role claimed for a workgroup has anywhere on the host to show, and only a scope of plain ids is passed on.
   [[ $scope =~ $event_scope_re ]] || return 0
   case $timeout in '' | *[!0-9]*) timeout=3 ;; esac
+  # Base 10: a leading zero would make bash read 08 as a bad octal number and the watchdog would never fire.
+  timeout=$((10#$timeout))
   json=$(jq -nc --arg claim "$claim" --arg scope "$scope" --arg kind "$kind" '{claimId: $claim, scope: $scope, kind: $kind}') || return 0
   for field in "$@"; do
     case $field in
