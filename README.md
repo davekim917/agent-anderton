@@ -406,6 +406,10 @@ own workers, and hears when they block. Only one per repository deploys, though:
 their deploys to it, since two sessions that both ship is the problem this exists to stop. One
 session holds one role.
 
+Andertons message each other only for shared or host-level work: a deploy to run, a host fix or
+lookup only the other can do, a fact only it can read, or an answer to its question. They never
+relay their workers' progress to each other; each project's results stay in its own tab.
+
 <details>
 <summary><b>How it works</b></summary>
 
