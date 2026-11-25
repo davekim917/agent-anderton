@@ -146,7 +146,9 @@ worker's herdr pane instead, only while herdr shows that worker's session there,
 idle. A tmux or adopted worker has no recorded pane, so type it in its own pane.
 Known limits of that typed direction: herdr reads the pane and then types into it in two calls, so a turn that starts
 between them gets the direction while busy, as with the agy watch. And the transcript records typed input as human, so
-`retire.sh` holds that worker until `--reviewed-through`. That makes it hold more often, never less.
+`retire.sh` holds that worker until `--reviewed-through`. That makes it hold more often, never less. herdr checks the pane's
+session and then types into the pane in a separate call, so a `/clear` between the two delivers the direction to the new
+session in that pane.
 
 ### Open an agy Anderton
 
