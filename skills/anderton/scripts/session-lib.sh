@@ -743,6 +743,20 @@ EOF
   fi
 }
 
+# The settings for an agy session that trusts folder $1: agy asks whether to trust each new folder, and extends the
+# trust saved for a parent no further than home. --settings is never saved, but it replaces what settings.json says
+# for each key it names, so this is the saved settings with $1 added to their trust. Prints why when it cannot.
+agy_session_settings() {
+  local saved="$HOME/.gemini/antigravity-cli/settings.json"
+  if [ ! -e "$saved" ]; then
+    jq -nc --arg dir "$1" '{trustedWorkspaces: [$dir]}'
+  elif ! jq -ce --arg dir "$1" 'if type == "object" then . + {trustedWorkspaces: (((.trustedWorkspaces // []) + [$dir]) | unique)}
+    else error("not an object") end' "$saved" 2>/dev/null; then
+    echo "$saved is not a JSON object, so agy's own settings could not be kept for this session."
+    return 1
+  fi
+}
+
 # The SHA-256 of standard input, by whichever of the two common tools this system has.
 sha256_stdin() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi
