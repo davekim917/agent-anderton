@@ -6,6 +6,8 @@
 # holder that is no longer live (a resumed session runs as a new process; a restarted one has a new start time).
 # --probe <command> names a script watch.sh runs every --probe-every seconds (default 60) for this role, waking
 # the holder when it prints something; --no-probe removes it. A claim that names neither keeps the role's probe.
+# Each claim has a claimId, kept by the same session and new for any other; a project role's claim emits a start
+# event to ANDERTON_EVENT_COMMAND when the host sets one (see emit_event in session-lib.sh).
 # Exit 0: claimed (or already held by this session). Exit 3: held by another live session, or this
 # session already holds another role in the repository.
 # Portable to macOS's bash 3.2 and BSD userland.
@@ -158,12 +160,18 @@ if [ -n "$record" ] && [ "$(jq -r '.sessionId // empty' "$record")" = "$sid" ] &
   { [ -n "$rebind" ] || caller_matches_claim "$record"; }; then
   peer=$(jq -c '.peerMessage // null' "$record")
 fi
+# The same session keeps its claim's id through a re-claim, a rebind and a resume; any other session gets a new one.
+claim_id=""
+if [ -n "$record" ] && [ "$(jq -r '.sessionId // empty' "$record")" = "$sid" ]; then
+  claim_id=$(jq -r '.claimId // empty' "$record" 2>/dev/null || true)
+fi
+claim_id=${claim_id:-$(new_claim_id)} || { echo "Could not make a claim id." >&2; exit 1; }
 jq -nc --arg root "$root" --arg scope "$scope" --arg pid "$pid" --arg started "$started" --arg sid "$sid" \
   --arg provider "$provider" --arg codex_home "$codex_home" --arg codex_dir "$codex_dir" --arg name "$name" \
   --arg claude_report_since "$claude_report_since" --argjson previous_claude "$previous_claude" \
-  --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson probe "${kept:-null}" --argjson peer "$peer" \
+  --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson probe "${kept:-null}" --argjson peer "$peer" --arg claim_id "$claim_id" \
   '{root: $root, scope: (if $scope == "" then null else $scope end), provider: $provider,
-    sessionId: $sid, claimedAt: $at}
+    sessionId: $sid, claimId: $claim_id, claimedAt: $at}
    + (if $provider == "codex" then {codexHome: $codex_home, dir: $codex_dir, name: $name, claudeReportSince: $claude_report_since,
                                     claudeReportPreviousHolder: $previous_claude}
       else {pid: ($pid | tonumber), startedAt: ($started | tonumber? // null)} end)
@@ -172,6 +180,8 @@ jq -nc --arg root "$root" --arg scope "$scope" --arg pid "$pid" --arg started "$
 mv "$state.tmp" "$state"
 # The machine-wide file now speaks for no project, so nothing reads a stale holder from it.
 if [ "$record" = "$legacy_holder" ]; then mv "$legacy_holder" "$legacy_holder.migrated"; fi
+# A rebind runs on every turn's end; only a claim starts the role's thread on the host.
+if [ -z "$rebind" ]; then emit_event "$claim_id" "$scope" start; fi
 if [ "$provider" = codex ]; then
   "$anderton_scripts/codex-worker.py" start-watch "$anderton_scripts/watch.sh" "$state"
   echo "$role claimed by Codex thread $sid."

@@ -1074,6 +1074,153 @@ printf '%s\n' "$agents_before" > "$FAKE_AGENTS"
 mv "$work/lead-reg.bak" "$lead_reg"
 rm -f "$(holder_path "$(project_root "$alpha")" tabs)"
 
+# ANDERTON_EVENT_COMMAND: a workgroup role's claim, its workers' starts, statuses, sent reports and retirement reach
+# the host's command as JSON on stdin. The command can never hold up or fail a script, and unset nothing runs.
+events="$work/events"
+: > "$events"
+export ANDERTON_EVENT_COMMAND="cat >> '$events'"
+wait_events() { # wait_events <count>: up to five seconds for that many events
+  local i=0
+  while [ "$(grep -c . "$events")" -lt "$1" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  [ "$(grep -c . "$events")" -ge "$1" ]
+}
+event() { sed -n "${1}p" "$events"; } # event <n>: the nth event
+(cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project workgroup:acme/ci >/dev/null)
+ev_record=$(holder_path "$(project_root "$alpha")" workgroup:acme/ci)
+ev_claim=$(jq -r '.claimId // empty' "$ev_record")
+check "a claim records a claim id" eval 'printf "%s" "$ev_claim" | grep -qE "^[a-f0-9-]{36}$"'
+check "and a workgroup role's claim emits its start, and nothing else" eval 'wait_events 1 &&
+  [ "$(event 1)" = "{\"claimId\":\"$ev_claim\",\"scope\":\"workgroup:acme/ci\",\"kind\":\"start\"}" ]'
+(cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project workgroup:acme/ci --rebind >/dev/null)
+check "the same session keeps its claim id, and a rebind emits nothing" eval 'sleep 0.5;
+  [ "$(jq -r .claimId "$ev_record")" = "$ev_claim" ] && [ "$(grep -c . "$events")" -eq 1 ]'
+
+run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t8 "$scripts/spawn.sh" --effort high ev-worker <<'BRIEF'
+Task.
+BRIEF
+ev_worker="$CLAUDE_CONFIG_DIR/anderton/workers/ev-worker.json"
+check "a worker's record names the claim that started it" [ "$(jq -r .spawnerClaimId "$ev_worker")" = "$ev_claim" ]
+check "and its start is emitted under that claim" eval 'wait_events 2 &&
+  [ "$(event 2)" = "{\"claimId\":\"$ev_claim\",\"scope\":\"workgroup:acme/ci\",\"kind\":\"start\",\"worker\":\"ev-worker\"}" ]'
+
+ev_sid=$(jq -r .claudeLaunchId "$ev_worker")
+spawn; p_ev=$pid; session "$p_ev" "$ev_sid" "$work/wt-ev-worker" ev-worker
+send "$ev_sid" "$work/wt-ev-worker" lead-session '"RESULT: secret-client fix https://github.com/acme-org/web/pull/12/files, https://github.com/acme-org/web/tree/secret-branch and https://example.com/x, verified."'
+check "a worker's sent RESULT is a milestone: its kind and PR or issue links rebuilt from their parts, never its text" eval 'wait_events 3 &&
+  [ "$(event 3 | jq -c .)" = "{\"claimId\":\"$ev_claim\",\"scope\":\"workgroup:acme/ci\",\"kind\":\"milestone\",\"milestoneKind\":\"RESULT\",\"worker\":\"ev-worker\",\"links\":[\"https://github.com/acme-org/web/pull/12\"]}" ] &&
+  ! grep -qE "secret-client|secret-branch|/files" "$events"'
+unset ANDERTON_EVENT_COMMAND
+gate "$ev_sid" "$work/wt-ev-worker" lead-session '"RESULT: https://github.com/acme-org/web/pull/13"'
+check "with no event command, the report hook extracts no milestone" eval '[ "$status" -eq 0 ] &&
+  [ -z "$(sed -n 3p "$CLAUDE_CONFIG_DIR/anderton/reports/pending/$call")" ]'
+rm -f "$CLAUDE_CONFIG_DIR/anderton/reports/pending/$call"
+export ANDERTON_EVENT_COMMAND="cat >> '$events'"
+gate "$ev_sid" "$work/wt-ev-worker" lead-session '"Got it, starting now."'
+GATE_RESPONSE='{"success":false}' send "$ev_sid" "$work/wt-ev-worker" lead-session '"BLOCKED: no access."'
+check "a held message, or a send that failed, emits nothing" eval 'sleep 0.5; [ "$(grep -c . "$events")" -eq 3 ]'
+
+turn() { # turn <session id> <cwd>: what UserPromptSubmit runs; sets $out
+  out=$(printf '{"session_id":"%s","cwd":"%s","hook_event_name":"UserPromptSubmit"}' "$1" "$2" |
+    "$scripts/watch.sh" --turn-start 2>&1)
+}
+ev_status() { # ev_status <status> [worker]: the status event's JSON
+  if [ -n "${2:-}" ]; then
+    printf '{"claimId":"%s","scope":"workgroup:acme/ci","kind":"status","status":"%s","worker":"%s"}' "$ev_claim" "$1" "$2"
+  else
+    printf '{"claimId":"%s","scope":"workgroup:acme/ci","kind":"status","status":"%s"}' "$ev_claim" "$1"
+  fi
+}
+mkfifo "$work/turn.fifo"
+(sleep 5 > "$work/turn.fifo") &
+fifo_writer=$!
+sleepers="$sleepers $fifo_writer"
+started_at=$(date +%s)
+set +e
+env -u ANDERTON_EVENT_COMMAND "$scripts/watch.sh" --turn-start < "$work/turn.fifo"
+status=$?
+out=$(env -u ANDERTON_EVENT_COMMAND PATH="$work/no-tools" "$BASH" "$scripts/watch.sh" --turn-start < /dev/null 2>&1)
+set -e
+check "with no event command, the prompt hook returns before reading the prompt or running any tool" eval '[ "$status" -eq 0 ] &&
+  [ $(($(date +%s) - started_at)) -le 1 ] && [ -z "$out" ]'
+kill "$fifo_writer" 2>/dev/null || true
+turn "$ev_sid" "$work/wt-ev-worker"
+check "a worker's prompt starts its turn as working, and the hook prints nothing" eval '[ -z "$out" ] && wait_events 4 &&
+  [ "$(event 4)" = "$(ev_status working ev-worker)" ]'
+turn lead-1 "$alpha"
+check "so does the role holder's" eval '[ -z "$out" ] && wait_events 5 && [ "$(event 5)" = "$(ev_status working)" ]'
+registry "$p_lead" idle
+check "a long turn shows working throughout: nothing but its end says otherwise" eval 'sleep 1; [ "$(grep -c . "$events")" -eq 5 ]'
+registry "$p_ev" waiting
+printf '{"session_id":"lead-1","cwd":"%s","hook_event_name":"Stop"}' "$alpha" |
+  env CLAUDE_PID="$p_lead" ANDERTON_WATCH_TICK=0.05 "$scripts/watch.sh" >/dev/null 2>&1 &
+ev_watch=$!
+sleepers="$sleepers $ev_watch"
+check "the turn's end says idle" eval 'wait_events 6 && grep -qxF "$(ev_status idle)" "$events"'
+check "and the watch says when a worker blocks on a person mid-turn" eval 'wait_events 7 &&
+  grep -qxF "$(ev_status waiting ev-worker)" "$events"'
+registry "$p_ev" busy
+check "and when it goes back to work" eval 'wait_events 8 && [ "$(event 8)" = "$(ev_status working ev-worker)" ]'
+check "once per change" eval 'sleep 0.5; [ "$(grep -c . "$events")" -eq 8 ]'
+kill "$ev_watch" 2>/dev/null || true
+wait "$ev_watch" 2>/dev/null || true
+
+agents_before=$(cat "$FAKE_AGENTS")
+echo '[]' > "$FAKE_AGENTS"
+run "$scripts/retire.sh" ev-worker
+check "retiring the worker emits its done" eval 'wait_events 9 &&
+  [ "$(event 9)" = "{\"claimId\":\"$ev_claim\",\"scope\":\"workgroup:acme/ci\",\"kind\":\"done\",\"worker\":\"ev-worker\"}" ]'
+printf '%s\n' "$agents_before" > "$FAKE_AGENTS"
+
+started_at=$(date +%s)
+(cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 ANDERTON_EVENT_TIMEOUT=1 \
+  ANDERTON_EVENT_COMMAND="echo \$\$ > '$work/ev-hang.pid'; exec sleep 30" "$scripts/claim.sh" --project workgroup:acme/ci >/dev/null)
+check "a command that hangs never holds up the script" [ $(($(date +%s) - started_at)) -le 2 ]
+check "and is ended after ANDERTON_EVENT_TIMEOUT" eval 'sleep 2; [ -s "$work/ev-hang.pid" ] && ! kill -0 "$(cat "$work/ev-hang.pid")" 2>/dev/null'
+(cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 ANDERTON_EVENT_TIMEOUT=08 \
+  ANDERTON_EVENT_COMMAND="echo \$\$ > '$work/ev-hang08.pid'; exec sleep 30" "$scripts/claim.sh" --project workgroup:acme/ci >/dev/null)
+ended() { # ended <pid file> <seconds>: true once that process is gone, within that many seconds
+  local i=0
+  while [ "$i" -lt "$(($2 * 10))" ]; do
+    if [ -s "$1" ] && ! kill -0 "$(cat "$1")" 2>/dev/null; then return 0; fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+check "a timeout with a leading zero is read in base 10 and still ends the command" ended "$work/ev-hang08.pid" 20
+(cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 ANDERTON_EVENT_TIMEOUT=1 \
+  ANDERTON_EVENT_COMMAND="trap '' TERM; sleep 30 & echo \$! > '$work/ev-child.pid'; echo \$\$ > '$work/ev-parent.pid'; wait" \
+  "$scripts/claim.sh" --project workgroup:acme/ci >/dev/null)
+check "the timeout ends the command's whole process group, past a TERM it ignores" eval 'sleep 4;
+  [ -s "$work/ev-child.pid" ] && [ -s "$work/ev-parent.pid" ] &&
+  ! kill -0 "$(cat "$work/ev-child.pid")" 2>/dev/null && ! kill -0 "$(cat "$work/ev-parent.pid")" 2>/dev/null'
+set +e
+(cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 ANDERTON_EVENT_COMMAND="exit 7" "$scripts/claim.sh" --project workgroup:acme/ci >/dev/null 2>&1)
+status=$?
+set -e
+check "a command that fails never fails the script" [ "$status" -eq 0 ]
+# shellcheck disable=SC2034 # read by the check below
+count=$(grep -c . "$events")
+(cd "$alpha" && env -u ANDERTON_EVENT_COMMAND CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project workgroup:acme/ci >/dev/null)
+rm -f "$ev_record"
+(cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project tabs >/dev/null)
+rm -f "$(holder_path "$(project_root "$alpha")" tabs)"
+for odd in "workgroup:acme/has space" "workgroup:Acme" "workgroup:acme/ci;echo"; do
+  (cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project "$odd" >/dev/null)
+  rm -f "$(holder_path "$(project_root "$alpha")" "$odd")"
+done
+check "unset, for a scope that is not a workgroup's, or one with anything but plain ids, nothing is emitted" eval 'sleep 0.5;
+  [ "$(grep -c . "$events")" -eq "$count" ]'
+spawn; p_other_lead=$pid; session "$p_other_lead" other-lead-1 "$alpha" other-lead
+(cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project workgroup:acme/ci >/dev/null)
+# shellcheck disable=SC2034 # read by the check below
+first_claim=$(jq -r .claimId "$ev_record")
+(cd "$alpha" && env CLAUDE_PID="$p_other_lead" CLAUDE_CODE_SESSION_ID=other-lead-1 "$scripts/claim.sh" --project workgroup:acme/ci --take-over >/dev/null)
+check "another session claiming the same scope gets a new claim id" eval '[ -n "$first_claim" ] &&
+  [ "$(jq -r .claimId "$ev_record")" != "$first_claim" ]'
+rm -f "$ev_record"
+unset ANDERTON_EVENT_COMMAND
+
 rm -f "$FAKE_LOG.tab" "$FAKE_LOG.window"
 for bad in 1-worker a-name-longer-than-thirty-two-chars; do
   run env "${herdr_env[@]}" "$scripts/spawn.sh" --effort high "$bad" <<'BRIEF'

@@ -6,6 +6,20 @@
 # for it, and nothing here can answer a prompt. When the role's claim names a probe (claim.sh --probe), it also runs
 # that probe on its interval and wakes the holder with whatever it prints, or after ANDERTON_PROBE_FAILURES (default
 # 3) failed runs in a row with "probe failing". Anywhere else, and on any failure, it exits 0 and prints nothing.
+# UserPromptSubmit: the turn starts. Every prompt waits on this hook, so with no event command it returns before
+# reading anything, and with one it hands the payload to a detached job. It prints nothing: what it prints joins the
+# prompt.
+if [ "${1:-}" = --turn-start ]; then
+  [ -n "${ANDERTON_EVENT_COMMAND:-}" ] || exit 0
+  turn=$(cat)
+  (
+    # shellcheck source=SCRIPTDIR/session-lib.sh
+    . "$(dirname "$0")/session-lib.sh" || exit 0
+    emit_turn working "$(jq -r '.session_id // empty' <<< "$turn" 2>/dev/null)" \
+      "$(jq -r '.cwd // empty' <<< "$turn" 2>/dev/null)"
+  ) </dev/null >/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
+  exit 0
+fi
 # shellcheck source=SCRIPTDIR/session-lib.sh
 . "$(dirname "$0")/session-lib.sh"
 
@@ -185,6 +199,7 @@ EOF
 $(project_holders "$(project_root "$cwd")")
 EOF
   fi
+  emit_turn idle "$sid" "$cwd" >/dev/null 2>&1
   if [ -z "$record" ]; then
     watch_claude_worker
     exit $?
@@ -494,6 +509,43 @@ deliver_pending() {
   rm -rf "$pending"
 }
 
+# A worker of this role blocking on a person mid-turn, and going back to work, to ANDERTON_EVENT_COMMAND (see emit_event
+# in session-lib.sh): no hook fires inside a turn, and this watch runs while the holder is idle. Turn hooks own working
+# and idle otherwise. A Codex worker has no registry status, so it reports none.
+status_seen="$holders/$key.statuses"
+registry_status() {
+  [ -n "$1" ] || return 0
+  case $(jq -r '.status // empty' "$sessions/$1.json" 2>/dev/null) in
+    busy) echo working ;;
+    idle) echo idle ;;
+    waiting) echo waiting ;;
+  esac
+}
+emit_statuses() {
+  local claim scope w name wsid st last now_s=""
+  [ -n "${ANDERTON_EVENT_COMMAND:-}" ] || return 0
+  claim=$(jq -r '.claimId // empty' "$record" 2>/dev/null)
+  scope=$(jq -r '.scope // empty' "$record" 2>/dev/null)
+  [ -n "$claim" ] && [ -n "$scope" ] || return 0
+  for w in "$holders"/workers/*.json; do
+    [ -f "$w" ] || continue
+    [ "$(jq -r '.spawnerClaimId // empty' "$w" 2>/dev/null)" = "$claim" ] || continue
+    name=$(jq -r '.name // empty' "$w")
+    wsid=$(jq -r '.claudeSession.id // .claudeLaunchId // empty' "$w")
+    [ -n "$name" ] && [ -n "$wsid" ] || continue
+    st=$(registry_status "$(session_pid "$wsid")")
+    last=$(awk -v n="$name" '$1 == n { print $2 }' "$status_seen" 2>/dev/null)
+    if [ "$st" = waiting ] && [ "$last" != waiting ]; then
+      emit_event "$claim" "$scope" status "status=waiting" "worker=$name"
+    elif [ "$last" = waiting ] && [ "$st" = working ]; then
+      emit_event "$claim" "$scope" status "status=working" "worker=$name"
+    fi
+    now_s="$now_s$name ${st:-none}
+"
+  done
+  printf '%s' "$now_s" > "$status_seen.tmp" 2>/dev/null && mv -f "$status_seen.tmp" "$status_seen"
+}
+
 while still_holds_role; do
   if orphaned "$$" "$parent_pid"; then exit 0; fi
   if [ "$runtime" = codex ] && [ "$(( $(date +%s) - last_liveness_check ))" -ge 60 ]; then
@@ -502,6 +554,7 @@ while still_holds_role; do
   fi
   # Only the lock's owner watches: a watch that lost it leaves, and one whose lock vanished takes it back.
   if [ "$(watch_owner)" != "$$" ] && ! take_watch; then exit 0; fi
+  emit_statuses
   if [ "$runtime" = codex ] && [ -d "$pending" ]; then
     now=$(cd "$cwd" 2>/dev/null &&
       ANDERTON_PENDING_PROBE_STAGE="$pending/probe/stage" ANDERTON_BLOCKER_BOOKMARKS="$holders/$key.codex-probe/bookmarks" \

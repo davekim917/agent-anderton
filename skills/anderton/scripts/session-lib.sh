@@ -1013,3 +1013,91 @@ take_repository_lock() {
   trap 'exit 1' INT TERM HUP
   echo $$ > "$repository_lock/pid"
 }
+
+# One event about this role or one of its workers, for the host: ANDERTON_EVENT_COMMAND, when the host sets it, runs
+# in the background with the event as JSON on stdin. It never delays a hook: it is detached, killed after
+# ANDERTON_EVENT_TIMEOUT seconds (default 3), and its output and exit status are ignored. Unset, nothing runs.
+# emit_event <claim id> <scope> <kind> [field=value ...], fields being status, milestoneKind and worker, plus
+# link=<url> repeated. Nothing is sent without a claim id or for a scope other than workgroup:<id>[/<project>].
+event_scope_re='^workgroup:[a-z][a-z0-9-]{0,62}(/[a-z0-9][a-z0-9.-]{0,63})?$'
+event_link_re='^https://github\.com/[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}/(pull|issues)/[0-9]{1,9}$'
+emit_event() {
+  local claim=$1 scope=$2 kind=$3 json field cmd=${ANDERTON_EVENT_COMMAND:-} timeout=${ANDERTON_EVENT_TIMEOUT:-3}
+  shift 3
+  [ -n "$cmd" ] && [ -n "$claim" ] || return 0
+  # Only a role claimed for a workgroup has anywhere on the host to show, and only a scope of plain ids is passed on.
+  [[ $scope =~ $event_scope_re ]] || return 0
+  case $timeout in '' | *[!0-9]*) timeout=3 ;; esac
+  # Base 10: a leading zero would make bash read 08 as a bad octal number and the watchdog would never fire.
+  timeout=$((10#$timeout))
+  json=$(jq -nc --arg claim "$claim" --arg scope "$scope" --arg kind "$kind" '{claimId: $claim, scope: $scope, kind: $kind}') || return 0
+  for field in "$@"; do
+    case $field in
+      link=*)
+        [[ ${field#link=} =~ $event_link_re ]] || continue
+        json=$(printf '%s' "$json" | jq -c --arg v "${field#link=}" '.links = ((.links // []) + [$v])') || return 0
+        ;;
+      status=* | milestoneKind=* | worker=*)
+        json=$(printf '%s' "$json" | jq -c --arg k "${field%%=*}" --arg v "${field#*=}" '.[$k] = $v') || return 0 ;;
+    esac
+  done
+  (
+    # Its own process group, so the timeout ends whatever the command started too.
+    set -m
+    bash -c "$cmd" <<< "$json" >/dev/null 2>&1 &
+    p=$!
+    set +m
+    # A wall-clock deadline: counting short sleeps drifts on a loaded machine.
+    deadline=$((SECONDS + timeout))
+    while kill -0 -- "-$p" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+      sleep 0.1
+    done
+    if kill -0 -- "-$p" 2>/dev/null; then
+      kill -TERM -- "-$p" 2>/dev/null
+      sleep 1
+      kill -KILL -- "-$p" 2>/dev/null
+    fi
+    wait "$p" 2>/dev/null
+    # The caller's descriptors, such as the repository lock on fd 9, stay with the caller: a slow command holds none.
+  ) </dev/null >/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
+  return 0
+}
+
+# The host's last event about a worker leaving its Anderton: retired, or released and no longer reporting.
+emit_worker_done() {
+  emit_event "$(jq -r '.spawnerClaimId // empty' "$1" 2>/dev/null)" "$(jq -r '.spawnerScope // empty' "$1" 2>/dev/null)" "done" \
+    "worker=$(jq -r '.name // empty' "$1" 2>/dev/null)"
+}
+
+# A session's turn starting (working) or ending (idle), to ANDERTON_EVENT_COMMAND: as the role it holds in its
+# repository, or as the worker a role started. Turn boundaries, not the watch, own these two: no watch runs mid-turn.
+emit_turn() {
+  local status=$1 sid=$2 cwd=$3 r w
+  [ -n "${ANDERTON_EVENT_COMMAND:-}" ] && [ -n "$sid" ] || return 0
+  if [ -n "$cwd" ]; then
+    while IFS= read -r r; do
+      [ -n "$r" ] || continue
+      if [ "$(jq -r '.sessionId // empty' "$r" 2>/dev/null)" = "$sid" ]; then
+        emit_event "$(jq -r '.claimId // empty' "$r")" "$(jq -r '.scope // empty' "$r")" status "status=$status"
+        return 0
+      fi
+    done <<EOF
+$(project_holders "$(project_root "$cwd")")
+EOF
+  fi
+  for w in "$holders"/workers/*.json; do
+    [ -f "$w" ] || continue
+    [ "$(jq -r '.claudeSession.id // .claudeLaunchId // empty' "$w" 2>/dev/null)" = "$sid" ] || continue
+    emit_event "$(jq -r '.spawnerClaimId // empty' "$w")" "$(jq -r '.spawnerScope // empty' "$w")" status \
+      "status=$status" "worker=$(jq -r '.name // empty' "$w")"
+    return 0
+  done
+}
+
+# A fresh id for a new claim: the host binds a claim, not a scope, so a later session claiming the same scope is not
+# bound by an earlier one's approval.
+new_claim_id() {
+  local id
+  id=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null) || return 1
+  printf '%s\n' "$id" | tr '[:upper:]' '[:lower:]'
+}
