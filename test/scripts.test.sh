@@ -3450,7 +3450,7 @@ printf '#!/bin/sh\nexit 0\n' > "$work/agybin/agy"
 cp "$work/agybin/agy" "$work/agybin/bun"
 chmod +x "$work/agybin/agy" "$work/agybin/bun"
 HOME="$agyhome" "$scripts/agy-hooks.sh" register --guard "$work/agyguard" >/dev/null
-agy_env=("${herdr_env[@]}" "HOME=$agyhome" "PATH=$work/agybin:$PATH" FAKE_HERDR_TAB=w9:t40)
+agy_env=("${herdr_env[@]}" "HOME=$agyhome" "PATH=$work/agybin:$PATH" FAKE_HERDR_TAB=w9:t40 ANDERTON_AGY_SCREEN_WAIT=6)
 (cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project tabs >/dev/null)
 hc_spawn hc-caller
 jq -c '.spawnerSession = "gone-session"' "$CLAUDE_CONFIG_DIR/anderton/workers/hc-caller.json" >"$work/hc-caller.tmp"
@@ -3529,7 +3529,11 @@ Terms of Service & Data Use
 SCREEN
 rm -f "$FAKE_LOG.prompt"
 : > "$FAKE_LOG.closed"
-agy_spawn "${agy_env[@]}" "FAKE_SCREEN=$work/agy-terms-screen" -- --provider agy --effort high --base HEAD agy-refused
+# agy draws it a moment after herdr reports it ready.
+rm -f "$work/agy-terms-late"
+(sleep 1 && cp "$work/agy-terms-screen" "$work/agy-terms-late") &
+agy_spawn "${agy_env[@]}" "FAKE_SCREEN=$work/agy-terms-late" -- --provider agy --effort high --base HEAD agy-refused
+wait "$!" 2>/dev/null || true
 agy_refused "an agy worker whose agy waits at its terms screen is refused, its tab closed" 1 \
   "agy is waiting for its terms screen: run agy once yourself and complete it"
 check "with no brief typed into the screen" eval '[ ! -e "$FAKE_LOG.prompt" ] && grep -qx w9:t40 "$FAKE_LOG.closed"'

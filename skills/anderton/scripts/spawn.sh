@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Start a full worker in its own worktree of the caller's repository, in a herdr tab or tmux window.
-# $ANDERTON_START_WAIT (seconds, default 30) bounds the wait for a tmux worker to register.
+# $ANDERTON_START_WAIT (seconds, default 30) bounds the wait for a tmux worker to register; $ANDERTON_AGY_SCREEN_WAIT
+# (half-seconds, default 10) how long an agy worker's pane is watched for a screen only a person may answer.
 # Claude workers run on Opus unless --model supplies another model. Codex and agy workers use their configured model.
 # agy workers start only inside herdr, run the agy on PATH, and only while agy-hooks.sh check passes.
 # Worktrees go under $ANDERTON_WORKTREES, default the folder that holds the repository, as wt-<name>.
@@ -366,14 +367,22 @@ if [ "$launcher" = herdr ]; then
     started=1
   fi
   # herdr reports agy ready while agy waits on a screen only a person may answer: its terms, after an update too, or
-  # its sign-in. A brief typed there would answer it.
+  # its sign-in. A brief typed there would answer it. agy draws that screen a moment after herdr reports it ready, so
+  # the pane is read for $ANDERTON_AGY_SCREEN_WAIT half-seconds (default 10) before the brief goes.
   if [ "$provider" = agy ] && [ "$started" -eq 0 ]; then
-    case $(herdr agent read "$pane" --source recent --lines 60 2>/dev/null || true) in
-      *"Terms of Service"* | *"Data Use"*)
-        started=1 out="agy is waiting for its terms screen: run agy once yourself and complete it." ;;
-      *"not signed in"* | *"Select login method"*)
-        started=1 out="agy is not signed in: run agy once yourself and sign in." ;;
-    esac
+    for _ in $(seq 1 "${ANDERTON_AGY_SCREEN_WAIT:-10}"); do
+      case $(herdr agent read "$pane" --source recent --lines 60 2>/dev/null || true) in
+        *"Terms of Service"* | *"Data Use"*)
+          started=1 out="agy is waiting for its terms screen: run agy once yourself and complete it."
+          break
+          ;;
+        *"not signed in"* | *"Select login method"*)
+          started=1 out="agy is not signed in: run agy once yourself and sign in."
+          break
+          ;;
+      esac
+      sleep 0.5
+    done
   fi
   if [ "$started" -ne 0 ] || ! out=$(herdr agent prompt "$pane" "$brief" 2>&1); then
     screen=$(herdr agent read "$pane" 2>/dev/null | tail -n 20 || true)
