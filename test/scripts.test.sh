@@ -1589,10 +1589,22 @@ rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-host.json" "$CLAUDE_CONFIG_DI
 # A worker record whose session now holds a live Anderton role is a peer: its Anderton never sweeps it.
 jq -nc --arg d "$epsilon" --argjson p "$p_ea" '{name: "epsilon-fleet-a", dir: $d, root: $d, spawner: "epsilon-host", claudeSession: {id: "eea-1", pid: $p}}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
 jq -nc --arg d "$epsilon" --argjson p "$p_ew" '{name: "eps-worker", dir: $d, root: $d, spawner: "epsilon-host", claudeSession: {id: "eew-1", pid: $p}}' > "$CLAUDE_CONFIG_DIR/anderton/workers/eps-worker.json"
+# A worker that stopped, whose pid a live holder now has: a different session and process start, so still a worker.
+jq -nc --arg d "$epsilon" --argjson p "$p_ea" '{name: "eps-stopped", dir: $d, root: $d, spawner: "epsilon-host", claudeSession: {id: "eps-gone", pid: $p, procStart: "1"}}' > "$CLAUDE_CONFIG_DIR/anderton/workers/eps-stopped.json"
+# A record from before launch ids, whose launch brief opens the transcript of a session that now holds a project's role.
+spawn; p_eg=$pid; session "$p_eg" eeg-1 "$epsilon" epsilon-fleet-g "$(date +%s)000"
+claim_status eeg-1 "$p_eg" --scope fleet-g
+mkdir -p "$CLAUDE_CONFIG_DIR/projects/p"
+jq -nc --arg d "$epsilon" --arg at "$recent" '{type: "user", sessionId: "eeg-1", cwd: $d, timestamp: $at, message: {role: "user",
+  content: ("Task.\nYou are a worker the Anderton session \"epsilon-host\" started for the task above, in " + $d + ".")}}' > "$CLAUDE_CONFIG_DIR/projects/p/eeg-1.jsonl"
+jq -nc --arg d "$epsilon" --arg at "$five_min_ago" '{name: "eps-legacy", dir: $d, root: $d, spawner: "epsilon-host", startedAt: $at}' > "$CLAUDE_CONFIG_DIR/anderton/workers/eps-legacy.json"
 out=$(env CLAUDE_PID="$p_eh" "$scripts/waiting.sh" --workers)
 check "waiting.sh --workers lists the repository's holder's worker" contains "eps-worker.json"
 check "but not a worker record whose session holds a project's role" eval '! contains "epsilon-fleet-a.json"'
-rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
+check "nor a record from before launch ids whose launch brief opens a project holder's transcript" eval '! contains "eps-legacy.json"'
+check "while a stopped worker whose pid a live holder reuses is still listed, so its unread reply is swept" contains "eps-stopped.json"
+rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json" "$CLAUDE_CONFIG_DIR/anderton/workers/eps-stopped.json" "$CLAUDE_CONFIG_DIR/anderton/workers/eps-legacy.json"
+rm -f "$(holder_path "$epsilon" fleet-g)"
 jq -nc --arg d "$epsilon" '{name: "eps-worker", dir: $d, spawner: "epsilon-fleet-a"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/eps-worker.json"
 
 # Without ps, a holder cannot be proven live, so nothing is held, a scope's holder's repeat included.
@@ -2759,6 +2771,11 @@ jq -c --arg at "$two_days_ago" '.startedAt = $at' "$CLAUDE_CONFIG_DIR/anderton/w
 mv "$work/gw.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/gone-wt.json"
 git -C "$rho" worktree remove "$work/wt-side-done"
 git -C "$rho" fetch -q origin
+# A worker record whose session now holds the side project's role: a peer, never ready to retire however finished.
+rho_worker peer-done
+git -C "$rho" worktree remove "$work/wt-peer-done"
+jq -c --argjson p "$p_rs" '.claudeSession = {id: "rs-1", pid: $p}' "$CLAUDE_CONFIG_DIR/anderton/workers/peer-done.json" > "$work/pd.tmp"
+mv "$work/pd.tmp" "$CLAUDE_CONFIG_DIR/anderton/workers/peer-done.json"
 jq -nc --arg d "$work/wt-bg-busy" '[{kind: "background", name: "bg-renamed", id: "id-bg-busy", sessionId: "bgb-1", cwd: "/elsewhere", state: "working"}]' > "$FAKE_AGENTS"
 out=$(cd "$rho" && env CLAUDE_PID="$p_rl" "$scripts/waiting.sh")
 check "waiting.sh has a Ready to retire section" contains "=== Ready to retire"
@@ -2781,6 +2798,13 @@ check "nor a new worker reusing the name of one whose old session went idle long
 check "nor one idle a day while its PR waits open on review" eval '! contains "review-wait"'
 check "a finished worker keeps its own reason, not the idle one" eval 'contains "- gone-wt: worktree gone" && ! contains "gone-wt: idle"'
 check "nor a background worker working under another name" eval '! contains "bg-busy"'
+check "nor a worker record whose session holds a live project role" eval '! contains "peer-done"'
+set +e
+out=$(cd "$rho" && env CLAUDE_PID="$p_rl" CLAUDE_CODE_SESSION_ID=rl-1 "$scripts/retire.sh" peer-done 2>&1)
+status=$?
+set -e
+check "retire.sh refuses that record, so no reply from the peer can clear a hold" \
+  eval '[ "$status" -eq 1 ] && contains "holds a live Anderton role" && [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/peer-done.json" ] && kill -0 "$p_rs"'
 echo '[]' > "$FAKE_AGENTS"
 out=$(cd "$rho" && env CLAUDE_PID="$p_rl" FAKE_AGENTS="$work/no-such-agents.json" "$scripts/waiting.sh" 2>&1 || true)
 check "when claude agents fails, no worker is judged ready, since a busy one would read as idle" eval '! contains "Ready to retire" && contains "claude agents failed"'
@@ -2790,7 +2814,7 @@ out=$(cd "$rho" && env CLAUDE_PID="$p_rl" "$scripts/waiting.sh" --blocked)
 check "--blocked, for watch.sh, prints no Ready to retire section" eval '! contains "Ready to retire"'
 out=$(env CLAUDE_PID="$p_lead" "$scripts/waiting.sh")
 check "another project's Anderton is not shown them" eval '! contains "gone-wt"'
-for n in gone-wt landed fresh dirty busy-done squashed reused renamed backport bg-busy open-pr side-done stale lately no-session busy-old reborn review-wait; do
+for n in gone-wt landed fresh dirty busy-done squashed reused renamed backport bg-busy open-pr side-done stale lately no-session busy-old reborn review-wait peer-done; do
   rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/$n.json"
   [ ! -d "$work/wt-$n" ] || git -C "$rho" worktree remove --force "$work/wt-$n"
 done

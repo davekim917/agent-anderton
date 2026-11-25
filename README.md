@@ -530,7 +530,9 @@ Anderton: a delivered `SendMessage` report, or for a Codex Anderton reading a Cl
 final reply that is one; for a Codex worker, a completed turn whose final message is one. A report opens with a
 kind, so any other send to the Anderton, such as a host request from a project's Anderton that still has a worker
 record, never clears a hold. A worker record whose session now holds a live Anderton role is a peer: no sweep
-reads its transcript for reports. A message after it
+reads it, Ready to retire never lists it, and `retire.sh` refuses it (exit 1, nothing closed). Its session is matched by
+session id, or by pid with that process's start time (never a pid alone), and a record from before launch ids by its
+launch brief in the holder's transcript. A message after it
 from anyone but that Anderton (typed in the worker's tab, a voice relay, another session, a Codex TUI turn)
 holds the retirement: it exits 4, lists each message's time and first line, and writes `<name>.held` beside the
 record, which `waiting.sh` (and so the watch) lists until the worker is retired. The Anderton's own messages are

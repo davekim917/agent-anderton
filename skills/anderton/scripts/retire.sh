@@ -78,6 +78,10 @@ if [ "$(jq -r '.adopted // false' "$record")" = true ]; then
   echo "Released '$name': it keeps running and no longer reports to $spawner."
   exit 0
 fi
+if live_anderton_session "$record"; then
+  echo "Not retiring '$name': its session now holds a live Anderton role, so it is a peer, not a worker. Nothing was closed." >&2
+  exit 1
+fi
 
 # hold <why> [messages JSON] [advice]: records the hold for waiting.sh and refuses. What is recorded stays the same
 # across retries, so the watch tells it once.

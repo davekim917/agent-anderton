@@ -50,23 +50,6 @@ $records
 EOF
   return 1
 }
-# live_anderton <worker record>: true when the session the record names now holds a live Anderton role here. That session
-# is a peer, not a worker, so its transcript is never swept for reports.
-live_anderton() {
-  local r
-  while IFS= read -r r; do
-    [ -n "$r" ] || continue
-    jq -en --slurpfile w "$1" --slurpfile h "$r" '$w[0] as $w | $h[0] as $h
-      | ([$w.claudeSession.id, $w.claudeLaunchId, $w.sessionId, $w.id] | map(select(. != null and . != ""))) as $ids
-      | ($h.sessionId != null and ($ids | index($h.sessionId)) != null)
-        or ($h.pid != null and $w.claudeSession.pid != null and ($h.pid | tostring) == ($w.claudeSession.pid | tostring))' \
-      >/dev/null 2>&1 || continue
-    [ "$(claim_state "$r")" = gone ] || return 0
-  done <<EOF
-$records
-EOF
-  return 1
-}
 answers_for() { # answers_for <name> <cwd> [session id] [pid] [start]: true when the caller's role answers for that session
   [ -z "$mine" ] || [ "$(answering_role "$@")" = "$mine" ]
 }
@@ -79,7 +62,7 @@ if [ -n "$worker_list" ]; then
       codex) [ "$(record_provider "$r")" = codex ] || continue ;;
       transcript) uses_claude_transcript "$r" "$(invoking_provider)" || continue ;;
     esac
-    if worker_belongs "$r" "$root" "$mine" && ! live_anderton "$r"; then printf '%s\n' "$r"; fi
+    if worker_belongs "$r" "$root" "$mine" && ! live_anderton_session "$r"; then printf '%s\n' "$r"; fi
   done
   exit 0
 fi
@@ -380,6 +363,7 @@ EOF
     if [ -z "$name" ] || [ -z "$dir" ]; then continue; fi
     if [ -z "$all" ] && [ "$(jq -r '.root // empty' "$r")" != "$root" ]; then continue; fi
     [ -z "$mine" ] || worker_belongs "$r" "$root" "$mine" || continue
+    ! live_anderton_session "$r" || continue
     provider=$(jq -r '.provider // "claude"' "$r")
     if [ "$provider" = codex ]; then
       "$(dirname "$0")/codex-worker.py" inactive "$r" || continue
