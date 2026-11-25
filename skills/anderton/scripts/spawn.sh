@@ -330,8 +330,17 @@ elif [ "$provider" = agy ]; then
   # An agy model id names its effort (gemini-4-neon-low), and agy rejects --effort beside one.
   if [ -n "$model" ]; then set -- "$@" --model "$model"; else set -- "$@" --effort "$effort"; fi
   # agy asks whether to trust each new folder, and extends the trust saved for a parent no further than home. The
-  # worktree spawn.sh just made is trusted for this session alone; --settings is never saved.
-  set -- "$@" --settings "$(jq -nc --arg dir "$dir" '{trustedWorkspaces: [$dir]}')"
+  # worktree spawn.sh just made is trusted for this session alone: --settings is never saved. It replaces what
+  # settings.json says for each key it names, so it carries the saved settings, the new worktree added to their trust.
+  agy_settings="$HOME/.gemini/antigravity-cli/settings.json"
+  if [ -e "$agy_settings" ]; then
+    agy_settings=$(jq -ce --arg dir "$dir" 'if type == "object" then . + {trustedWorkspaces: (((.trustedWorkspaces // []) + [$dir]) | unique)}
+      else error("not an object") end' "$agy_settings" 2>/dev/null) ||
+      failed "$agy_settings is not a JSON object, so agy's own settings could not be kept for this worker."
+  else
+    agy_settings=$(jq -nc --arg dir "$dir" '{trustedWorkspaces: [$dir]}')
+  fi
+  set -- "$@" --settings "$agy_settings"
   out=$("$anderton_scripts/agy-hooks.sh" check --workspace "$dir" 2>&1) || failed "$out
 agy would run unguarded, so no agy worker was started."
 else
