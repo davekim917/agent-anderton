@@ -150,7 +150,9 @@ skills/anderton/scripts/agy-anderton.sh --name <name>
 ```
 
 It runs the `agy` on your PATH after the same `agy-hooks.sh check` an agy worker gets, against the repository's own
-workspace roots. It runs with no permission prompts unless you pass `--mode`, and other options go to agy. Its tool
+workspace roots, and trusts the repository for that session only, as `spawn.sh` trusts a worker's worktree (unless
+you pass `--settings` yourself). It runs with no permission prompts unless you pass `--mode`, and other options go to
+agy. Its tool
 shells get `ANDERTON_AGY_SESSION` and `ANDERTON_AGY_NAME`, which these scripts read as the agy Anderton's identity,
 and none of a Claude Code or Codex session's variables. Unless you give `-i`, agy opens on a prompt that points it at
 this skill's `SKILL.md`. It claims with `claim.sh`, or `claim.sh --project <name>` for a named project, as any
