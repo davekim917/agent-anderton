@@ -168,9 +168,11 @@ with workspace writes and user approvals. It uses the configured Codex model
 unless the user names one, with the effort you pass. The local Codex daemon
 and Python 3 must be available. If startup stops before the worker gets a
 thread ID, inspect its tab. `--provider agy` starts an agy worker only when the
-user asks for one: Linux and herdr only, sandboxed, no `--mode`, effort at most
-xhigh. Read its reports with `worker.sh output` (a screen read), since nothing
-sweeps agy workers. Once it has received the launch brief, run
+user asks for one, inside herdr, with no permission prompts and the guard as the
+gate (`--mode` names an agy mode instead). Read its reports with
+`worker.sh output` (a screen read), since nothing sweeps agy workers, and
+direct it with `worker.sh message`. Your watch tells you when what agy loads
+hooks or agents from changes under it. Once a Codex worker has received the launch brief, run
 `scripts/codex-workers.sh register <name>` to bind it. If launch ended before
 the brief was submitted, resolve the startup issue, have the user close its tab,
 retire the worker, and retry.

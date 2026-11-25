@@ -68,8 +68,8 @@ if [ "$(record_provider "$record")" = agy ]; then
         exit 1
       fi
       agy_check "$record"
-      # The pane must show the agy instance spawn.sh verified, and its launcher must still be alive just before the send.
-      if [ "$agy_state" != running ] || ! agy_launcher_alive "$record"; then
+      # The pane must show the agy spawn.sh started, as it showed it then, just before the send.
+      if [ "$agy_state" != running ]; then
         echo "agy worker '$name' is not running in its pane $pane, so the direction was not sent." >&2
         exit 1
       fi

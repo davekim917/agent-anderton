@@ -1,4 +1,0 @@
-# The agy release install-agy.sh installs. Change all three together, after reading the release notes.
-version=1.5.15
-url=https://github.com/google-antigravity/antigravity-cli/releases/download/1.5.15/agy_cli_linux_x64.tar.gz
-sha256=8d9913298602049ef29e9669f35252b6b79571979ce1bd0fb27753c7bac84114
