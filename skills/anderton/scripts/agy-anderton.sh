@@ -30,8 +30,9 @@ agy would run unguarded, so the agy Anderton was not started." >&2
   exit 1
 fi
 ANDERTON_AGY_SESSION=$(python3 -c 'import uuid; print(uuid.uuid4())')
-ANDERTON_AGY_NAME=$name ANDERTON_AGY_DIR=$dir
-export ANDERTON_AGY_SESSION ANDERTON_AGY_NAME ANDERTON_AGY_DIR
+# exec keeps this pid, so it names the agy process: a relaunch is another, /clear starts a conversation in the same one.
+ANDERTON_AGY_NAME=$name ANDERTON_AGY_DIR=$dir ANDERTON_AGY_PID=$$
+export ANDERTON_AGY_SESSION ANDERTON_AGY_NAME ANDERTON_AGY_DIR ANDERTON_AGY_PID
 # A launch from inside a Claude Code or Codex session would otherwise be read as that session.
 unset CLAUDE_CODE_SESSION_ID CLAUDE_PID CODEX_THREAD_ID
 mode="" prompt="" settings=""

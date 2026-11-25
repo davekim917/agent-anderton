@@ -51,7 +51,7 @@ fi
 
 provider=$(invoking_provider)
 pid=$(invoking_pid)
-codex_home="" codex_dir="" name="" agy_pane="" agy_socket="" agy_dir="" agy_instance=""
+codex_home="" codex_dir="" name="" agy_pane="" agy_socket="" agy_dir="" agy_pid="" agy_start=""
 root=$(invoking_root)
 if [ "$provider" = agy ]; then
   name=${ANDERTON_AGY_NAME:-}
@@ -64,12 +64,10 @@ if [ "$provider" = agy ]; then
     echo "agy session $sid runs in another repository: $agy_dir." >&2
     exit 1
   fi
-  # The agy conversation in the pane, which herdr's agy integration names: a relaunch or /clear there starts another.
-  agy_instance=$(HERDR_SOCKET_PATH="$agy_socket" herdr agent get "$agy_pane" 2>/dev/null |
-    jq -r '.result.agent.agent_session.value // empty | tostring' 2>/dev/null) || agy_instance=""
-  if [ -z "$agy_instance" ]; then
-    echo "herdr does not name the agy conversation in pane $agy_pane, so the role could not tell it from the next one there." >&2
-    echo "Install herdr's agy integration (herdr integration install antigravity-cli), then claim again." >&2
+  agy_pid=${ANDERTON_AGY_PID:-}
+  case $agy_pid in '' | *[!0-9]*) agy_start="" ;; *) agy_start=$(proc_start "$agy_pid") ;; esac
+  if [ -z "$agy_start" ]; then
+    echo "An agy Anderton claims only from a session agy-anderton.sh started inside herdr, while it runs." >&2
     exit 1
   fi
 elif [ "$provider" = codex ]; then
@@ -188,13 +186,13 @@ claim_id=${claim_id:-$(new_claim_id)} || { echo "Could not make a claim id." >&2
 jq -nc --arg root "$root" --arg scope "$scope" --arg pid "$pid" --arg started "$started" --arg sid "$sid" \
   --arg provider "$provider" --arg codex_home "$codex_home" --arg codex_dir "$codex_dir" --arg name "$name" \
   --arg claude_report_since "$claude_report_since" --argjson previous_claude "$previous_claude" \
-  --arg agy_pane "$agy_pane" --arg agy_socket "$agy_socket" --arg agy_dir "$agy_dir" --arg agy_instance "$agy_instance" \
+  --arg agy_pane "$agy_pane" --arg agy_socket "$agy_socket" --arg agy_dir "$agy_dir" --arg agy_pid "$agy_pid" --arg agy_start "$agy_start" \
   --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson probe "${kept:-null}" --argjson peer "$peer" --arg claim_id "$claim_id" \
   '{root: $root, scope: (if $scope == "" then null else $scope end), provider: $provider,
     sessionId: $sid, claimId: $claim_id, claimedAt: $at}
    + (if $provider == "codex" then {codexHome: $codex_home, dir: $codex_dir, name: $name, claudeReportSince: $claude_report_since,
                                     claudeReportPreviousHolder: $previous_claude}
-      elif $provider == "agy" then {dir: $agy_dir, name: $name, pane: $agy_pane, socket: $agy_socket, agyInstance: $agy_instance,
+      elif $provider == "agy" then {dir: $agy_dir, name: $name, pane: $agy_pane, socket: $agy_socket, agyPid: ($agy_pid | tonumber), agyStart: $agy_start,
                                     claudeReportSince: $claude_report_since, claudeReportPreviousHolder: $previous_claude}
       else {pid: ($pid | tonumber), startedAt: ($started | tonumber? // null)} end)
    + (if $probe == null then {} else {probe: $probe} end)

@@ -22,8 +22,7 @@ and they send their deploys to it.
 
 This role can run in Claude Code, Codex or agy. In agy, the session is one
 `scripts/agy-anderton.sh --name <name>` opened from a herdr pane; its tools carry
-the identity `claim.sh` reads. The claim binds the agy conversation, so claim again
-after `/clear`. In Codex, use an interactive thread opened
+the identity `claim.sh` reads. In Codex, use an interactive thread opened
 from herdr or tmux with `scripts/codex-anderton.sh` so its tools receive the pane's
 multiplexer context. Its tools need access to the selected Codex daemon socket,
 the shared Anderton files, and the worker worktrees. Ask the operator to approve

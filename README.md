@@ -154,14 +154,14 @@ workspace's hooks from each directory between its working directory and the chec
 `agy-hooks.sh check` an agy worker gets, against that checkout's workspace roots, and trusts the checkout for that
 session only, as `spawn.sh` trusts a worker's worktree (unless you pass `--settings` yourself). It runs with no permission prompts unless you pass `--mode`, and other options go to
 agy. Its tool
-shells get `ANDERTON_AGY_SESSION`, `ANDERTON_AGY_NAME` and `ANDERTON_AGY_DIR` (the checkout), which these scripts read
-as the agy Anderton's identity,
+shells get `ANDERTON_AGY_SESSION`, `ANDERTON_AGY_NAME`, `ANDERTON_AGY_DIR` (the checkout) and `ANDERTON_AGY_PID`, which
+these scripts read as the agy Anderton's identity,
 and none of a Claude Code or Codex session's variables. Unless you give `-i`, agy opens on a prompt that points it at
 this skill's `SKILL.md`. It claims with `claim.sh`, or `claim.sh --project <name>` for a named project, as any
-Anderton does. The claim records its herdr pane, its checkout, and the agy conversation herdr names in the pane, so
-it needs herdr's agy integration (step 2 below), and `claim.sh` refuses without it. The role is live while herdr shows
-that conversation in that pane, in that checkout, and free once the pane is gone or shows anything else. A new
-conversation there, after you quit and relaunch or after `/clear`, is a new Anderton: it claims the role again.
+Anderton does. The claim records its herdr pane, its checkout, and the agy process the launcher became (its pid and
+start time). The role is live while herdr shows agy in that pane, in that checkout, and that process still runs, so it
+survives `/clear`, which starts a new conversation in the same process, as a Claude Anderton's role does. It is free
+once the pane is gone or shows anything else, or agy was quit and relaunched there.
 
 agy has no Stop hook, so `claim.sh` starts the role's watch in the background. The watch runs as long as the role and
 tells the Anderton what Claude's watch would: blocked sessions, probe news, peer messages and worker reports, the same
@@ -191,8 +191,7 @@ normal `gh` login. agy's guard hook, from your bootstrap checkout, gates every t
    ```
 
    Run `agy` once, sign in and accept its terms, so it sets up `~/.gemini/config`.
-2. **Install herdr's agy integration** (optional for workers, needed for an agy Anderton):
-   `herdr integration install antigravity-cli`. It adds a
+2. **Optionally, install herdr's agy integration:** `herdr integration install antigravity-cli`. It adds a
    `herdr` entry to `~/.gemini/config/hooks.json` that tells herdr each agy pane's session, so later steps act
    only on the session `spawn.sh` started. Without it they act on the agy herdr shows in the worker's pane and
    worktree. Install it before step 3: herdr cannot write the read-only file step 3 leaves. If you install it

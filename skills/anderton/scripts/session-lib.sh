@@ -719,18 +719,18 @@ place_state() {
   esac
 }
 
-# Where agy worker record $1 stands, from one herdr snapshot of its pane. Sets:
-#   agy_state: running (herdr shows agy in the recorded pane, in the worktree, and as the agy session the record bound,
-#     when it bound one), gone (herdr says the pane is gone), elsewhere (the pane shows no agent, another one, or another
+# Where agy record $1 (a worker or an agy Anderton's claim) stands, from one herdr snapshot of its pane. Sets:
+#   agy_state: running (herdr shows agy in the recorded pane, in the worktree, as the agy session the record bound when
+#     it bound one, and, for a claim, while the agy process it recorded still runs), gone (herdr says the pane is gone), elsewhere (the pane shows no agent, another one, or another
 #     session) or unknown (herdr gave no answer these scripts can read);
 #   agy_status: herdr's status for the pane (idle, working, blocked, done), or nothing;
 #   agy_agent, agy_cwd: what that snapshot shows in the pane, or nothing.
 # shellcheck disable=SC2034 # the scripts that source this file read what it sets
 agy_check() {
-  local socket pane dir instance out got_instance got_pane
+  local socket pane dir instance apid astart out got_instance got_pane
   agy_state=unknown agy_status="" agy_agent="" agy_cwd=""
   socket=$(jq -r '.socket // empty' "$1") pane=$(jq -r '.pane // empty' "$1") dir=$(jq -r '.dir // empty' "$1")
-  instance=$(jq -r '.agyInstance // empty' "$1")
+  instance=$(jq -r '.agyInstance // empty' "$1") apid=$(jq -r '.agyPid // empty' "$1") astart=$(jq -r '.agyStart // empty' "$1")
   [ -n "$socket" ] && [ -n "$pane" ] && command -v herdr >/dev/null 2>&1 || return 0
   # herdr exits non-zero, with its error on stderr, for a pane with no agent and for a missing pane.
   out=$(HERDR_SOCKET_PATH="$socket" herdr agent get "$pane" 2>&1) || true
@@ -749,7 +749,8 @@ $(printf '%s' "$out" | jq -r '(.result.agent // empty) | [.agent // "", .agent_s
 EOF
   [ -n "$got_pane" ] || return 0
   if [ "$got_pane" = "$pane" ] && [ "$agy_agent" = agy ] && { [ -z "$instance" ] || [ "$got_instance" = "$instance" ]; } &&
-    { [ "$agy_cwd" = "$dir" ] || case $agy_cwd in "$dir"/*) true ;; *) false ;; esac; }; then
+    { [ "$agy_cwd" = "$dir" ] || case $agy_cwd in "$dir"/*) true ;; *) false ;; esac; } &&
+    { [ -z "$apid" ] || process_start_matches "$apid" "$astart"; }; then
     agy_state=running
   else
     agy_state=elsewhere
