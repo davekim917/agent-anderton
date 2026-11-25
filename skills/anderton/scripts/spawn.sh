@@ -327,8 +327,11 @@ elif [ "$provider" = agy ]; then
     mode="no permission prompts; the guard gates every tool call"
     set -- --dangerously-skip-permissions
   fi
-  # An agy model id names its effort (gemini-4-neon-low), and agy refuses --effort beside one.
+  # An agy model id names its effort (gemini-4-neon-low), and agy rejects --effort beside one.
   if [ -n "$model" ]; then set -- "$@" --model "$model"; else set -- "$@" --effort "$effort"; fi
+  # agy asks whether to trust each new folder, and extends the trust saved for a parent no further than home. The
+  # worktree spawn.sh just made is trusted for this session alone; --settings is never saved.
+  set -- "$@" --settings "$(jq -nc --arg dir "$dir" '{trustedWorkspaces: [$dir]}')"
   out=$("$anderton_scripts/agy-hooks.sh" check --workspace "$dir" 2>&1) || failed "$out
 agy would run unguarded, so no agy worker was started."
 else

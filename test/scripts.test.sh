@@ -3560,8 +3560,8 @@ rm -f "$work/agy-ready-late"
 agy_spawn "${agy_env[@]}" "FAKE_SCREEN=$work/agy-ready-late" -- --provider agy --effort xhigh --model gemini-example --base HEAD agy-worker
 wait "$!" 2>/dev/null || true
 check "spawn.sh starts an agy worker in herdr, its brief sent once agy shows its prompt" eval '[ "$status" -eq 0 ] && [ -e "$FAKE_LOG.prompt" ]'
-check "running herdr's agy kind, the agy on PATH, in that tab's pane without prompts, with the model, which names its effort" \
-  [ "$(tr '\n' ' ' < "$FAKE_LOG.start")" = "agent start agy-worker --kind agy --pane w9:p5 --timeout 120000 -- --dangerously-skip-permissions --model gemini-example " ]
+check "running herdr's agy kind, the agy on PATH, in that tab's pane without prompts, with the model, which names its effort, trusting that worktree alone" \
+  [ "$(tr '\n' ' ' < "$FAKE_LOG.start")" = "agent start agy-worker --kind agy --pane w9:p5 --timeout 120000 -- --dangerously-skip-permissions --model gemini-example --settings {\"trustedWorkspaces\":[\"$work/wt-agy-worker\"]} " ]
 check "given the brief, with milestones in its replies" eval 'grep -qF "Tidy the example module." "$FAKE_LOG.prompt" &&
   grep -qF "Put each milestone in your final reply" "$FAKE_LOG.prompt"'
 check "recording it as an agy worker in that pane, bound to the session herdr reports" \
@@ -3652,7 +3652,7 @@ check "and retires it once that work is gone, with its record and what it saw ag
 agy_agent agy blocked
 agy_spawn "${agy_env[@]}" -- --provider agy --effort high --mode plan --base HEAD agy-worker
 check "spawn.sh passes --mode to agy instead of skipping its prompts" eval '[ "$status" -eq 0 ] &&
-  [ "$(tr "\n" " " < "$FAKE_LOG.start")" = "agent start agy-worker --kind agy --pane w9:p5 --timeout 120000 -- --mode plan --effort high " ]'
+  [ "$(tr "\n" " " < "$FAKE_LOG.start")" = "agent start agy-worker --kind agy --pane w9:p5 --timeout 120000 -- --mode plan --effort high --settings {\"trustedWorkspaces\":[\"$work/wt-agy-worker\"]} " ]'
 agy_pane
 agy_blocked
 check "waiting.sh lists an agy worker herdr shows blocked" contains "=== agy-worker (agy, blocked on a person in herdr pane w9:p5"
