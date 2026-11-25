@@ -767,7 +767,7 @@ sha256_stdin() {
 # the guard off or start an unhooked subagent while the worker runs.
 agy_config_paths() {
   local g="$HOME/.gemini" root name
-  for name in config/hooks.json config/hooks config/plugins config/plugins.json config/agents hooks.json \
+  for name in config/hooks.json config/hooks config/plugins config/plugins.json config/config.json config/agents hooks.json \
     antigravity-cli/hooks.json antigravity-cli/plugins antigravity-cli/plugins.json antigravity-cli/agents \
     antigravity-cli/agents.json antigravity-cli/secplugins; do
     printf '%s\n' "$g/$name"
@@ -778,12 +778,17 @@ agy_config_paths() {
 }
 
 # One line per path agy_config_paths names for worktree $1: the path, a tab, and the digest of what is there now (every
-# entry beneath a directory, a link's target, a file's bytes) or "absent".
+# entry beneath a directory, a link's target, a file's bytes) or "absent". Of config/config.json, which also keeps agy's
+# other settings, only the plugins it enables.
 agy_config_state() {
   local path entry
   while IFS= read -r path; do
     if [ ! -e "$path" ] && [ ! -L "$path" ]; then
       printf '%s\tabsent\n' "$path"
+      continue
+    fi
+    if [ "$path" = "$HOME/.gemini/config/config.json" ] && entry=$(jq -cS '.plugins // null' "$path" 2>/dev/null); then
+      printf '%s\tplugins %s\n' "$path" "$(printf '%s' "$entry" | sha256_stdin)"
       continue
     fi
     printf '%s\t%s\n' "$path" "$(

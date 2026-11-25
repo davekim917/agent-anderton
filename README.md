@@ -199,7 +199,9 @@ names for the session, so it carries your saved `~/.gemini/antigravity-cli/setti
 its `trustedWorkspaces`. In a trusted workspace agy loads the worktree's `.agents`, `.agent`, `_agents` and
 `_agent` with no prompt, as Claude Code does in a trusted folder; `agy-hooks.sh check --workspace` runs on the
 worktree before agy starts, and refuses one whose workspace hooks would replace the guard's. With `--model`, the model id names the effort (`gemini-4-neon-low`), and
-`--effort` is not passed, since agy rejects it beside one.
+`--effort` is not passed, since agy rejects it beside one. agy runs its default model when it does not know the one
+named, and says so only in a warning on its screen, so `spawn.sh` reads the screen once more after the prompt shows and
+refuses the worker on that warning; `agy models` lists the ids it knows.
 
 agy runs with `--dangerously-skip-permissions`. Its prompting mode would stop on routine commands, which a Claude
 worker in auto mode does not, and its auto mode needs a terminal sandbox that a plain Linux host may lack, in which case
@@ -213,7 +215,8 @@ agy reloads hooks mid-session. A same-named entry with `"enabled": false` in a w
 switched the guard off on the next turn, and a custom agent that does not inherit customizations runs its subagent
 unhooked. So `spawn.sh` records what agy loads hooks, plugins and agents from as the worker starts:
 
-- `~/.gemini/config/hooks.json`, `hooks/`, `plugins/`, `plugins.json` and `agents/`;
+- `~/.gemini/config/hooks.json`, `hooks/`, `plugins/`, `plugins.json` and `agents/`, and the plugins
+  `~/.gemini/config/config.json` enables (only its `plugins` key: agy also saves other settings there);
 - `~/.gemini/hooks.json`;
 - `~/.gemini/antigravity-cli/hooks.json`, `plugins/`, `plugins.json`, `agents/`, `agents.json` and `secplugins/`;
 - `hooks.json`, `plugins/`, `plugins.json` and `agents/` in each of the worktree's four workspace roots.
@@ -232,6 +235,8 @@ unhooked. So `spawn.sh` records what agy loads hooks, plugins and agents from as
 - The dev and lab scopes are off for agy: their approval exemptions do not apply to agy workers.
 - agy updates itself, and an update that rewrites its built-in plugins (`~/.gemini/antigravity-cli/builtin`) is not
   watched.
+- A link is recorded by where it points, not by what it points at: an edit inside a linked plugin's folder is not
+  seen.
 
 ## Questions
 

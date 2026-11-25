@@ -391,6 +391,15 @@ if [ "$launcher" = herdr ]; then
       esac
       sleep 0.5
     done
+    # agy runs another model when it does not know the one named, and says so only in a warning it may draw after its
+    # prompt, wrapped to the pane's width.
+    if [ "$started" -eq 0 ] && [ -n "$model" ]; then
+      sleep 1
+      case $(herdr agent read "$pane" --source recent --lines 60 2>/dev/null | tr -s '[:space:]' ' ' || true) in
+        *"is not recognized as a known model"*)
+          started=1 out="agy does not know the model $model, so it would run another one: agy models lists the ids it knows." ;;
+      esac
+    fi
   fi
   if [ "$started" -ne 0 ] || ! out=$(herdr agent prompt "$pane" "$brief" 2>&1); then
     screen=$(herdr agent read "$pane" 2>/dev/null | tail -n 20 || true)

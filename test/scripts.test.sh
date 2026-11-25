@@ -3443,6 +3443,7 @@ mkdir -p "$agyhome/.gemini/config" "$agyhome/.gemini/antigravity-cli" "$work/agy
 : > "$agyhome/.gemini/config/.migrated"
 printf '{}' > "$agyhome/.gemini/hooks.json"
 printf '{}' > "$agyhome/.gemini/antigravity-cli/hooks.json"
+printf '{"plugins":{"example-plugin":{"enabled":false}},"exampleSetting":1}' > "$agyhome/.gemini/config/config.json"
 printf '#!/bin/sh\nexit 0\n' > "$work/agyguard/plugins/workflow-agents/hooks/agy-guard.sh"
 printf 'export const WATCHDOG_SECONDS = 3630;\n' > "$work/agyguard/plugins/workflow-agents/hooks/agy-supervisor.ts"
 # herdr runs agy by name, and agy-guard.sh runs bun: both only need to be on PATH here.
@@ -3547,6 +3548,23 @@ wait "$!" 2>/dev/null || true
 agy_refused "an agy worker whose agy waits at its terms screen is refused, its tab closed" 1 \
   "agy is waiting for its terms screen: run agy once yourself and complete it"
 check "with no brief typed into the screen" eval '[ ! -e "$FAKE_LOG.prompt" ] && grep -qx w9:t40 "$FAKE_LOG.closed"'
+# A model agy does not know: it runs another one, and says so only on its screen.
+cat "$work/agy-ready-screen" > "$work/agy-unknown-model-screen"
+cat >> "$work/agy-unknown-model-screen" <<'SCREEN'
+⚠ Warning
+  ⎿  model gemini-example-unknown is not recognized as
+     a known model or custom model in settings. Using
+     "Gemini Example (High)" instead.
+SCREEN
+rm -f "$FAKE_LOG.prompt"
+: > "$FAKE_LOG.closed"
+# It draws the warning a moment after its prompt.
+cp "$work/agy-ready-screen" "$work/agy-unknown-model-late"
+(sleep 0.5 && cp "$work/agy-unknown-model-screen" "$work/agy-unknown-model-late") &
+agy_spawn "${agy_env[@]}" "FAKE_SCREEN=$work/agy-unknown-model-late" -- --provider agy --effort high --model gemini-example-unknown --base HEAD agy-refused
+wait "$!" 2>/dev/null || true
+agy_refused "an agy worker whose model agy does not know is refused" 1 "agy does not know the model gemini-example-unknown"
+check "with no brief sent to the other model" eval '[ ! -e "$FAKE_LOG.prompt" ] && grep -qx w9:t40 "$FAKE_LOG.closed"'
 # Nor into any other screen: without its prompt, agy gets no brief once the wait is over.
 printf 'Something agy has not shown before\n  > Continue\n' > "$work/agy-other-screen"
 : > "$FAKE_LOG.closed"
@@ -3632,6 +3650,15 @@ check "and its next watch does not tell it again" eval 'kill -0 "$agy_watch" 2>/
 kill "$agy_watch" 2>/dev/null || true
 wait "$agy_watch" 2>/dev/null || true
 rm -rf "$work/wt-agy-worker/_agent"
+printf '{"plugins":{"example-plugin":{"enabled":false}},"exampleSetting":2}' > "$agyhome/.gemini/config/config.json"
+agy_blocked
+check "agy settings saved beside its plugin enablement are not a change" eval '! contains "=== agy-worker"'
+printf '{"plugins":{"example-plugin":{"enabled":true}},"exampleSetting":2}' > "$agyhome/.gemini/config/config.json"
+agy_blocked
+check "a plugin enabled in config.json is one header, naming the file" eval '
+  [ "$(printf "%s\n" "$out" | grep -c "^=== agy-worker (agy hook or agent configuration changed")" -eq 1 ] &&
+  contains "$agyhome/.gemini/config/config.json"'
+printf '{"plugins":{"example-plugin":{"enabled":false}},"exampleSetting":1}' > "$agyhome/.gemini/config/config.json"
 
 agy_agent agy working
 agy_retire agy-worker
