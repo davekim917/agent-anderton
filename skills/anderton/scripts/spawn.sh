@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Start a full worker in its own worktree of the caller's repository, in a herdr tab or tmux window.
-# $ANDERTON_START_WAIT (seconds, default 30) bounds the wait for a tmux worker to register; $ANDERTON_AGY_SCREEN_WAIT
-# (half-seconds, default 10) how long an agy worker's pane is watched for a screen only a person may answer.
+# $ANDERTON_START_WAIT (seconds, default 30) bounds the wait for a tmux worker to register; $ANDERTON_AGY_READY_WAIT
+# (half-seconds, default 60) the wait for an agy worker's prompt before its brief is sent.
 # Claude workers run on Opus unless --model supplies another model. Codex and agy workers use their configured model.
 # agy workers start only inside herdr, run the agy on PATH, and only while agy-hooks.sh check passes.
 # Worktrees go under $ANDERTON_WORKTREES, default the folder that holds the repository, as wt-<name>.
@@ -327,8 +327,8 @@ elif [ "$provider" = agy ]; then
     mode="no permission prompts; the guard gates every tool call"
     set -- --dangerously-skip-permissions
   fi
-  set -- "$@" --effort "$effort"
-  if [ -n "$model" ]; then set -- "$@" --model "$model"; fi
+  # An agy model id names its effort (gemini-4-neon-low), and agy refuses --effort beside one.
+  if [ -n "$model" ]; then set -- "$@" --model "$model"; else set -- "$@" --effort "$effort"; fi
   out=$("$anderton_scripts/agy-hooks.sh" check --workspace "$dir" 2>&1) || failed "$out
 agy would run unguarded, so no agy worker was started."
 else
@@ -366,18 +366,23 @@ if [ "$launcher" = herdr ]; then
   else
     started=1
   fi
-  # herdr reports agy ready while agy waits on a screen only a person may answer: its terms, after an update too, or
-  # its sign-in. A brief typed there would answer it. agy draws that screen a moment after herdr reports it ready, so
-  # the pane is read for $ANDERTON_AGY_SCREEN_WAIT half-seconds (default 10) before the brief goes.
+  # herdr reports agy ready while agy still shows a screen only a person may answer: its terms (again after an update),
+  # its sign-in, or anything else. The brief goes only once agy shows its prompt, whose footer is "? for shortcuts",
+  # within $ANDERTON_AGY_READY_WAIT half-seconds (default 60).
   if [ "$provider" = agy ] && [ "$started" -eq 0 ]; then
-    for _ in $(seq 1 "${ANDERTON_AGY_SCREEN_WAIT:-10}"); do
+    started=1 out="agy did not show its prompt: open its tab to see what it waits for."
+    for _ in $(seq 1 "${ANDERTON_AGY_READY_WAIT:-60}"); do
       case $(herdr agent read "$pane" --source recent --lines 60 2>/dev/null || true) in
         *"Terms of Service"* | *"Data Use"*)
-          started=1 out="agy is waiting for its terms screen: run agy once yourself and complete it."
+          out="agy is waiting for its terms screen: run agy once yourself and complete it."
           break
           ;;
         *"not signed in"* | *"Select login method"*)
-          started=1 out="agy is not signed in: run agy once yourself and sign in."
+          out="agy is not signed in: run agy once yourself and sign in."
+          break
+          ;;
+        *"? for shortcuts"*)
+          started=0
           break
           ;;
       esac

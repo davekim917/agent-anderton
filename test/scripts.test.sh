@@ -3450,7 +3450,15 @@ printf '#!/bin/sh\nexit 0\n' > "$work/agybin/agy"
 cp "$work/agybin/agy" "$work/agybin/bun"
 chmod +x "$work/agybin/agy" "$work/agybin/bun"
 HOME="$agyhome" "$scripts/agy-hooks.sh" register --guard "$work/agyguard" >/dev/null
-agy_env=("${herdr_env[@]}" "HOME=$agyhome" "PATH=$work/agybin:$PATH" FAKE_HERDR_TAB=w9:t40 ANDERTON_AGY_SCREEN_WAIT=6)
+# What agy shows once it is ready for a prompt.
+cat > "$work/agy-ready-screen" <<'SCREEN'
+      Antigravity CLI 1.0.0-example
+     Gemini Example (Low)
+> Auto mode: edits & safe commands auto-approved
+? for shortcuts              auto · Gemini Example · low
+SCREEN
+agy_env=("${herdr_env[@]}" "HOME=$agyhome" "PATH=$work/agybin:$PATH" FAKE_HERDR_TAB=w9:t40 ANDERTON_AGY_READY_WAIT=6
+  "FAKE_SCREEN=$work/agy-ready-screen")
 (cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project tabs >/dev/null)
 hc_spawn hc-caller
 jq -c '.spawnerSession = "gone-session"' "$CLAUDE_CONFIG_DIR/anderton/workers/hc-caller.json" >"$work/hc-caller.tmp"
@@ -3537,13 +3545,23 @@ wait "$!" 2>/dev/null || true
 agy_refused "an agy worker whose agy waits at its terms screen is refused, its tab closed" 1 \
   "agy is waiting for its terms screen: run agy once yourself and complete it"
 check "with no brief typed into the screen" eval '[ ! -e "$FAKE_LOG.prompt" ] && grep -qx w9:t40 "$FAKE_LOG.closed"'
+# Nor into any other screen: without its prompt, agy gets no brief once the wait is over.
+printf 'Something agy has not shown before\n  > Continue\n' > "$work/agy-other-screen"
+: > "$FAKE_LOG.closed"
+agy_spawn "${agy_env[@]}" "FAKE_SCREEN=$work/agy-other-screen" -- --provider agy --effort high --base HEAD agy-refused
+agy_refused "an agy worker whose agy never shows its prompt is refused when the wait ends" 1 "agy did not show its prompt"
+check "with no brief typed into that screen either" eval '[ ! -e "$FAKE_LOG.prompt" ] && grep -qx w9:t40 "$FAKE_LOG.closed"'
 
 rm -f "$FAKE_LOG.prompt" "$FAKE_LOG.agent-get.w9:p5"
 agy_agent agy
-agy_spawn "${agy_env[@]}" -- --provider agy --effort xhigh --model gemini-example --base HEAD agy-worker
-check "spawn.sh starts an agy worker in herdr" [ "$status" -eq 0 ]
-check "running herdr's agy kind, the agy on PATH, in that tab's pane without prompts, with the effort and model" \
-  [ "$(tr '\n' ' ' < "$FAKE_LOG.start")" = "agent start agy-worker --kind agy --pane w9:p5 --timeout 120000 -- --dangerously-skip-permissions --effort xhigh --model gemini-example " ]
+# agy shows its prompt a moment after herdr reports it ready.
+rm -f "$work/agy-ready-late"
+(sleep 1 && cp "$work/agy-ready-screen" "$work/agy-ready-late") &
+agy_spawn "${agy_env[@]}" "FAKE_SCREEN=$work/agy-ready-late" -- --provider agy --effort xhigh --model gemini-example --base HEAD agy-worker
+wait "$!" 2>/dev/null || true
+check "spawn.sh starts an agy worker in herdr, its brief sent once agy shows its prompt" eval '[ "$status" -eq 0 ] && [ -e "$FAKE_LOG.prompt" ]'
+check "running herdr's agy kind, the agy on PATH, in that tab's pane without prompts, with the model, which names its effort" \
+  [ "$(tr '\n' ' ' < "$FAKE_LOG.start")" = "agent start agy-worker --kind agy --pane w9:p5 --timeout 120000 -- --dangerously-skip-permissions --model gemini-example " ]
 check "given the brief, with milestones in its replies" eval 'grep -qF "Tidy the example module." "$FAKE_LOG.prompt" &&
   grep -qF "Put each milestone in your final reply" "$FAKE_LOG.prompt"'
 check "recording it as an agy worker in that pane, bound to the session herdr reports" \

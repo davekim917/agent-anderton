@@ -153,8 +153,7 @@ normal `gh` login. agy's guard hook, from your bootstrap checkout, gates every t
    curl -fsSL https://antigravity.google/cli/install.sh | bash
    ```
 
-   Run `agy` once, sign in and accept its terms, so it sets up `~/.gemini/config`. A worker started before that
-   sits at agy's first-run screen with the brief unread, though herdr reports it ready.
+   Run `agy` once, sign in and accept its terms, so it sets up `~/.gemini/config`.
 2. **Optionally, install herdr's agy integration:** `herdr integration install antigravity-cli`. It adds a
    `herdr` entry to `~/.gemini/config/hooks.json` that tells herdr each agy pane's session, so later steps act
    only on the session `spawn.sh` started. Without it they act on the agy herdr shows in the worker's pane and
@@ -188,6 +187,14 @@ Before it starts agy, `spawn.sh` runs `agy-hooks.sh check`. The check refuses un
 - none of the new worktree's workspace roots (`.agents`, `.agent`, `_agents`, `_agent`) names either entry.
 
 Otherwise agy would run unguarded, and `spawn.sh` says so and starts nothing.
+
+herdr reports agy ready while agy still shows a screen only you may answer: its terms, again after an update, or
+its sign-in. So `spawn.sh` sends the brief only once agy shows its prompt (the footer `? for shortcuts`), within 30
+seconds (`ANDERTON_AGY_READY_WAIT`, in half-seconds). On any other screen it closes the tab, undoes the spawn, and
+says which screen it found when it knows it ("agy is waiting for its terms screen: run agy once yourself and complete
+it."). agy also asks whether to trust each new worktree, which herdr reports as a startup block, so `spawn.sh`
+undoes that spawn the same way. With `--model`, the model id names the effort (`gemini-4-neon-low`), and
+`--effort` is not passed, since agy rejects it beside one.
 
 agy runs with `--dangerously-skip-permissions`. Its prompting mode would stop on routine commands, which a Claude
 worker in auto mode does not, and its auto mode needs a terminal sandbox that a plain Linux host may lack, in which case
