@@ -33,7 +33,7 @@ eventually() { # eventually <command...>: true once it is, within five seconds
 
 export HOME="$tmp/home" CLAUDE_CONFIG_DIR="$tmp/claude" ANDERTON_WORKTREES="$tmp/worktrees" ANDERTON_WATCH_TICK=0.2
 export FAKE="$tmp/fake"
-unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID TMUX ANDERTON_AGY_SESSION ANDERTON_AGY_NAME
+unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID TMUX ANDERTON_AGY_SESSION ANDERTON_AGY_NAME ANDERTON_AGY_DIR
 mkdir -p "$HOME/.gemini/config" "$HOME/.gemini/antigravity-cli" "$tmp/bin" "$FAKE" "$CLAUDE_CONFIG_DIR/sessions" \
   "$tmp/guard/plugins/workflow-agents/hooks" "$tmp/repo"
 export PATH="$tmp/bin:$PATH"
@@ -61,6 +61,7 @@ cat > "$tmp/bin/agy" <<'FAKEAGY'
 #!/usr/bin/env bash
 {
   echo "session=${ANDERTON_AGY_SESSION:-} name=${ANDERTON_AGY_NAME:-} claude=${CLAUDE_CODE_SESSION_ID:-}${CLAUDE_PID:-}"
+  echo "dir=${ANDERTON_AGY_DIR:-} cwd=$(pwd -P)"
   printf '%s\n' "$@"
 } > "$FAKE/agy-run"
 FAKEAGY
@@ -80,7 +81,7 @@ git init -q
 git -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m seed
 repo=$(pwd -P)
 herdr_env=(HERDR_ENV=1 HERDR_WORKSPACE_ID=w9 "HERDR_SOCKET_PATH=$tmp/herdr.sock")
-lead=(ANDERTON_AGY_SESSION=agy-lead-1 ANDERTON_AGY_NAME=agy-lead "${herdr_env[@]}" HERDR_PANE_ID=w9:p77)
+lead=(ANDERTON_AGY_SESSION=agy-lead-1 ANDERTON_AGY_NAME=agy-lead "ANDERTON_AGY_DIR=$repo" "${herdr_env[@]}" HERDR_PANE_ID=w9:p77)
 as() { # as <env...> -- <command...>: sets $out and $status
   local envs=()
   while [ "$1" != -- ]; do envs+=("$1"); shift; done
@@ -90,9 +91,11 @@ as() { # as <env...> -- <command...>: sets $out and $status
   status=$?
   set -e
 }
-agent_in() { # agent_in <pane> <agent> [status]: what herdr's agent get shows in <pane>, in the repository
-  jq -nc --arg pane "$1" --arg kind "$2" --arg status "${3:-idle}" --arg cwd "$repo" \
-    '{result: {agent: {agent: $kind, agent_status: $status, pane_id: $pane, cwd: $cwd, agent_session: null}}}' > "$FAKE/agent-get.$1"
+agent_in() { # agent_in <pane> <agent> [status] [conversation] [dir]: what herdr's agent get shows in <pane>: the agent, in
+  # <dir> (the repository), in the conversation herdr's agy integration names (conv-<pane>; "" for none)
+  jq -nc --arg pane "$1" --arg kind "$2" --arg status "${3:-idle}" --arg conv "${4-conv-$1}" --arg cwd "${5:-$repo}" \
+    '{result: {agent: {agent: $kind, agent_status: $status, pane_id: $pane, cwd: $cwd,
+      agent_session: (if $conv == "" then null else {value: $conv} end)}}}' > "$FAKE/agent-get.$1"
   grep -qx "$1" "$FAKE/panes" || echo "$1" >> "$FAKE/panes"
 }
 
@@ -119,10 +122,12 @@ as "${lead[@]}" -- "$scripts/claim.sh"
 record=$(ls "$CLAUDE_CONFIG_DIR"/anderton/*.json)
 check "an agy session claims the repository's role" eval '[ "$status" -eq 0 ] && contains "claimed by agy session agy-lead-1 (agy-lead, herdr pane w9:p77)"'
 check "recorded with its pane and name" [ "$(jq -r '"\(.provider) \(.sessionId) \(.pane) \(.name) \(.dir)"' "$record")" = "agy agy-lead-1 w9:p77 agy-lead $repo" ]
+check "and the agy conversation herdr names in that pane" [ "$(jq -r .agyInstance "$record")" = conv-w9:p77 ]
 check "and its watch runs" eventually [ -s "${record%.json}.watch" ]
-as ANDERTON_AGY_SESSION=agy-other-1 ANDERTON_AGY_NAME=agy-other "${herdr_env[@]}" HERDR_PANE_ID=w9:p78 -- "$scripts/claim.sh"
+agent_in w9:p78 agy
+as ANDERTON_AGY_SESSION=agy-other-1 ANDERTON_AGY_NAME=agy-other "ANDERTON_AGY_DIR=$repo" "${herdr_env[@]}" HERDR_PANE_ID=w9:p78 -- "$scripts/claim.sh"
 check "another agy session cannot take it while herdr shows the holder in its pane" eval '[ "$status" -eq 3 ] && contains "held by agy session agy-lead-1"'
-as "${herdr_env[@]}" ANDERTON_AGY_SESSION=agy-lead-1 HERDR_PANE_ID=w9:p77 -- "$scripts/claim.sh"
+as "${herdr_env[@]}" ANDERTON_AGY_SESSION=agy-lead-1 "ANDERTON_AGY_DIR=$repo" HERDR_PANE_ID=w9:p77 -- "$scripts/claim.sh"
 check "a claim without the launcher's name is refused" eval '[ "$status" -eq 1 ] && contains "agy-anderton.sh started"'
 
 # What agy loads hooks from in the Anderton's own checkout changes: its watch tells it once, through its pane.
@@ -172,24 +177,66 @@ check "then retires" eval '[ "$status" -eq 0 ] && [ ! -e "$CLAUDE_CONFIG_DIR/and
 
 # A named project's Anderton on agy is the same claim, scoped.
 agent_in w9:p78 agy
-as ANDERTON_AGY_SESSION=agy-proj-1 ANDERTON_AGY_NAME=agy-proj "${herdr_env[@]}" HERDR_PANE_ID=w9:p78 -- "$scripts/claim.sh" --project example
+as ANDERTON_AGY_SESSION=agy-proj-1 ANDERTON_AGY_NAME=agy-proj "ANDERTON_AGY_DIR=$repo" "${herdr_env[@]}" HERDR_PANE_ID=w9:p78 -- "$scripts/claim.sh" --project example
 check "an agy session claims a named project's role" eval '[ "$status" -eq 0 ] && contains "project example claimed by agy session agy-proj-1"'
 
 # A workgroup's role on agy is a workgroup-scoped claim, which tells the host it started as any holder's does.
 agent_in w9:p80 agy
 printf '#!/bin/sh\ncat >> "%s"\n' "$FAKE/events" > "$tmp/bin/event-log"
 chmod +x "$tmp/bin/event-log"
-as ANDERTON_AGY_SESSION=agy-wg-1 ANDERTON_AGY_NAME=agy-wg "${herdr_env[@]}" HERDR_PANE_ID=w9:p80 \
+as ANDERTON_AGY_SESSION=agy-wg-1 ANDERTON_AGY_NAME=agy-wg "ANDERTON_AGY_DIR=$repo" "${herdr_env[@]}" HERDR_PANE_ID=w9:p80 \
   "ANDERTON_EVENT_COMMAND=$tmp/bin/event-log" -- "$scripts/claim.sh" --project workgroup:example/demo
 check "an agy session claims a workgroup project's role" eval '[ "$status" -eq 0 ] && contains "project workgroup:example/demo claimed by agy session agy-wg-1"'
 check "and the host hears it started" eventually grep -q '"scope":"workgroup:example/demo","kind":"start"' "$FAKE/events"
+
+# A claim needs herdr's agy integration, which names the conversation in the pane.
+agent_in w9:p83 agy idle ""
+as ANDERTON_AGY_SESSION=agy-plain-1 ANDERTON_AGY_NAME=agy-plain "ANDERTON_AGY_DIR=$repo" "${herdr_env[@]}" HERDR_PANE_ID=w9:p83 -- "$scripts/claim.sh" --project plain
+check "a claim is refused where herdr names no agy conversation" eval '[ "$status" -eq 1 ] && contains "herdr integration install antigravity-cli"'
+
+# A new agy conversation in the holder's pane, after a relaunch or /clear there, is another holder: the role is free.
+agent_in w9:p77 agy idle conv-new
+as ANDERTON_AGY_SESSION=agy-lead-2 ANDERTON_AGY_NAME=agy-lead "ANDERTON_AGY_DIR=$repo" "${herdr_env[@]}" HERDR_PANE_ID=w9:p77 -- "$scripts/claim.sh"
+check "a new agy conversation in the holder's pane claims the role without taking it over" eval '[ "$status" -eq 0 ] &&
+  contains "claimed by agy session agy-lead-2" && [ "$(jq -r .agyInstance "$record")" = conv-new ]'
 
 # Once herdr no longer shows the holder in its pane, the role is free, and its watch leaves.
 rm -f "$FAKE/agent-get.w9:p77"
 grep -vx w9:p77 "$FAKE/panes" > "$FAKE/panes.tmp" || true
 mv "$FAKE/panes.tmp" "$FAKE/panes"
-as ANDERTON_AGY_SESSION=agy-other-1 ANDERTON_AGY_NAME=agy-other "${herdr_env[@]}" HERDR_PANE_ID=w9:p79 -- "$scripts/claim.sh"
+agent_in w9:p79 agy
+as ANDERTON_AGY_SESSION=agy-other-1 ANDERTON_AGY_NAME=agy-other "ANDERTON_AGY_DIR=$repo" "${herdr_env[@]}" HERDR_PANE_ID=w9:p79 -- "$scripts/claim.sh"
 check "another agy session claims a role whose holder's pane is gone" eval '[ "$status" -eq 0 ] && contains "claimed by agy session agy-other-1"'
+
+# Opened below the top of a linked worktree, agy runs at the top of that checkout, guarded and trusted for it.
+git -C "$repo" worktree add -q "$tmp/linked"
+linked=$(cd "$tmp/linked" && pwd -P)
+mkdir -p "$linked/sub" "$linked/.agents"
+printf '{"agent-anderton-agy-guard":{}}' > "$linked/.agents/hooks.json"
+cd "$linked/sub"
+as "${herdr_env[@]}" HERDR_PANE_ID=w9:p81 -- "$scripts/agy-anderton.sh" --name agy-linked
+check "the launcher refuses a linked worktree whose workspace hooks would switch the guard off" eval '[ "$status" -eq 1 ] &&
+  contains "agy would run unguarded"'
+rm -rf "$linked/.agents"
+as "${herdr_env[@]}" HERDR_PANE_ID=w9:p81 -- "$scripts/agy-anderton.sh" --name agy-linked
+cd "$repo"
+check "and starts agy at the top of that checkout, which its tool shells are told" eval '[ "$status" -eq 0 ] &&
+  grep -qxF "dir=$linked cwd=$linked" "$FAKE/agy-run" && grep -qF "for $linked." "$FAKE/agy-run" &&
+  grep -qxF "{\"exampleSetting\":true,\"trustedWorkspaces\":[\"$linked\"]}" "$FAKE/agy-run"'
+agent_in w9:p81 agy idle conv-linked "$linked"
+cd "$linked/sub"
+as ANDERTON_AGY_SESSION=agy-linked-1 ANDERTON_AGY_NAME=agy-linked "ANDERTON_AGY_DIR=$linked" "${herdr_env[@]}" HERDR_PANE_ID=w9:p81 -- \
+  "$scripts/claim.sh" --project linked
+cd "$repo"
+check "an agy session in a linked worktree claims the repository's role, recorded in its own checkout" eval '[ "$status" -eq 0 ] &&
+  [ "$(jq -r "select(.scope == \"linked\") | .dir" "$CLAUDE_CONFIG_DIR"/anderton/*.json)" = "$linked" ]'
+agent_in w9:p82 agy
+as ANDERTON_AGY_SESSION=agy-other-2 ANDERTON_AGY_NAME=agy-other "ANDERTON_AGY_DIR=$repo" "${herdr_env[@]}" HERDR_PANE_ID=w9:p82 -- \
+  "$scripts/claim.sh" --project linked
+check "where herdr shows it live, so another session cannot take it" eval '[ "$status" -eq 3 ] && contains "held by agy session agy-linked-1"'
+as ANDERTON_AGY_SESSION=agy-other-2 ANDERTON_AGY_NAME=agy-other "ANDERTON_AGY_DIR=$tmp" "${herdr_env[@]}" HERDR_PANE_ID=w9:p82 -- \
+  "$scripts/claim.sh" --project elsewhere
+check "a claim from a session opened in another directory is refused" eval '[ "$status" -eq 1 ] && contains "runs in another repository"'
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures agy-anderton check(s) failed"

@@ -149,15 +149,19 @@ Prepare agy as for agy workers (below), then, from a herdr pane in the repositor
 skills/anderton/scripts/agy-anderton.sh --name <name>
 ```
 
-It runs the `agy` on your PATH after the same `agy-hooks.sh check` an agy worker gets, against the repository's own
-workspace roots, and trusts the repository for that session only, as `spawn.sh` trusts a worker's worktree (unless
-you pass `--settings` yourself). It runs with no permission prompts unless you pass `--mode`, and other options go to
+It runs the `agy` on your PATH at the top of the checkout you open it in, a linked worktree included, since agy loads a
+workspace's hooks from each directory between its working directory and the checkout's top. It first runs the same
+`agy-hooks.sh check` an agy worker gets, against that checkout's workspace roots, and trusts the checkout for that
+session only, as `spawn.sh` trusts a worker's worktree (unless you pass `--settings` yourself). It runs with no permission prompts unless you pass `--mode`, and other options go to
 agy. Its tool
-shells get `ANDERTON_AGY_SESSION` and `ANDERTON_AGY_NAME`, which these scripts read as the agy Anderton's identity,
+shells get `ANDERTON_AGY_SESSION`, `ANDERTON_AGY_NAME` and `ANDERTON_AGY_DIR` (the checkout), which these scripts read
+as the agy Anderton's identity,
 and none of a Claude Code or Codex session's variables. Unless you give `-i`, agy opens on a prompt that points it at
 this skill's `SKILL.md`. It claims with `claim.sh`, or `claim.sh --project <name>` for a named project, as any
-Anderton does. The claim records its herdr pane. The role is live while herdr shows agy in that pane, in the
-repository, and free once the pane is gone or shows anything else.
+Anderton does. The claim records its herdr pane, its checkout, and the agy conversation herdr names in the pane, so
+it needs herdr's agy integration (step 2 below), and `claim.sh` refuses without it. The role is live while herdr shows
+that conversation in that pane, in that checkout, and free once the pane is gone or shows anything else. A new
+conversation there, after you quit and relaunch or after `/clear`, is a new Anderton: it claims the role again.
 
 agy has no Stop hook, so `claim.sh` starts the role's watch in the background. The watch runs as long as the role and
 tells the Anderton what Claude's watch would: blocked sessions, probe news, peer messages and worker reports, the same
@@ -167,7 +171,11 @@ of it changes.
 
 Workers start from it with `spawn.sh` as from any Anderton. Its default provider is agy, as a repository Anderton's
 provider is the default for its workers. A Claude worker under it runs in Claude's default permission mode and reports
-in its final replies, as under a Codex Anderton. A "workgroup" Anderton is the same thing in a workgroup's own
+in its final replies, as under a Codex Anderton. A Claude worker it inherits, which still reports with `SendMessage`, has
+that send held and read from its transcript, as a Codex Anderton reads one.
+
+The watch reads the pane's state, then prompts it, in two herdr calls, and checks the claim before it reads. A
+take-over, or a turn you start, between those calls can send one notice to the former holder or into a busy pane. A "workgroup" Anderton is the same thing in a workgroup's own
 repository: the role is per repository, and per named project with `--project`.
 
 ### Prepare agy workers
@@ -183,7 +191,8 @@ normal `gh` login. agy's guard hook, from your bootstrap checkout, gates every t
    ```
 
    Run `agy` once, sign in and accept its terms, so it sets up `~/.gemini/config`.
-2. **Optionally, install herdr's agy integration:** `herdr integration install antigravity-cli`. It adds a
+2. **Install herdr's agy integration** (optional for workers, needed for an agy Anderton):
+   `herdr integration install antigravity-cli`. It adds a
    `herdr` entry to `~/.gemini/config/hooks.json` that tells herdr each agy pane's session, so later steps act
    only on the session `spawn.sh` started. Without it they act on the agy herdr shows in the worker's pane and
    worktree. Install it before step 3: herdr cannot write the read-only file step 3 leaves. If you install it

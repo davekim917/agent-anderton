@@ -51,13 +51,25 @@ fi
 
 provider=$(invoking_provider)
 pid=$(invoking_pid)
-codex_home="" codex_dir="" name="" agy_pane="" agy_socket=""
+codex_home="" codex_dir="" name="" agy_pane="" agy_socket="" agy_dir="" agy_instance=""
 root=$(invoking_root)
 if [ "$provider" = agy ]; then
   name=${ANDERTON_AGY_NAME:-}
-  agy_pane=${HERDR_PANE_ID:-} agy_socket=${HERDR_SOCKET_PATH:-}
-  if [ -z "$name" ] || [ -z "$agy_pane" ] || [ -z "$agy_socket" ]; then
+  agy_pane=${HERDR_PANE_ID:-} agy_socket=${HERDR_SOCKET_PATH:-} agy_dir=${ANDERTON_AGY_DIR:-}
+  if [ -z "$name" ] || [ -z "$agy_pane" ] || [ -z "$agy_socket" ] || [ -z "$agy_dir" ]; then
     echo "An agy Anderton claims only from a session agy-anderton.sh started inside herdr." >&2
+    exit 1
+  fi
+  if [ "$(project_root "$agy_dir")" != "$root" ]; then
+    echo "agy session $sid runs in another repository: $agy_dir." >&2
+    exit 1
+  fi
+  # The agy conversation in the pane, which herdr's agy integration names: a relaunch or /clear there starts another.
+  agy_instance=$(HERDR_SOCKET_PATH="$agy_socket" herdr agent get "$agy_pane" 2>/dev/null |
+    jq -r '.result.agent.agent_session.value // empty | tostring' 2>/dev/null) || agy_instance=""
+  if [ -z "$agy_instance" ]; then
+    echo "herdr does not name the agy conversation in pane $agy_pane, so the role could not tell it from the next one there." >&2
+    echo "Install herdr's agy integration (herdr integration install antigravity-cli), then claim again." >&2
     exit 1
   fi
 elif [ "$provider" = codex ]; then
@@ -152,9 +164,9 @@ started=$(jq -r '.startedAt // empty | floor' "$sessions/$pid.json" 2>/dev/null 
 peer=null
 claude_report_since=""
 previous_claude=null
-if [ "$provider" = codex ]; then
+if [ "$provider" = codex ] || [ "$provider" = agy ]; then
   if [ -n "$record" ]; then
-    if [ "$(record_provider "$record")" = codex ]; then
+    if [ "$(record_provider "$record")" != claude ]; then
       claude_report_since=$(jq -r '.claudeReportSince // .claimedAt // empty' "$record")
       previous_claude=$(jq -c '.claudeReportPreviousHolder // null' "$record")
     else
@@ -176,13 +188,14 @@ claim_id=${claim_id:-$(new_claim_id)} || { echo "Could not make a claim id." >&2
 jq -nc --arg root "$root" --arg scope "$scope" --arg pid "$pid" --arg started "$started" --arg sid "$sid" \
   --arg provider "$provider" --arg codex_home "$codex_home" --arg codex_dir "$codex_dir" --arg name "$name" \
   --arg claude_report_since "$claude_report_since" --argjson previous_claude "$previous_claude" \
-  --arg agy_pane "$agy_pane" --arg agy_socket "$agy_socket" \
+  --arg agy_pane "$agy_pane" --arg agy_socket "$agy_socket" --arg agy_dir "$agy_dir" --arg agy_instance "$agy_instance" \
   --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson probe "${kept:-null}" --argjson peer "$peer" --arg claim_id "$claim_id" \
   '{root: $root, scope: (if $scope == "" then null else $scope end), provider: $provider,
     sessionId: $sid, claimId: $claim_id, claimedAt: $at}
    + (if $provider == "codex" then {codexHome: $codex_home, dir: $codex_dir, name: $name, claudeReportSince: $claude_report_since,
                                     claudeReportPreviousHolder: $previous_claude}
-      elif $provider == "agy" then {dir: $root, name: $name, pane: $agy_pane, socket: $agy_socket}
+      elif $provider == "agy" then {dir: $agy_dir, name: $name, pane: $agy_pane, socket: $agy_socket, agyInstance: $agy_instance,
+                                    claudeReportSince: $claude_report_since, claudeReportPreviousHolder: $previous_claude}
       else {pid: ($pid | tonumber), startedAt: ($started | tonumber? // null)} end)
    + (if $probe == null then {} else {probe: $probe} end)
    + (if $peer == null then {} else {peerMessage: $peer} end)' > "$state.tmp"
@@ -196,7 +209,7 @@ if [ "$provider" = codex ]; then
   echo "$role claimed by Codex thread $sid."
 elif [ "$provider" = agy ]; then
   # What agy loads hooks and agents from for this checkout, as the role is claimed: waiting.sh reports changes from it.
-  agy_config_state "$root" > "${state%.json}.agy-config"
+  agy_config_state "$agy_dir" > "${state%.json}.agy-config"
   # agy ends a tool's processes when its command returns, so the watch runs in a session of its own.
   python3 -c 'import subprocess, sys; subprocess.Popen(sys.argv[1:], start_new_session=True, stdin=subprocess.DEVNULL,
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' "$anderton_scripts/watch.sh" --agy "$state"

@@ -18,7 +18,7 @@ if [ "$action" = sweep ] && [ "$#" -eq 1 ]; then
   while IFS= read -r record; do
     [ -n "$record" ] || continue
     args=(sweep "$record" --claim "$role")
-    if [ "$(record_provider "$role")" = codex ] &&
+    if case $(record_provider "$role") in codex | agy) true ;; *) false ;; esac &&
       jq -e '.claudeSession == null and .claudeLaunchId == null and .adopted != true' "$record" >/dev/null; then
       args+=(--legacy-home "$home")
     fi

@@ -20,15 +20,18 @@ if [ "${HERDR_ENV:-}" != 1 ] || [ -z "${HERDR_PANE_ID:-}" ] || [ -z "${HERDR_SOC
 fi
 command -v agy >/dev/null 2>&1 || { echo "agy-anderton.sh needs the agy CLI on PATH." >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "agy-anderton.sh needs python3, which runs the Anderton's watch." >&2; exit 1; }
-root=$(invoking_root)
-if ! out=$("$anderton_scripts/agy-hooks.sh" check --workspace "$root" 2>&1); then
+# agy loads a workspace's hooks and agents from each directory between its working directory and the top of the
+# checkout, so the Anderton runs at the top of the checkout it was opened in, a linked worktree included.
+dir=$(git rev-parse --show-toplevel 2>/dev/null) || dir=$(pwd -P)
+cd "$dir"
+if ! out=$("$anderton_scripts/agy-hooks.sh" check --workspace "$dir" 2>&1); then
   echo "$out
 agy would run unguarded, so the agy Anderton was not started." >&2
   exit 1
 fi
 ANDERTON_AGY_SESSION=$(python3 -c 'import uuid; print(uuid.uuid4())')
-ANDERTON_AGY_NAME=$name
-export ANDERTON_AGY_SESSION ANDERTON_AGY_NAME
+ANDERTON_AGY_NAME=$name ANDERTON_AGY_DIR=$dir
+export ANDERTON_AGY_SESSION ANDERTON_AGY_NAME ANDERTON_AGY_DIR
 # A launch from inside a Claude Code or Codex session would otherwise be read as that session.
 unset CLAUDE_CODE_SESSION_ID CLAUDE_PID CODEX_THREAD_ID
 mode="" prompt="" settings=""
@@ -40,12 +43,12 @@ for arg; do
   esac
 done
 if [ -z "$mode" ]; then set -- --dangerously-skip-permissions "$@"; fi
-# The repository the user opened it in is trusted for this session, as a worker's worktree is.
+# The checkout the user opened it in is trusted for this session, as a worker's worktree is.
 if [ -z "$settings" ]; then
-  trust=$(agy_session_settings "$root") || { echo "$trust" >&2; exit 1; }
+  trust=$(agy_session_settings "$dir") || { echo "$trust" >&2; exit 1; }
   set -- "$@" --settings "$trust"
 fi
 if [ -z "$prompt" ]; then
-  set -- "$@" --prompt-interactive "You are the Anderton named $name for $root. Read $(cd "$anderton_scripts/.." && pwd)/SKILL.md and follow it. Its scripts are in $anderton_scripts. Claim the role with claim.sh (add --project <name> only if the user names a project), then wait for the user."
+  set -- "$@" --prompt-interactive "You are the Anderton named $name for $dir. Read $(cd "$anderton_scripts/.." && pwd)/SKILL.md and follow it. Its scripts are in $anderton_scripts. Claim the role with claim.sh (add --project <name> only if the user names a project), then wait for the user."
 fi
 exec agy "$@"

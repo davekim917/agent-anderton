@@ -500,6 +500,30 @@ native_gate() {
 native_gate outbound-one former-claude 'RESULT: same milestone'
 native_gate outbound-two former-claude 'RESULT: same milestone'
 native_gate prior-socket 'uds:/run/claude/984.sock' 'RESULT: scoped socket milestone'
+# An agy holder of the role holds the same native sends for its sweep.
+mkdir "$tmp/agybin"
+cat > "$tmp/agybin/herdr" <<'STUB'
+#!/usr/bin/env bash
+[ "$1 $2 $3" = "agent get w9:p77" ] || exit 1
+jq -nc --arg dir "$FIXTURE_ROOT" '{result:{agent:{agent:"agy",agent_status:"idle",pane_id:"w9:p77",cwd:$dir,agent_session:{value:"conv-fixture"}}}}'
+STUB
+chmod +x "$tmp/agybin/herdr"
+as_agy_holder() {
+  cp "$root_claim" "$tmp/codex-claim"
+  jq --arg socket "$tmp/herdr.sock" --arg dir "$FIXTURE_ROOT" '.provider = "agy" | .sessionId = "agy-fixture" |
+    .name = "fixture-agy" | .dir = $dir | .pane = "w9:p77" | .socket = $socket | .agyInstance = "conv-fixture" | del(.codexHome)
+    ' "$tmp/codex-claim" > "$root_claim"
+}
+agy_role() { env PATH="$tmp/agybin:$PATH" ANDERTON_AGY_SESSION=agy-fixture ANDERTON_AGY_NAME=fixture-agy HERDR_PANE_ID=w9:p77 \
+  HERDR_SOCKET_PATH="$tmp/herdr.sock" "$@"; }
+as_agy_holder
+mv "$claims/reports/routes" "$tmp/codex-routes"
+PATH="$tmp/agybin:$PATH" native_gate outbound-one former-claude 'RESULT: same milestone'
+PATH="$tmp/agybin:$PATH" native_gate outbound-two former-claude 'RESULT: same milestone'
+PATH="$tmp/agybin:$PATH" native_gate prior-socket 'uds:/run/claude/984.sock' 'RESULT: scoped socket milestone'
+diff -r "$tmp/codex-routes" "$claims/reports/routes"
+rm -rf "$tmp/codex-routes"
+mv "$tmp/codex-claim" "$root_claim"
 rm "$CLAUDE_CONFIG_DIR/sessions/$replacement_pid.json"
 fallback="$claims/workers/fallback-fixture.json"
 fallback_transcript="$CLAUDE_CONFIG_DIR/projects/fixture/fallback-native-report.jsonl"
@@ -514,6 +538,16 @@ grep -qx 'RESULT: scoped socket milestone' "$tmp/native-output"
 grep -qx 'RESULT: fallback final' "$tmp/native-output"
 grep -qx 'RESULT: old unread final' "$tmp/native-output"
 if grep -Eq 'historical transport|old delivered echo|unrelated message|unrelated socket' "$tmp/native-output"; then exit 1; fi
+as_agy_holder
+mkdir "$tmp/agy-native-state" "$tmp/agy-native-stage"
+agy_role env ANDERTON_PROBE_STATE="$tmp/agy-native-state" ANDERTON_PROBE_STAGE="$tmp/agy-native-stage" "$script/worker.sh" sweep \
+  > "$tmp/agy-native-output"
+mv "$tmp/codex-claim" "$root_claim"
+[ "$(grep -c '^RESULT: same milestone$' "$tmp/agy-native-output")" = 2 ]
+grep -qx 'RESULT: scoped socket milestone' "$tmp/agy-native-output"
+grep -qx 'RESULT: fallback final' "$tmp/agy-native-output"
+grep -qx 'RESULT: old unread final' "$tmp/agy-native-output"
+if grep -Eq 'historical transport|old delivered echo|unrelated message|unrelated socket' "$tmp/agy-native-output"; then exit 1; fi
 if codex_role "$script/worker.sh" message legacy-reporter 'Refuse legacy transcript-only identity.' > "$tmp/refused" 2>&1; then exit 1; fi
 mv "$tmp/native-stage/"*.json "$tmp/native-state/"
 codex_role env ANDERTON_PROBE_STATE="$tmp/native-state" ANDERTON_PROBE_STAGE="$tmp/native-stage" "$script/worker.sh" sweep > "$tmp/native-output"

@@ -193,7 +193,7 @@ gate_stale_worker_report() {
     old_pid=$(jq -r '.pid // empty' "$owner")
     old_sid=$(jq -r '.sessionId // empty' "$sessions/$old_pid.json" 2>/dev/null)
   fi
-  if [ "$owner_provider" = codex ] && [ -n "$old_sid" ] && [ -z "$old_pid" ]; then
+  if { [ "$owner_provider" = codex ] || [ "$owner_provider" = agy ]; } && [ -n "$old_sid" ] && [ -z "$old_pid" ]; then
     old_pid=$(jq -r --arg sid "$old_sid" '.claudeReportPreviousHolder | select(.sessionId == $sid) | .pid // empty' "$owner")
   fi
   case $to in
@@ -213,7 +213,7 @@ gate_stale_worker_report() {
   case $to in "$old ["*) exit 0 ;; esac
   printf '%s\n' "$first" | sed -nE -e 's/^[[:space:]*_#>`-]*//' -e 's/^(RESULT|QUESTION|BLOCKED|ANSWER):.*/x/p' | grep -qx x || exit 0
 
-  if [ "$owner_provider" = codex ]; then
+  if [ "$owner_provider" = codex ] || [ "$owner_provider" = agy ]; then
     if ! claude_worker_identity_matches "$wrec" "$sid" "$pid" "$(jq -r '.startedAt // empty | floor' "$reg")"; then
       transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty')
       case $transcript in "$home"/projects/*/"$sid.jsonl")
@@ -225,7 +225,8 @@ gate_stale_worker_report() {
     fi
     if [ -n "${transcript:-}" ] &&
       printf '%s' "$input" | "$anderton_scripts/claude-worker.py" record-native-route "$wrec" "$owner" >/dev/null 2>&1; then
-      echo "The native SendMessage was held. Your Codex Anderton will read this milestone from your transcript." >&2
+      if [ "$owner_provider" = codex ]; then owner_label=Codex; else owner_label=agy; fi
+      echo "The native SendMessage was held. Your $owner_label Anderton will read this milestone from your transcript." >&2
     else
       echo "This recipient is no longer your Anderton. Put the milestone in your final reply." >&2
     fi

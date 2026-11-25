@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 REPORT = re.compile(r"^(RESULT|QUESTION|BLOCKED|ANSWER):\s*\S")
+NON_CLAUDE = ("codex", "agy")
 
 def report_text(text):
     return text.strip().lstrip(" \t*_#>`-")
@@ -61,7 +62,7 @@ def legacy_launch_matches(worker):
 
 
 def native_report_cutoff(worker, claim):
-    if claim.get("provider") != "codex" or worker.get("spawnerProvider", "claude") != "claude":
+    if claim.get("provider") not in NON_CLAUDE or worker.get("spawnerProvider", "claude") != "claude":
         return None
     previous = claim.get("claudeReportPreviousHolder") or {}
     if "spawnerScope" in worker:
@@ -103,8 +104,8 @@ def route_receipt(worker, claim, to, text):
 
 
 def record_native_route(worker, claim, routes, hook):
-    if claim.get("provider") != "codex" or hook.get("hook_event_name") != "PreToolUse":
-        raise ValueError("Native route requires a Codex owner and a SendMessage attempt")
+    if claim.get("provider") not in NON_CLAUDE or hook.get("hook_event_name") != "PreToolUse":
+        raise ValueError("Native route requires a Codex or agy owner and a SendMessage attempt")
     path = route_path(routes, hook["session_id"], hook["tool_use_id"])
     payload = route_receipt(worker, claim, hook["tool_input"]["to"], hook["tool_input"]["message"])
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -119,7 +120,7 @@ def record_native_route(worker, claim, routes, hook):
 
 
 def routed_native_report(worker, claim, routes, tool, to, text):
-    if routes is None or claim.get("provider") != "codex":
+    if routes is None or claim.get("provider") not in NON_CLAUDE:
         return False
     try:
         path = route_path(routes, worker["claudeSession"]["id"], tool)
@@ -473,7 +474,7 @@ def inbound_since_report(worker, home, through):
     anderton = anderton_of(worker, home)
     launch = {"brief": True, "line": f'You are a worker the Anderton session "{worker.get("spawner")}" started for the task '
                                      f'above, in {worker.get("dir")}.'}
-    final_replies_report = worker.get("reportTransport") == "transcript" or worker.get("spawnerProvider") == "codex"
+    final_replies_report = worker.get("reportTransport") == "transcript" or worker.get("spawnerProvider") in NON_CLAUDE
     held = []
     seen = {"entries": set(), "tools": set(), "messages": set()}
     latest = None
@@ -533,7 +534,7 @@ def main():
     if args.command == "sweep":
         claim = json.loads(args.claim.read_text()) if args.claim else {}
         if args.legacy_home:
-            if claim.get("provider") != "codex":
+            if claim.get("provider") not in NON_CLAUDE:
                 return 0
             cutoff = native_report_cutoff(worker, claim) or instant(worker["startedAt"])
             identity = legacy_worker_transcript(worker, args.legacy_home, cutoff)
