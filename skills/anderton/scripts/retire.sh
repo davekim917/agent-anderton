@@ -249,7 +249,8 @@ elif [ "$provider" = agy ]; then
       exit 1
       ;;
   esac
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
+  # agy takes a few seconds to exit once its pane is closed.
+  for _ in $(seq 1 30); do
     agy_check "$record"
     [ "$agy_state" != gone ] || break
     sleep 0.5

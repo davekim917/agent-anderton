@@ -94,7 +94,7 @@ case "$1 $2" in
     # between two reads.
     get=$FAKE_LOG.agent-get.$3
     awk -v s="$sock" '$1 == s { sub(/^[^ ]* /, ""); print; f = 1 } END { exit !f }' "$get" 2>/dev/null ||
-      { echo '{"error":{"code":"agent_not_found"}}'; exit 1; }
+      { echo '{"error":{"code":"agent_not_found"}}' >&2; exit 1; }
     if [ -f "$get.then" ]; then mv "$get.then" "$get"; fi
     ;;
   "agent read")

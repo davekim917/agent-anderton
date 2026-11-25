@@ -719,8 +719,8 @@ agy_check() {
   socket=$(jq -r '.socket // empty' "$1") pane=$(jq -r '.pane // empty' "$1") dir=$(jq -r '.dir // empty' "$1")
   instance=$(jq -r '.agyInstance // empty' "$1")
   [ -n "$socket" ] && [ -n "$pane" ] && command -v herdr >/dev/null 2>&1 || return 0
-  # herdr exits non-zero for a pane with no agent and for a missing pane, which pipefail would read as a failed read.
-  out=$(HERDR_SOCKET_PATH="$socket" herdr agent get "$pane" 2>/dev/null) || true
+  # herdr exits non-zero, with its error on stderr, for a pane with no agent and for a missing pane.
+  out=$(HERDR_SOCKET_PATH="$socket" herdr agent get "$pane" 2>&1) || true
   if printf '%s' "$out" | jq -e '.error.code == "agent_not_found"' >/dev/null 2>&1; then
     out=$(HERDR_SOCKET_PATH="$socket" herdr pane get "$pane" 2>&1) || true
     if printf '%s' "$out" | jq -e '.error.code == "pane_not_found"' >/dev/null 2>&1; then

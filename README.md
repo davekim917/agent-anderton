@@ -153,7 +153,8 @@ normal `gh` login. agy's guard hook, from your bootstrap checkout, gates every t
    curl -fsSL https://antigravity.google/cli/install.sh | bash
    ```
 
-   Run `agy` once and sign in, so it sets up `~/.gemini/config`.
+   Run `agy` once, sign in and accept its terms, so it sets up `~/.gemini/config`. A worker started before that
+   sits at agy's first-run screen with the brief unread, though herdr reports it ready.
 2. **Optionally, install herdr's agy integration:** `herdr integration install antigravity-cli`. It adds a
    `herdr` entry to `~/.gemini/config/hooks.json` that tells herdr each agy pane's session, so later steps act
    only on the session `spawn.sh` started. Without it they act on the agy herdr shows in the worker's pane and
