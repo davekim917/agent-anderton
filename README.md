@@ -144,6 +144,9 @@ started has no such watcher while it is idle, since its turns ended under that
 Anderton: after a take-over, `worker.sh message` types the direction into the
 worker's herdr pane instead, only while herdr shows that worker's session there,
 idle. A tmux or adopted worker has no recorded pane, so type it in its own pane.
+Known limits of that typed direction: herdr reads the pane and then types into it in two calls, so a turn that starts
+between them gets the direction while busy, as with the agy watch. And the transcript records typed input as human, so
+`retire.sh` holds that worker until `--reviewed-through`. That makes it hold more often, never less.
 
 ### Open an agy Anderton
 
