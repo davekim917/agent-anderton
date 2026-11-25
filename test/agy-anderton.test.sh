@@ -46,7 +46,7 @@ case "$1 $2" in
   "tab create") echo '{"result":{"root_pane":{"pane_id":"w9:p5","tab_id":"w9:t5"},"tab":{"tab_id":"w9:t5"}}}' ;;
   "agent start") printf '%s\n' "$@" > "$FAKE/start" ;;
   "agent prompt") printf '%s %s\n' "$3" "$(printf '%s' "$4" | tr '\n' ' ')" >> "$FAKE/prompts" ;;
-  "agent get") cat "$FAKE/agent-get.$3" 2>/dev/null || { echo '{"error":{"code":"agent_not_found"}}'; exit 1; } ;;
+  "agent get") cat "$FAKE/agent-get.$3" 2>/dev/null || { echo '{"error":{"code":"agent_not_found"}}' >&2; exit 1; } ;;
   "pane get")
     grep -qx "$3" "$FAKE/panes" 2>/dev/null || { echo '{"error":{"code":"pane_not_found"}}'; exit 1; }
     printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$3"
