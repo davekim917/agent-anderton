@@ -335,6 +335,9 @@ Yes, in herdr and tmux. Ask your Claude Code Anderton to use a Codex worker, or
 pass `--provider codex` to `spawn.sh`. This requires Python 3 and a running
 local Codex daemon with the thread and turn APIs in Codex CLI 0.171.0.
 
+Add `--speed fast` or `--speed ultrafast` to ask for that speed for one worker. Codex falls back to Standard where the account or model doesn't allow it.
+The tier is a session override. The account keeps its configured default.
+
 The worker opens in its own worktree and tab. Anderton sends follow-ups to
 the worker's Codex thread ID and receives milestone replies and blocker
 alerts through its existing watch. Open the worker's tab to handle a Codex
@@ -466,7 +469,7 @@ worktree leaves its own at its base. Idle time runs from the newest transcript e
 that may be it, else from when it was started. A line notes uncommitted work, or commits no remote branch has, which `retire.sh`
 would keep. `--blocked` leaves this section out.
 
-**`spawn.sh --effort LEVEL [--provider claude|codex|agy] [--model M] [--mode MODE] [--base REF] <name> [brief-file]`**
+**`spawn.sh --effort LEVEL [--provider claude|codex|agy] [--model M] [--mode MODE] [--speed standard|fast|ultrafast] [--base REF] <name> [brief-file]`**
 starts a full Claude Code or Codex worker labelled `<name>` in a new git worktree at
 `$ANDERTON_WORKTREES/wt-<name>` (default: the folder that holds the repository). The base is
 `origin/HEAD`, else `origin/main`, `origin/master` or `HEAD`.
@@ -491,6 +494,10 @@ startup details for the operator. Existing background sessions use `claude attac
   name wins.
 - Claude workers default to Opus, and Codex workers use the configured Codex model. The Anderton
   passes `--model` when you name a model.
+- `--speed` applies only to Codex workers. `fast` and `ultrafast` request that service tier for
+  the worker's launch; it is a request, not an account choice. If the account or model the worker
+  starts on doesn't allow that tier, Codex runs it at Standard. `standard` or omitting the flag uses
+  the account's configured tier.
 - The brief, from the file or stdin, asks the worker to report a `RESULT:`, `QUESTION:`,
   `BLOCKED:` or `ANSWER:` at each milestone. Claude workers reporting to Claude Code use
   SendMessage. Other pairings report in final replies. The brief also sets the rules for sub-agents

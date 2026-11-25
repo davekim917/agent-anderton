@@ -3133,15 +3133,19 @@ FAKE
 printf '#!/usr/bin/env bash\n' >"$work/bin/codex"
 chmod +x "$cxs/codex-worker.py" "$work/bin/codex"
 python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$cxhome/app-server-control/app-server-control.sock"
-rm -f "$FAKE_LOG.window" "$FAKE_LOG.codex-worker"
+cx_spawn() {
+  rm -f "$FAKE_LOG.window" "$FAKE_LOG.codex-worker"
+  set +e
+  out=$(cd "$rho" && printf 'Task.\n' | env CLAUDE_CODE_SESSION_ID=rl-1 CLAUDE_PID="$p_rl" CODEX_HOME="$cxhome" TMUX=/tmp/fake-tmux,1,0 \
+    FAKE_TMUX_WINDOW=@41 "$cxs/spawn.sh" --effort low "$@" 2>&1)
+  status=$?
+  set -e
+}
 before=$(date +%s)
-set +e
-out=$(cd "$rho" && printf 'Task.\n' | env CLAUDE_CODE_SESSION_ID=rl-1 CLAUDE_PID="$p_rl" CODEX_HOME="$cxhome" TMUX=/tmp/fake-tmux,1,0 \
-  FAKE_TMUX_WINDOW=@41 "$cxs/spawn.sh" --provider codex --effort low cx-titled 2>&1)
-status=$?
-set -e
+cx_spawn --provider codex cx-titled
 check "spawn.sh starts a Codex worker in tmux" [ "$status" -eq 0 ]
 check "titling its tab with the thread id" grep -qxF 'tui.terminal_title=["thread-id"]' "$FAKE_LOG.window"
+check "omitting --speed leaves the Codex launch tier at the account default" no_match '^service_tier=' "$FAKE_LOG.window"
 check "and records the thread it registered" [ "$(jq -r .id "$CLAUDE_CONFIG_DIR/anderton/workers/cx-titled.json" 2>/dev/null)" = "$cx_thread" ]
 # Listing a worktree's threads by cwd scans the daemon's whole history when there are none, as in a new worktree.
 check "finding it among threads created since its launch, with no lookup by worktree first" eval \
@@ -3150,6 +3154,33 @@ check "and keeping that launch time for a later registration" \
   [ "$(jq -r --argjson before "$before" '.codexLaunchedAt >= $before' "$CLAUDE_CONFIG_DIR/anderton/workers/cx-titled.json")" = true ]
 rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/cx-titled.json"
 [ ! -d "$work/wt-cx-titled" ] || git -C "$rho" worktree remove --force "$work/wt-cx-titled"
+
+for speed in standard fast ultrafast; do
+  worker_name="cx-$speed"
+  cx_spawn --provider codex --speed "$speed" "$worker_name"
+  check "spawn.sh accepts --speed $speed for a Codex worker" [ "$status" -eq 0 ]
+  if [ "$speed" = standard ]; then
+    check "--speed standard leaves the Codex launch tier at the account default" no_match '^service_tier=' "$FAKE_LOG.window"
+  else
+    check "--speed $speed passes the matching -c service_tier override" \
+      awk -v tier="service_tier=\"$speed\"" '
+        $0 == tier && previous == "-c" { found = 1 }
+        { previous = $0 }
+        END { exit !found }
+      ' "$FAKE_LOG.window"
+  fi
+  rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/$worker_name.json"
+  [ ! -d "$work/wt-$worker_name" ] || git -C "$rho" worktree remove --force "$work/wt-$worker_name"
+done
+for provider in claude agy; do
+  cx_spawn --provider "$provider" --speed standard "speed-$provider"
+  check "spawn.sh refuses --speed for $provider before allocating a worker" eval \
+    '[ "$status" -eq 2 ] && contains "Only Codex workers support --speed" && [ ! -e "$FAKE_LOG.window" ] &&
+     [ ! -e "$work/wt-speed-$provider" ] && [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/speed-$provider.json" ]'
+done
+cx_spawn --provider codex --speed turbo cx-invalid
+check "spawn.sh refuses an unknown Codex speed" eval \
+  '[ "$status" -eq 2 ] && contains "standard|fast|ultrafast" && [ ! -e "$FAKE_LOG.window" ]'
 
 # With a Codex account helper, a new worker starts on the home it names. Homes are compared as spawn.sh resolves them
 # (macOS's /tmp is a link).

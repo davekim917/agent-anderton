@@ -11,17 +11,23 @@ set -euo pipefail
 . "$(dirname "$0")/session-lib.sh"
 
 require_tools spawn.sh
-usage="usage: spawn.sh --effort low|medium|high|xhigh|max [--provider claude|codex|agy] [--model M] [--mode MODE] [--base REF] <name: a-z 0-9 -> [brief-file]"
-model="" effort="" mode="" base="" provider="" codex_home="" launched_at="" launch_token="" claude_launch=""
+usage="usage: spawn.sh --effort low|medium|high|xhigh|max [--provider claude|codex|agy] [--model M] [--mode MODE] [--speed standard|fast|ultrafast] [--base REF] <name: a-z 0-9 -> [brief-file]"
+model="" effort="" mode="" speed="" base="" provider="" codex_home="" launched_at="" launch_token="" claude_launch=""
 while [ $# -gt 0 ]; do
   case $1 in
     --bg) echo "spawn.sh: --bg is unsupported. Start workers inside herdr or tmux." >&2; exit 2 ;;
-    --model | --effort | --mode | --base | --provider)
+    --model | --effort | --mode | --speed | --base | --provider)
       [ $# -ge 2 ] || { echo "$usage" >&2; exit 2; }
       case $1 in
         --model) model=$2 ;;
         --effort) effort=$2 ;;
         --mode) mode=$2 ;;
+        --speed)
+          case $2 in
+            standard | fast | ultrafast) speed=$2 ;;
+            *) echo "$usage" >&2; exit 2 ;;
+          esac
+          ;;
         --base) base=$2 ;;
         --provider)
           case $2 in
@@ -82,6 +88,10 @@ case $provider in
   claude | codex | agy) ;;
   *) echo "$usage" >&2; exit 2 ;;
 esac
+if [ "$provider" != codex ] && [ -n "$speed" ]; then
+  echo "Only Codex workers support --speed. Omit --speed for $provider workers." >&2
+  exit 2
+fi
 if [ "$provider" = agy ]; then
   if [ "$launcher" != herdr ]; then
     echo "agy workers start only inside herdr, whose pane carries their status and directions." >&2
@@ -316,6 +326,9 @@ $brief"
   set -- --remote "unix://$(codex_socket "$codex_home")" \
     --sandbox workspace-write -a on-request -c 'approvals_reviewer="user"' -c "model_reasoning_effort=\"$effort\"" \
     -c 'tui.terminal_title=["thread-id"]'
+  case $speed in
+    fast | ultrafast) set -- "$@" -c "service_tier=\"$speed\"" ;;
+  esac
   if [ -n "$model" ]; then set -- "$@" -m "$model"; fi
 elif [ "$provider" = agy ]; then
   provider_name=agy
