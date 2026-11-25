@@ -335,7 +335,7 @@ Yes, in herdr and tmux. Ask your Claude Code Anderton to use a Codex worker, or
 pass `--provider codex` to `spawn.sh`. This requires Python 3 and a running
 local Codex daemon with the thread and turn APIs in Codex CLI 0.171.0.
 
-Add `--speed ultrafast` to launch one worker at Ultrafast speed on a supported account and model.
+Add `--speed fast` or `--speed ultrafast` to ask for that speed for one worker. Codex falls back to Standard where the account or model doesn't allow it.
 The tier is a session override. The account keeps its configured default.
 
 The worker opens in its own worktree and tab. Anderton sends follow-ups to
@@ -494,8 +494,10 @@ startup details for the operator. Existing background sessions use `claude attac
   name wins.
 - Claude workers default to Opus, and Codex workers use the configured Codex model. The Anderton
   passes `--model` when you name a model.
-- `--speed` applies only to Codex workers. `fast` and `ultrafast` override the service tier for
-  the worker's launch. `standard` or omitting the flag uses the account's configured tier.
+- `--speed` applies only to Codex workers. `fast` and `ultrafast` request that service tier for
+  the worker's launch; it is a request, not an account choice. If the account or model the worker
+  starts on doesn't allow that tier, Codex runs it at Standard. `standard` or omitting the flag uses
+  the account's configured tier.
 - The brief, from the file or stdin, asks the worker to report a `RESULT:`, `QUESTION:`,
   `BLOCKED:` or `ANSWER:` at each milestone. Claude workers reporting to Claude Code use
   SendMessage. Other pairings report in final replies. The brief also sets the rules for sub-agents
