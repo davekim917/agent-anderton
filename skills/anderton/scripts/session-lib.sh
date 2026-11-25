@@ -1047,10 +1047,10 @@ emit_event() {
     bash -c "$cmd" <<< "$json" >/dev/null 2>&1 &
     p=$!
     set +m
-    i=0
-    while kill -0 -- "-$p" 2>/dev/null && [ "$i" -lt "$((timeout * 10))" ]; do
+    # A wall-clock deadline: counting short sleeps drifts on a loaded machine.
+    deadline=$((SECONDS + timeout))
+    while kill -0 -- "-$p" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
       sleep 0.1
-      i=$((i + 1))
     done
     if kill -0 -- "-$p" 2>/dev/null; then
       kill -TERM -- "-$p" 2>/dev/null

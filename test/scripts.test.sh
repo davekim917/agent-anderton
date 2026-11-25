@@ -1178,8 +1178,16 @@ check "a command that hangs never holds up the script" [ $(($(date +%s) - starte
 check "and is ended after ANDERTON_EVENT_TIMEOUT" eval 'sleep 2; [ -s "$work/ev-hang.pid" ] && ! kill -0 "$(cat "$work/ev-hang.pid")" 2>/dev/null'
 (cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 ANDERTON_EVENT_TIMEOUT=08 \
   ANDERTON_EVENT_COMMAND="echo \$\$ > '$work/ev-hang08.pid'; exec sleep 30" "$scripts/claim.sh" --project workgroup:acme/ci >/dev/null)
-check "a timeout with a leading zero is read in base 10 and still ends the command" eval 'sleep 10;
-  [ -s "$work/ev-hang08.pid" ] && ! kill -0 "$(cat "$work/ev-hang08.pid")" 2>/dev/null'
+ended() { # ended <pid file> <seconds>: true once that process is gone, within that many seconds
+  local i=0
+  while [ "$i" -lt "$(($2 * 10))" ]; do
+    if [ -s "$1" ] && ! kill -0 "$(cat "$1")" 2>/dev/null; then return 0; fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+check "a timeout with a leading zero is read in base 10 and still ends the command" ended "$work/ev-hang08.pid" 20
 (cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 ANDERTON_EVENT_TIMEOUT=1 \
   ANDERTON_EVENT_COMMAND="trap '' TERM; sleep 30 & echo \$! > '$work/ev-child.pid'; echo \$\$ > '$work/ev-parent.pid'; wait" \
   "$scripts/claim.sh" --project workgroup:acme/ci >/dev/null)
