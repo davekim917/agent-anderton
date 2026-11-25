@@ -1,22 +1,19 @@
 #!/usr/bin/env bash
-# The plugin's hook on SendMessage. Before a send (PreToolUse) it holds a message to an Anderton unless the message's
-# first line opens with a kind, and holds one that repeats, word for word, what the sender last sent that Anderton
-# within $ANDERTON_REPEAT_WINDOW seconds (default 1800). Each message wakes that session and re-reads its whole context,
-# so an acknowledgement or a "still waiting" costs as much as a result. After a send succeeds (PostToolUse) it records
-# the message, so a send that failed or was denied is never counted as sent.
+# The plugin's hook on SendMessage. Before a send (PreToolUse) it holds a message to an Anderton from its worker or
+# from a session holding no role unless the message's first line opens with a kind, and holds any message to an
+# Anderton that repeats, word for word, what the sender last sent that Anderton within $ANDERTON_REPEAT_WINDOW seconds
+# (default 1800). Each message wakes that session and re-reads its whole context, so an acknowledgement or a "still
+# waiting" costs as much as a result. After a send succeeds (PostToolUse) it records the message, so a send that failed
+# or was denied is never counted as sent.
 # It judges a message from a worker spawn.sh started to the session that started it, and a message from any session
-# in a repository to that repository's live Anderton. A worker has four kinds; any other session also has DIRECTION:, for
-# passing on a person's direction. A named project's Anderton is a tab the user reads directly, so it reaches the
-# repository's Anderton only to ship something (DEPLOY:), to ask a fact about the host that only it can read
-# (LOOKUP:), or to answer it (ANSWER:). The repository's Anderton is held only toward a named project's Anderton: there
-# it sends DIRECTION:, QUESTION: or ANSWER:, and each message gets $route appended, so the project's results and the
-# user's calls on it stay in that project's tab.
-# It blocks (exit 2, the reason on stderr) or rewrites the message (updatedInput), and never prints a decision, so it
-# cannot approve anything. The body runs in a subshell that reports a block as 10, so a crash, which bash may report as
-# 2, is read as allow. On any failure it exits 0 and prints nothing.
+# in a repository to that repository's live Anderton. A worker's report needs its kind because the milestone event and
+# a Codex or agy Anderton's transcript sweep read it. One Anderton writing to another needs none: whether it should
+# write at all is the skill's instruction, since a label cannot tell a warranted message from chatter.
+# It blocks (exit 2, the reason on stderr) and never prints a decision, so it cannot approve anything. The body runs in
+# a subshell that reports a block as 10, so a crash, which bash may report as 2, is read as allow. On any failure it
+# exits 0 and prints nothing.
 
 input=$(cat)
-route="Report results, and any call that is the user's, to the user in your own tab. Reply here only with ANSWER: to a question this message asks, and put a fact in it, not a decision for the user."
 
 main() {
   # shellcheck source=SCRIPTDIR/session-lib.sh
@@ -61,13 +58,10 @@ EOF
   [ -z "$home_dir" ] || cwd=$home_dir
   [ -n "$cwd" ] || exit 0
 
-  # Who the sender is comes first: the repository's Anderton is judged only toward a named project's Anderton.
+  # Who the sender is comes first: the repository's Anderton is never held.
   root=$(project_root "$cwd")
   project=$(holder_record "$root")
-  if [ -n "$project" ] && names_sender "$project"; then
-    to_scope "$root" "$project" || exit 0
-    route_to_scope
-  fi
+  if [ -n "$project" ] && names_sender "$project"; then exit 0; fi
   while IFS= read -r r; do
     if [ -n "$r" ] && [ "$r" != "$project" ] && names_sender "$r"; then scope=1; fi
   done <<EOF
@@ -100,39 +94,29 @@ EOF
   fi
   [ -n "$recipient" ] || exit 0
 
-  # A project's Anderton is held to DEPLOY:, LOOKUP: and ANSWER: only toward the repository's Anderton; reporting to
-  # the session that started it, it is a worker like any other.
-  local kind="" kinds="RESULT|QUESTION|BLOCKED|ANSWER"
-  if [ -n "$scope" ] && [ -n "$to_repo" ]; then
-    kinds="DEPLOY|LOOKUP|ANSWER"
-  elif [ -z "$worker" ]; then
-    kinds="$kinds|DIRECTION"
+  # A worker's report needs its kind. A project's Anderton writing to the repository's Anderton is not reporting, even
+  # when it is recorded as a worker; reporting to the session that started it, it is a worker like any other.
+  # A session that holds no role and no Anderton started learns the kinds only from this hold: nothing else reaches it.
+  local kind="" kinds="ANSWER" report="" required=""
+  if [ -n "$worker" ] && { [ -z "$scope" ] || [ -z "$to_repo" ]; }; then
+    report=1 required=1
+    kinds="RESULT|QUESTION|BLOCKED|ANSWER"
+  elif [ -z "$worker" ] && [ -z "$scope" ]; then
+    required=1
+    kinds="RESULT|QUESTION|BLOCKED|ANSWER|DIRECTION"
   fi
   kind=$(printf '%s' "$first" | sed -nE -e 's/^[[:space:]*_#>`-]*//' -e "s/^($kinds):.*/\\1/p") || exit 0
-  if [ -z "$kind" ]; then
-    if [ -n "$scope" ] && [ -n "$to_repo" ]; then
-      {
-        echo "Not sent. A project's Anderton messages \"$recipient\" only for what only it can do, with the kind as the"
-        echo "first word:"
-        echo "  DEPLOY: a change to ship (a merged PR to deploy, a restart, a host change, or a fix to shared code for a"
-        echo "    host worker to build and ship), with its link"
-        echo "  LOOKUP: a fact about the host that only \"$recipient\" can read, which it answers itself"
-        echo "  ANSWER: a reply to something \"$recipient\" asked you"
-        echo "Your project's results, blocks and questions, and your workers' reports, stay between you and the user, who"
-        echo "reads your tab. Anything for another project goes to that project's Anderton."
-      } >&2
-    else
-      {
-        echo "Not sent. Message \"$recipient\" only when it changes what they do, with the kind as the first word:"
-        echo "  RESULT: a milestone done (PR ready, task finished), with its link and what you verified"
-        echo "  QUESTION: a decision you need, with your recommendation"
-        echo "  BLOCKED: what stops you and what would unblock it"
-        echo "  ANSWER: a reply to something \"$recipient\" asked you"
-        [ -n "$worker" ] || echo "  DIRECTION: a person's instruction you are passing on, in their words"
-        echo "Acknowledgements, \"still waiting\", restated instructions and FYIs that change nothing are not sent: each one"
-        echo "wakes \"$recipient\" for nothing. If none of these fits, keep working and report at the next milestone."
-      } >&2
-    fi
+  if [ -n "$required" ] && [ -z "$kind" ]; then
+    {
+      echo "Not sent. Message \"$recipient\" only when it changes what they do, with the kind as the first word:"
+      echo "  RESULT: a milestone done (PR ready, task finished), with its link and what you verified"
+      echo "  QUESTION: a decision you need, with your recommendation"
+      echo "  BLOCKED: what stops you and what would unblock it"
+      echo "  ANSWER: a reply to something \"$recipient\" asked you"
+      [ -n "$report" ] || echo "  DIRECTION: a person's instruction you are passing on, in their words"
+      echo "Acknowledgements, \"still waiting\", restated instructions and FYIs that change nothing are not sent: each one"
+      echo "wakes \"$recipient\" for nothing. If none of these fits, keep working and report at the next milestone."
+    } >&2
     exit 10
   fi
 
@@ -151,7 +135,7 @@ EOF
   fi
   local milestone=""
   # A milestone carries its kind and the PR and issue links in it, each rebuilt from its parts; nothing else of the text.
-  if [ -n "${ANDERTON_EVENT_COMMAND:-}" ] && [ -n "$worker" ] && [ "$kind" != DIRECTION ]; then
+  if [ -n "${ANDERTON_EVENT_COMMAND:-}" ] && [ -n "$report" ]; then
     milestone=$(printf '%s' "$input" | jq -c --slurpfile w "$wrec" --arg kind "$kind" '
       (.tool_input.message // "" | tostring) as $msg
       | $w[0] | {claim: (.spawnerClaimId // ""), scope: (.spawnerScope // ""), worker: (.name // ""), kind: $kind,
@@ -254,49 +238,6 @@ original_report_target() {
     fi
   done
   return 0
-}
-
-# The repository's Anderton writing to a named project's Anderton ($recipient): only DIRECTION:, QUESTION: or ANSWER:,
-# with $route appended unless the message already carries it. Under auto mode Claude Code can deny a call whose input
-# a hook changed after review; the call Claude sends again already carries $route, so it passes unchanged.
-route_to_scope() {
-  local kind
-  kind=$(printf '%s' "$first" | sed -nE -e 's/^[[:space:]*_#>`-]*//' -e 's/^(DIRECTION|QUESTION|ANSWER):.*/\1/p') || exit 0
-  if [ -z "$kind" ]; then
-    {
-      echo "Not sent. \"$recipient\" is a project's Anderton: the user reads its tab, so its results and the user's calls"
-      echo "on its project go there, not to you. Write to it only with the kind as the first word:"
-      echo "  DIRECTION: work or a person's instruction to carry out"
-      echo "  QUESTION: a fact you need from it, which it answers with ANSWER:"
-      echo "  ANSWER: a reply to its LOOKUP: or other question"
-    } >&2
-    exit 10
-  fi
-  printf '%s' "$input" | jq -ce --arg route "$route" '.tool_input
-    | select(.message | index($route) | not)
-    | .message += "\n\n" + $route
-    | if (.content | type) == "string" then .content += "\n\n" + $route else . end
-    | {hookSpecificOutput: {hookEventName: "PreToolUse", updatedInput: .}}' 2>/dev/null
-  exit 0
-}
-
-# True when $to addresses the live holder of a named project in repository $1 other than its holder record $2; sets
-# $recipient to that holder's name.
-to_scope() {
-  local r spid sname
-  while IFS= read -r r; do
-    if [ -z "$r" ] || [ "$r" = "$2" ]; then continue; fi
-    spid=$(jq -r '.pid // empty' "$r" 2>/dev/null)
-    if [ -z "$spid" ] || ! is_holder "$sessions/$spid.json" "$r"; then continue; fi
-    sname=$(jq -r '.name // empty' "$sessions/$spid.json" 2>/dev/null)
-    if addresses "$spid" "$sname"; then
-      recipient=${sname:-"a project's Anderton"}
-      return 0
-    fi
-  done <<EOF
-$(project_holders "$1")
-EOF
-  return 1
 }
 
 # The pid of the session running this hook. Its registry entry names its session id; when two entries name it, the

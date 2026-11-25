@@ -41,19 +41,25 @@ unless the user says so. A prose rule is not a lock.
 When the user invokes you for one project in the repository, or names one, claim with
 `scripts/claim.sh --project <name>` instead. A project's Anderton starts and reviews that
 project's work, hears when its own workers block, and owns the user's calls on it: the
-user reads its tab directly. It does not deploy: send every deploy to the repository's
-Anderton as `DEPLOY:`, saying what it ships. That, `LOOKUP:` for a fact about the host
-that only the repository's Anderton can read, and `ANSWER:` to a question from it, are the
-only messages it sends there; its results, blocks and questions go to the user in its own
-tab, and a hook holds anything else. As the repository's Anderton, answer a `LOOKUP:`
-yourself. You write to a project's Anderton only with `DIRECTION:`, `QUESTION:` or
-`ANSWER:`, and the hook appends to each message that it reports results and the user's
-calls to the user in its own tab. Never list another Anderton's calls in your report; name
-its tab once. One session holds one role in a repository, and the claim refuses a second.
+user reads its tab directly. It does not deploy: it sends each deploy to the repository's
+Anderton, saying what it ships. One session holds one role in a repository, and the claim
+refuses a second.
 
-Use `scripts/role-message.sh 'DEPLOY: ...'` from a project Anderton if either end
+**Message another Anderton only for shared or host-level work**, something only that
+Anderton can do or know:
+- a deploy to run: "Deploy the export fix, merged in <PR link>; it restarts the shared scheduler."
+- a host fix or lookup only it can do: "Builds fail with a full disk; can you prune the old images?"
+- a fact only it can read: "Does the nightly backup include session transcripts?"
+- an answer to its question: "Yes, the backfill can wait until Thursday."
+
+Never relay or report a worker's progress to another Anderton: that is telephone, and each
+message wakes it and re-reads its whole context. A project's results, blocks and the user's
+calls on it belong in that project's own tab. Never list another Anderton's calls in your
+report; name its tab once. No hook checks this or needs a label: it is your judgment.
+
+Use `scripts/role-message.sh '<message>'` from a project Anderton if either end
 is Codex. The repository Anderton addresses a project with
-`scripts/role-message.sh --project <name> 'DIRECTION: ...'`. Claude-to-Claude uses
+`scripts/role-message.sh --project <name> '<message>'`. Claude-to-Claude uses
 its native SendMessage path. The recipient must get restart or production approvals
 from the operator directly.
 
@@ -237,10 +243,10 @@ names a model.
 
 After starting a worker:
 - It messages you only with a `RESULT:`, `QUESTION:`, `BLOCKED:` or `ANSWER:`, one per
-  milestone; a hook holds anything else, and holds the same from any other session in the
-  repository that messages the repository's Anderton, which may also send `DIRECTION:` to
-  pass on a person's instruction (a project's Anderton sends it only `DEPLOY:`, `LOOKUP:` and `ANSWER:`). Every message you send it is one it may answer,
-  so send only direction, never an acknowledgement.
+  milestone; a hook holds anything else, and holds the same from a session holding no role
+  that messages the repository's Anderton, which may also send `DIRECTION:` to pass on a
+  person's instruction. Another Anderton is not held to a kind (section 1). Every message you
+  send it is one it may answer, so send only direction, never an acknowledgement.
 - Subscribe with `notify_when_idle` only when you expect a milestone and the worker might
   stop without reporting it. Subscribe once: the notice fires on any turn end, so when it
   comes, check the PR or the worktree instead of subscribing again. Each notice wakes you

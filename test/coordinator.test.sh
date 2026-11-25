@@ -112,8 +112,8 @@ done
 [ ! -e "$FIXTURE_TMUX_LOG" ]
 printf 'Fixture task.\n' | codex_role env TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 "$script/spawn.sh" --effort low from-claude-default
 jq -e '(.provider // "claude") == "claude" and .spawnerProvider == "codex" and .spawnerScope == "tools"' "$claims/workers/from-claude-default.json" >/dev/null
-codex_role "$script/role-message.sh" "DEPLOY: catalog fixture"
-jq -e '.peerMessage.text == "DEPLOY: catalog fixture"' "$root_claim" >/dev/null
+codex_role "$script/role-message.sh" "Deploy the catalog fixture"
+jq -e '.peerMessage.text == "Deploy the catalog fixture"' "$root_claim" >/dev/null
 mkdir -p "$CLAUDE_CONFIG_DIR/projects/fixture"
 coordinator_transcript="$CLAUDE_CONFIG_DIR/projects/fixture/fixture-claude.jsonl"
 : > "$coordinator_transcript"
@@ -124,7 +124,7 @@ stop_input() {
 watch_status=0
 stop_input | claude_role env ANDERTON_WATCH_TICK=1 "$script/watch.sh" > "$tmp/wake" 2>&1 || watch_status=$?
 [ "$watch_status" = 2 ]
-grep -q 'DEPLOY: catalog fixture' "$tmp/wake"
+grep -q 'Deploy the catalog fixture' "$tmp/wake"
 peer_id=$(jq -er '.peerMessage | select(.attemptedAt > 0) | .id' "$root_claim")
 jq -nc --arg peer "$peer_id" '{type:"queue-operation",operation:"enqueue",
   sessionId:"fixture-claude",content:("Peer message " + $peer + " from Anderton fixture.")}' >> "$coordinator_transcript"
@@ -132,7 +132,7 @@ watch_status=0
 stop_input | claude_role env ANDERTON_WATCH_TICK=1 ANDERTON_WATCH_RENEW=0 "$script/watch.sh" > "$tmp/wake" 2>&1 || watch_status=$?
 [ "$watch_status" = 2 ]
 jq -e '.peerMessage == null' "$root_claim" >/dev/null
-if grep -q 'DEPLOY: catalog fixture' "$tmp/wake"; then exit 1; fi
+if grep -q 'Deploy the catalog fixture' "$tmp/wake"; then exit 1; fi
 
 rm -f "$claims/"*.json
 codex_role "$script/claim.sh"

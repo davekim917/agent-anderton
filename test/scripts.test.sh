@@ -1481,8 +1481,8 @@ check "keeping the record where --scope put it" [ "$(jq -r .scope "$(holder_path
 claim_status eeo-1 "$p_eo" --project
 check "--project without a name is a usage error" [ "$status" -eq 2 ]
 
-# report-gate.sh: any session in a project messaging the project's holder; a scope's holder may send it only DEPLOY:,
-# LOOKUP: and ANSWER:.
+# report-gate.sh: any session in a project messaging the project's holder. A session holding no role needs a kind; a
+# scope's holder needs none, and is held only for a word-for-word repeat.
 gate eeo-1 "$epsilon" epsilon-host '"Got it, on it."'
 check "report-gate holds an acknowledgement to the project's holder from a session that is not a worker" [ "$status" -eq 2 ]
 check "and names the holder in the kinds" contains 'Not sent. Message "epsilon-host" only when'
@@ -1504,19 +1504,10 @@ send eeo-1 "$epsilon" epsilon-host '"QUESTION:\nand the cache change, now that C
 check "lets a second question through that shares only its first line" [ "$status" -eq 0 ]
 gate eeo-1 "$epsilon" epsilon-fleet-a '"Got it."'
 check "leaves a message to a scope's holder alone" [ "$status" -eq 0 ]
-# A named project's Anderton reaches the project's holder only to ship something or to ask a host fact; the user reads
-# its own tab.
-send eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nMira asks: can the export run tonight?"'
-check "holds a scope's holder relaying to the project's holder" [ "$status" -eq 2 ]
-check "offering it DEPLOY" contains "DEPLOY: a change to ship"
-check "and LOOKUP for a host fact" contains "LOOKUP: a fact about the host"
-check "and not the kinds that relay its project" eval '! contains "QUESTION:" && ! contains "RESULT:" && ! contains "BLOCKED:" && ! contains "DIRECTION:"'
-send eea-1 "$epsilon" epsilon-host '"RESULT: export fixed, PR https://example.invalid/pr/6"'
-check "holds its result: the user reads that in its tab" [ "$status" -eq 2 ]
-send eea-1 "$epsilon" epsilon-host '"BLOCKED: waiting on the owner to pick a schedule."'
-check "and its block" [ "$status" -eq 2 ]
-send eea-1 "$epsilon" epsilon-host '"QUESTION: can the export run tonight? I recommend yes."'
-check "holds its question too: its project's decisions are the user's, in its tab" [ "$status" -eq 2 ]
+# A named project's Anderton writing to the project's holder: what it should send there is the skill's call, not a label's.
+send eea-1 "$epsilon" epsilon-host '"Please deploy the export fix, merged as https://example.invalid/pr/7"'
+check "lets a scope's holder ask the project's holder to deploy without a kind" [ "$status" -eq 0 ]
+check "silently" [ -z "$out" ]
 send eea-1 "$epsilon" epsilon-host '"LOOKUP: does the nightly backup include session transcripts?"'
 check "lets it ask a host fact only the project's holder can read" [ "$status" -eq 0 ]
 check "without a word" [ -z "$out" ]
@@ -1527,6 +1518,8 @@ send eea-1 "$epsilon" "uds:/run/user/1000/cc-socks/$p_eh.sock" '"DEPLOY: ship th
 check "but holds the same deploy sent again" [ "$status" -eq 2 ]
 send eea-1 "$epsilon" epsilon-host '"ANSWER: yes, the backfill can wait."'
 check "and lets it answer the project's holder" [ "$status" -eq 0 ]
+send eea-1 "$epsilon" epsilon-host '"ANSWER: yes, the backfill can wait."'
+check "an answer is never a repeat" [ "$status" -eq 0 ]
 send eeb-1 "$epsilon" epsilon-host '"DEPLOY: ship the export fix, merged as https://example.invalid/pr/7"'
 check "another scope's holder keeps its own record" [ "$status" -eq 0 ]
 gate eeh-1 "$epsilon" epsilon-other '"Got it."'
@@ -1550,40 +1543,13 @@ check "though sending it there twice is" [ "$status" -eq 2 ]
 gate eew-1 "$epsilon" epsilon-host '"DIRECTION: ship it."'
 check "a worker writing to the project's holder still has only the four kinds" [ "$status" -eq 2 ]
 
-# The repository's Anderton writing to a named project's Anderton: DIRECTION:, QUESTION: or ANSWER: only, each carrying
-# the routing footer, so the project's results and the user's calls on it stay in that project's tab.
-footer="Report results, and any call that is the user's, to the user in your own tab. Reply here only with ANSWER: to a question this message asks, and put a fact in it, not a decision for the user."
-gate eeh-1 "$epsilon" epsilon-fleet-a '"DIRECTION: Riley wants the export moved to Thursday."'
-check "report-gate lets the repository's holder direct a project's holder" [ "$status" -eq 0 ]
-check "appending the routing footer to the message" [ "$(printf '%s' "$out" | jq -r .hookSpecificOutput.updatedInput.message)" = "DIRECTION: Riley wants the export moved to Thursday.
-
-$footer" ]
-check "keeping the rest of the call" [ "$(printf '%s' "$out" | jq -r '.hookSpecificOutput | "\(.hookEventName) \(.updatedInput.to)"')" = "PreToolUse epsilon-fleet-a" ]
-check "and deciding nothing" [ "$(printf '%s' "$out" | jq -c '.hookSpecificOutput | del(.hookEventName, .updatedInput)')" = "{}" ]
-gate eeh-1 "$epsilon" "uds:/run/user/1000/cc-socks/$p_ea.sock" '"**QUESTION:** which day does the export run now?"'
-check "a question by socket address gets the footer too" [ "$(printf '%s' "$out" | jq -r .hookSpecificOutput.updatedInput.message)" = "**QUESTION:** which day does the export run now?
-
-$footer" ]
-gate eeh-1 "$epsilon" epsilon-fleet-p '"ANSWER: yes, the nightly backup includes transcripts."'
-check "an answer to a project's LOOKUP gets it too" [ "$(printf '%s' "$out" | jq -r .hookSpecificOutput.updatedInput.message)" = "ANSWER: yes, the nightly backup includes transcripts.
-
-$footer" ]
-set +e
-out=$(jq -nc --arg cwd "$epsilon" '{session_id: "eeh-1", cwd: $cwd, hook_event_name: "PreToolUse", tool_name: "SendMessage",
-  tool_use_id: "toolu_content", tool_input: {to: "epsilon-fleet-a", message: "DIRECTION: rerun the export.", content: "DIRECTION: rerun the export."}}' |
-  "$scripts/report-gate.sh" 2>&1)
-set -e
-check "a call that also carries the text as content gets the footer in both" \
-  [ "$(printf '%s' "$out" | jq -r --arg f "$footer" '.hookSpecificOutput.updatedInput | [.message, .content] | map(endswith("\n\n" + $f)) | all')" = true ]
-gate eeh-1 "$epsilon" epsilon-fleet-a "$(jq -nc --arg f "$footer" '"DIRECTION: rerun the export.\n\n" + $f')"
-check "a message that already carries the footer passes unchanged" [ "$status" -eq 0 ]
-check "silently, so a call sent again after auto mode's review is not rewritten twice" [ -z "$out" ]
-gate eeh-1 "$epsilon" epsilon-fleet-a '"Can you ask the owner which day the export should run?"'
-check "holds a message to a project's holder that names no kind" [ "$status" -eq 2 ]
-check "naming the kinds it may send there" contains "DIRECTION: work or a person's instruction"
-check "and where the project's calls go" contains "the user reads its tab"
-gate eeh-1 "$epsilon" epsilon-fleet-a '"RESULT: the export moved to Thursday."'
-check "holds a result sent to a project's holder too" [ "$status" -eq 2 ]
+# The repository's Anderton writing to a named project's Anderton is never held or rewritten.
+gate eeh-1 "$epsilon" epsilon-fleet-a '"ANSWER the export can move to Thursday; the backup window is clear."'
+check "report-gate lets the repository's holder answer a project's holder without the kind's colon" [ "$status" -eq 0 ]
+check "unchanged" [ -z "$out" ]
+gate eeh-1 "$epsilon" "uds:/run/user/1000/cc-socks/$p_ea.sock" '"Can you ask the owner which day the export should run?"'
+check "or with no kind, by socket address" [ "$status" -eq 0 ]
+check "unchanged" [ -z "$out" ]
 gate eeh-1 "$epsilon" eps-worker '"Got it, thanks."'
 check "leaves the repository's holder's message to a worker alone" [ "$status" -eq 0 ]
 check "unchanged" [ -z "$out" ]
@@ -1602,8 +1568,8 @@ jq -nc --arg d "$epsilon" '{name: "epsilon-host", dir: $d, spawner: "epsilon-oth
 gate eeh-1 "$epsilon" epsilon-other '"Got it."'
 check "the project's holder recorded as a worker is still never held" [ "$status" -eq 0 ]
 jq -nc --arg d "$epsilon" '{name: "epsilon-fleet-a", dir: $d, spawner: "epsilon-host"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
-send eea-1 "$epsilon" epsilon-host '"DEPLOY: ship the dashboard fix, merged as https://example.invalid/pr/8"'
-check "a scope's holder recorded as a worker is still judged as a scope's holder" [ "$status" -eq 0 ]
+send eea-1 "$epsilon" epsilon-host '"Deploy the dashboard fix, merged as https://example.invalid/pr/8"'
+check "a scope's holder recorded as the project's holder's worker needs no kind to write to it" [ "$status" -eq 0 ]
 jq -nc --arg d "$epsilon" '{name: "epsilon-fleet-a", dir: $d, spawner: "epsilon-other", spawnerSession: "eeo-1"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
 send eea-1 "$epsilon" epsilon-other '"QUESTION: keep the export schedule? I recommend yes."'
 check "reporting to the session that started it, it has a worker's kinds" [ "$status" -eq 0 ]
@@ -1611,14 +1577,15 @@ gate eea-1 "$epsilon" epsilon-other '"Got it."'
 check "and is held like a worker" [ "$status" -eq 2 ]
 rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-host.json" "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
 
-# Without ps, a holder cannot be proven live, so nothing is held, a scope's holder's relay included.
+# Without ps, a holder cannot be proven live, so nothing is held, a scope's holder's repeat included.
+send eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nMira asks: one more?"'
 mkdir -p "$work/nops"
 printf '#!/bin/sh\nexit 1\n' > "$work/nops/ps"
 chmod +x "$work/nops/ps"
 PATH="$work/nops:$PATH" gate eeo-1 "$epsilon" epsilon-host '"Got it."'
 check "without ps, a message to the holder is allowed" [ "$status" -eq 0 ]
-PATH="$work/nops:$PATH" send eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nMira asks: one more?"'
-check "without ps, a scope's holder's relay is allowed" [ "$status" -eq 0 ]
+PATH="$work/nops:$PATH" gate eea-1 "$epsilon" epsilon-host '"Relay from #fleet:\nMira asks: one more?"'
+check "without ps, a scope's holder's repeat is allowed" [ "$status" -eq 0 ]
 
 # A holder record whose process has gone, and whose pid a later session now has, names no holder.
 holder_file=$(holder_path "$epsilon")

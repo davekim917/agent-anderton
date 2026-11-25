@@ -4,7 +4,7 @@ set -euo pipefail
 . "$(dirname "$0")/session-lib.sh"
 
 usage() {
-  echo "usage: role-message.sh [--project <name>] '<kind>: <message>'" >&2
+  echo "usage: role-message.sh [--project <name>] '<message>'" >&2
   exit 2
 }
 scope=""
@@ -27,14 +27,7 @@ if [ "$(record_provider "$source")" = claude ] && [ "$(record_provider "$target"
   echo "Use Claude Code SendMessage for a Claude-to-Claude Anderton message." >&2
   exit 2
 fi
-if [ -z "$scope" ]; then
-  case $body in DEPLOY:* | LOOKUP:* | ANSWER:*) ;; *) usage ;; esac
-elif [ "$(jq -r '.scope // empty' "$source")" = "" ]; then
-  case $body in DIRECTION:* | QUESTION:* | ANSWER:*) ;; *) usage ;; esac
-  body="$body
-
-Report results and decisions for the user in your own tab. Reply here only with ANSWER: to a question from this Anderton."
-else
+if [ -n "$scope" ] && [ "$(jq -r '.scope // empty' "$source")" != "" ]; then
   echo "Project Anderton messages route through the repository Anderton." >&2
   exit 2
 fi
