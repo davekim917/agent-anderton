@@ -131,33 +131,29 @@ conversation_gate() {
 unread_noted=""
 conversation_gate
 
-mixed_claude_pane() {
-  local registry sid pid
-  registry=$(live_claude_worker "$record")
-  case $registry in '' | *$'\n'*) return 1 ;; esac
-  sid=$(jq -r .sessionId "$registry")
-  pid=$(jq -r .pid "$registry")
-  claude_in_worker_pane "$record" "$sid" "$pid"
-}
-
-mixed_claude_gone() {
+# True once no live session the record names runs, nor, for a worktree of its own, any session in it: removing a
+# checkout a session still works in would lose its work.
+claude_worker_gone() {
   local listed sid entry pid cwd
-  sid=$(jq -r '.claudeSession.id // empty' "$record")
-  for entry in "$sessions"/*.json; do
-    [ -f "$entry" ] || continue
-    cwd=$(jq -r '.cwd // empty' "$entry" 2>/dev/null) || continue
-    case $cwd in "$dir" | "$dir"/*) ;; *) continue ;; esac
-    pid=$(jq -r '.pid // empty' "$entry" 2>/dev/null) || continue
-    if [ -n "$pid" ] && registered_alive "$pid" "$(jq -r '.startedAt // empty | floor' "$entry")" \
-      "$(jq -r '.procStart // empty' "$entry")"; then
-      return 1
-    fi
-  done
+  sid=$(jq -r '.claudeSession.id // .claudeLaunchId // empty' "$record")
+  [ -z "$(live_claude_worker "$record" --allow-rebind)" ] || return 1
+  if [ "$worktree" = true ]; then
+    for entry in "$sessions"/*.json; do
+      [ -f "$entry" ] || continue
+      cwd=$(jq -r '.cwd // empty' "$entry" 2>/dev/null) || continue
+      case $cwd in "$dir" | "$dir"/*) ;; *) continue ;; esac
+      pid=$(jq -r '.pid // empty' "$entry" 2>/dev/null) || continue
+      if [ -n "$pid" ] && registered_alive "$pid" "$(jq -r '.startedAt // empty | floor' "$entry")" \
+        "$(jq -r '.procStart // empty' "$entry")"; then
+        return 1
+      fi
+    done
+  fi
   listed=$(claude agents --json 2>/dev/null) || return 1
-  printf '%s' "$listed" | jq -e --arg sid "$sid" --arg dir "$dir" '
+  printf '%s' "$listed" | jq -e --arg sid "$sid" --arg dir "$dir" --arg own "$worktree" '
     type == "array" and all(.[];
       ($sid == "" or .sessionId != $sid) and
-      ((.cwd // "") as $cwd | $cwd != $dir and ($cwd | startswith($dir + "/") | not)))' >/dev/null
+      ($own != "true" or ((.cwd // "") as $cwd | $cwd != $dir and ($cwd | startswith($dir + "/") | not))))' >/dev/null
 }
 
 # A worker that may still be running keeps its worktree: stop it, or confirm Claude Code no longer lists it.
@@ -232,11 +228,11 @@ elif [ "$provider" = agy ]; then
   # Only the recorded pane is closed, and only while herdr shows the agy spawn.sh started there, idle.
   agy_check "$record"
   case $agy_state in
+    unidentified)
+      echo "agy worker '$name' was recorded without its agy instance, so herdr cannot show that pane $pane still runs it rather than another agy. Close the pane yourself once nothing in it needs keeping, then rerun." >&2
+      exit 1
+      ;;
     running)
-      if ! jq -e '(.agyInstance // "") != ""' "$record" >/dev/null; then
-        echo "agy worker '$name' was recorded without its agy instance, so herdr cannot show that pane $pane still runs it rather than another agy. Close the pane yourself once nothing in it needs keeping, then rerun." >&2
-        exit 1
-      fi
       case $agy_status in
         idle | done) ;;
         *) echo "agy worker '$name' is not idle (herdr says: ${agy_status:-nothing}). Retire it once it is." >&2; exit 1 ;;
@@ -263,41 +259,49 @@ elif [ "$provider" = agy ]; then
     echo "Could not confirm agy worker '$name' stopped (herdr pane $pane); kept its worktree and record." >&2
     exit 1
   fi
-elif [ "$launcher" != bg ] && [ -n "$mixed" ] && [ -n "$pane" ]; then
-  current=$(codex_pane "$launcher" "$socket" "$pane" "$server")
-  if [ "$current" != gone ]; then
-    if ! mixed_claude_pane; then
-      echo "Could not verify '$name' still runs in its original pane. Close it directly, then retry." >&2
-      exit 1
-    fi
-    conversation_gate
-    case $launcher in
-      herdr) HERDR_SOCKET_PATH="$socket" herdr pane close "$pane" >/dev/null 2>&1 || true ;;
-      tmux) tmux -S "$socket" kill-pane -t "$pane" >/dev/null 2>&1 || true ;;
-    esac
-  fi
-  if [ "$(codex_pane "$launcher" "$socket" "$pane" "$server")" != gone ] || ! session_gone "$name" || ! mixed_claude_gone; then
-    echo "Could not confirm '$name' stopped; kept its worktree and record." >&2
-    exit 1
-  fi
 elif [ "$launcher" != bg ]; then
-  if [ -n "$mixed" ]; then
-    if ! worker_gone "$launcher" "$socket" "$tab" "$name" "$server" "$label" || ! mixed_claude_gone; then
+  # Only the worker's own pane is closed, and only while it shows the worker's session: its tab or window can hold a
+  # pane the user split off, and the pane itself another conversation since.
+  if [ -z "$pane" ]; then
+    if ! worker_gone "$launcher" "$socket" "$tab" "$name" "$server" "$label" || ! claude_worker_gone; then
       echo "The worker's exact pane was never recorded. Close it directly, then retry once the tab is gone." >&2
       exit 1
     fi
-  fi
-  # A session in a herdr tab or tmux window has no id for claude stop; closing its tab or window ends it. Only
-  # a tab or window place_state recognises as the worker's is closed, in the server it was opened in.
-  if [ -z "$mixed" ] && [ "$(place_state "$launcher" "$socket" "$tab" "$label" "$server")" = present ]; then
-    conversation_gate
-    case $launcher in
-      herdr) HERDR_SOCKET_PATH="$socket" herdr tab close "$tab" >/dev/null 2>&1 || true ;;
-      tmux) tmux -S "$socket" kill-window -t "$tab" >/dev/null 2>&1 || true ;;
+  else
+    refuse_claude_pane() {
+      echo "Worker '$name': $1, so it was not closed. Close it yourself once nothing in it needs keeping, then rerun." >&2
+      exit 1
+    }
+    case $(claude_pane_state "$record") in
+      worker)
+        conversation_gate
+        # The last read before the close: only a change made after it goes unseen.
+        case $(claude_pane_state "$record") in
+          worker)
+            case $launcher in
+              herdr) HERDR_SOCKET_PATH="$socket" herdr pane close "$pane" >/dev/null 2>&1 || true ;;
+              tmux) tmux -S "$socket" kill-pane -t "$pane" >/dev/null 2>&1 || true ;;
+            esac
+            ;;
+          gone) ;;
+          *) refuse_claude_pane "its $launcher pane $pane changed while retiring" ;;
+        esac
+        ;;
+      gone) ;;
+      other) refuse_claude_pane "its $launcher pane $pane does not show its Claude session (it exited, another conversation runs there, or it never registered)" ;;
+      *)
+        echo "Worker '$name': $launcher could not say what runs in pane $pane; kept its worktree and record. Retry." >&2
+        exit 1
+        ;;
     esac
   fi
-  if ! worker_gone "$launcher" "$socket" "$tab" "$name" "$server" "$label"; then
-    echo "Could not confirm '$name' stopped ($launcher ${tab:-(no id recorded)} in ${socket:-(no server recorded)}); kept its worktree and record." >&2
+  # A closed pane can take a moment to leave its server's listing.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -n "$pane" ] && [ "$(claude_pane "$record")" != gone ] || break
+    sleep 0.5
+  done
+  if { [ -n "$pane" ] && [ "$(claude_pane "$record")" != gone ]; } || ! session_gone "$name" || ! claude_worker_gone; then
+    echo "Could not confirm '$name' stopped ($launcher pane ${pane:-(none recorded)} in ${socket:-(no server recorded)}); kept its worktree and record." >&2
     exit 1
   fi
 else

@@ -50,7 +50,7 @@ $records
 EOF
   return 1
 }
-answers_for() { # answers_for <name> <cwd> [session id] [pid] [start]: true when the caller's role answers for that session
+answers_for() { # answers_for <session id> [pid]: true when the caller's role answers for that session
   [ -z "$mine" ] || [ "$(answering_role "$@")" = "$mine" ]
 }
 
@@ -67,7 +67,7 @@ if [ -n "$worker_list" ]; then
   exit 0
 fi
 
-held_worker() { # held_worker <worker_record args...>: true when retire.sh holds that worker, whose hold line stands for it
+held_worker() { # held_worker <session id> [pid]: true when retire.sh holds that worker, whose hold line stands for it
   local r
   r=$(worker_record "$@")
   [ -n "$r" ] && [ -f "${r%.json}.held" ]
@@ -88,6 +88,17 @@ for h in "$holders"/workers/*.held; do
          else "\(.why) Read it, then retire.sh \(.name) --reviewed-through <the current time>)" end)
       + (if $blocked != "" or ($m | length) == 0 then "" else "\n" + ([$m[] | "  \(.at)  \(.from): \(.line)"] | join("\n")) + "\n" end)' \
     "$h" 2>/dev/null || echo "waiting.sh: could not read $h" >&2
+done
+
+# A worker record from before session identities were recorded names no session, so in its repository every claim,
+# adoption and rebind refuses until migrate-workers.sh --apply stamps it from its live session or marks it.
+for r in "$holders"/workers/*.json; do
+  [ -f "$r" ] || continue
+  if [ -z "$all" ] && [ "$(jq -r '.root // empty' "$r" 2>/dev/null)" != "$root" ]; then continue; fi
+  if unmigrated_worker "$r"; then
+    printf '=== %s (worker record from before session identities: claims, adoptions and rebinds in its repository refuse until migrate-workers.sh --apply stamps or marks it)\n' \
+      "$(jq -r '.name // empty' "$r")"
+  fi
 done
 
 # agy reloads hook and agent configuration mid-session, so a change to any of it since an agy worker started can turn its
@@ -158,8 +169,8 @@ EOF
   fi
   if [ -n "$blocked" ] && [ "$status" != waiting ]; then continue; fi
   tag=""
-  if is_worker "$name" "$cwd" "$sid" "$pid" "$start"; then
-    if [ -n "$blocked" ] && held_worker "$name" "$cwd" "$sid" "$pid" "$start"; then continue; fi
+  if is_worker "$sid" "$pid"; then
+    if [ -n "$blocked" ] && held_worker "$sid" "$pid"; then continue; fi
     [ "$status" = waiting ] || continue
     tag=" (worker)"
   fi
@@ -168,7 +179,7 @@ EOF
   fi
   registered_alive "$pid" "$start" "$pstart" || continue
   judged="$judged $sid"
-  answers_for "$name" "$cwd" "$sid" "$pid" "$start" || continue
+  answers_for "$sid" "$pid" || continue
 
   transcript=""
   for t in "$home"/projects/*/"$sid".jsonl; do
@@ -453,8 +464,8 @@ claude agents --json 2>/dev/null |
     case "$judged " in *" $sid "*) continue ;; esac
     if held_by "$sid"; then continue; fi
     tag=""
-    if is_worker "$name" "$cwd" "$sid"; then
-      if [ -n "$blocked" ] && held_worker "$name" "$cwd" "$sid"; then continue; fi
+    if is_worker "$sid"; then
+      if [ -n "$blocked" ] && held_worker "$sid"; then continue; fi
       [ "$state" = blocked ] || continue
       tag=" (worker)"
     fi
@@ -462,7 +473,7 @@ claude agents --json 2>/dev/null |
     if [ -z "$all" ] && { [ -z "$cwd" ] || [ "$(project_root "$cwd")" != "$root" ]; }; then
       continue
     fi
-    answers_for "$name" "$cwd" "$sid" || continue
+    answers_for "$sid" || continue
     for t in "$home"/projects/*/"$sid".jsonl; do
       [ -e "$t" ] || continue
       tail -n 400 "$t" | jq -nrR --arg name "${name:-${sid%%-*}}${tag}" --arg cwd "$cwd" --arg state "$state" --arg blocked "$blocked" '

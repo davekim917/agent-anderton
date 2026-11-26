@@ -2,7 +2,8 @@
 # Adopt a session the user opened, so the calling Anderton answers for it as for a worker it started: the session
 # reports to the caller, and the caller's watch hears when it blocks. Nothing about the session itself changes;
 # retire.sh <name> releases it again without stopping it.
-# usage: adopt.sh <session name>   Exit 0: adopted. 1: refused. 2: bad usage.
+# usage: adopt.sh <session name>   Exit 0: adopted. 1: refused. 2: bad usage. 4: whether the session is already a worker
+# cannot be told now (a lookup gave no answer, or a worker record awaits migrate-workers.sh): nothing changed; retry.
 # Portable to macOS's bash 3.2 and BSD userland.
 set -euo pipefail
 # shellcheck source=SCRIPTDIR/session-lib.sh
@@ -21,7 +22,7 @@ case $name in
   '' | -* | *[!a-z0-9-]*) echo "$usage" >&2; exit 2 ;;
 esac
 case "$provider:$#" in claude:1 | codex:2) ;; *) echo "$usage" >&2; exit 2 ;; esac
-refuse() { echo "Not adopted: $1" >&2; exit 1; }
+refuse() { echo "Not adopted: $1" >&2; exit "${2:-1}"; }
 
 sid=$(invoking_session)
 caller_provider=$(invoking_provider)
@@ -50,7 +51,9 @@ if [ "$provider" = codex ]; then
   done <<EOF
 $records
 EOF
-  [ -z "$(codex_worker_record "$codex_home" "$target" "$cwd")" ] || refuse "$target already has a worker record."
+  owned=$(managed_invoker "$root" codex "$target" "$codex_home" "$cwd") ||
+    refuse "whether $target is already a worker cannot be told now: $owned. Retry." 4
+  [ -z "$owned" ] || refuse "$target already has a worker record."
   adoption=$(python3 -c 'import uuid; print(uuid.uuid4())') || refuse "cannot assign an adoption ID."
   if ! (set -C && : > "$record") 2>/dev/null; then refuse "$name already has a worker record."; fi
   jq -nc --arg name "$name" --arg root "$root" --arg codex_home "$codex_home" --argjson thread "$data" \
@@ -75,23 +78,32 @@ for s in "$sessions"/*.json; do
 done
 [ -n "$found" ] || refuse "no live session is named $name."
 if [ -z "$cwd" ] || [ "$(project_root "$cwd")" != "$root" ]; then refuse "$name is in another repository."; fi
+# A holder's session keeps its role through a resume, which runs it as a new process before its first Stop rebinds the
+# claim: the session id the claim names is protected, as well as the process it names.
 while IFS= read -r r; do
-  if [ -n "$r" ] && is_holder "$found" "$r"; then refuse "$name holds an Anderton role of its own; it answers to the user."; fi
+  if [ -n "$r" ] && { is_holder "$found" "$r" || jq -e --slurpfile reg "$found" '(.provider // "claude") == "claude" and
+    .sessionId != null and .sessionId == $reg[0].sessionId' "$r" >/dev/null 2>&1; }; then
+    refuse "$name holds an Anderton role of its own; it answers to the user."
+  fi
 done <<EOF
 $records
 EOF
 
-owned=$(managed_invoker "$root" claude "$(jq -r '.sessionId // empty' "$found")" "$(jq -r '.pid // empty' "$found")")
+owned=$(managed_invoker "$root" claude "$(jq -r '.sessionId // empty' "$found")" "$(jq -r '.pid // empty' "$found")") ||
+  refuse "whether $name is already a worker cannot be told now: $owned. Retry." 4
 [ -z "$owned" ] || refuse "$name already reports to $(jq -r '.spawner // "another Anderton"' "$owned" 2>/dev/null)."
+procstart=$(proc_start "$(jq -r '.pid' "$found")")
+[ -n "$procstart" ] || refuse "$name exited while it was being adopted."
 
 if ! (set -C && : > "$record") 2>/dev/null; then
   refuse "$name already reports to $(jq -r '.spawner // "another Anderton"' "$record" 2>/dev/null); that Anderton releases it with retire.sh $name first."
 fi
 jq -nc --arg name "$name" --arg dir "$cwd" --arg root "$root" --arg spawner "$me" --arg spawner_session "$sid" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg scope "$role_scope" --arg provider "$caller_provider" --slurpfile reg "$found" \
+  --arg procstart "$procstart" \
   '{name: $name, launcher: "adopted", dir: $dir, root: $root, worktree: false, adopted: true, spawner: $spawner, spawnerSession: $spawner_session,
     spawnerProvider: $provider, spawnerScope: (if $scope == "" then null else $scope end),
-    sessionId: $reg[0].sessionId, pid: $reg[0].pid, sessionStartedAt: $reg[0].startedAt, startedAt: $at}
+    sessionId: $reg[0].sessionId, pid: $reg[0].pid, procStart: $procstart, startedAt: $at}
     + if $provider == "codex" or $provider == "agy" then {reportTransport: "transcript"} else {} end' >| "$record"
 if [ "$caller_provider" = codex ] || [ "$caller_provider" = agy ]; then
   echo "Adopted '$name': tell it to report milestones in its final reply with worker.sh message."

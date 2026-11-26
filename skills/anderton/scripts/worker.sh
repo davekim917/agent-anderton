@@ -17,12 +17,7 @@ if [ "$action" = sweep ] && [ "$#" -eq 1 ]; then
   "$anderton_scripts/codex-workers.sh" sweep || result=1
   while IFS= read -r record; do
     [ -n "$record" ] || continue
-    args=(sweep "$record" --claim "$role")
-    if case $(record_provider "$role") in codex | agy) true ;; *) false ;; esac &&
-      jq -e '.claudeSession == null and .claudeLaunchId == null and .adopted != true' "$record" >/dev/null; then
-      args+=(--legacy-home "$home")
-    fi
-    "$anderton_scripts/claude-worker.py" "${args[@]}" || result=1
+    "$anderton_scripts/claude-worker.py" sweep "$record" --claim "$role" || result=1
   done <<RECORDS
 $("$anderton_scripts/waiting.sh" --transcript-workers)
 RECORDS
@@ -43,6 +38,7 @@ fi
 if [ "$(record_provider "$record")" = agy ]; then
   pane=$(jq -r '.pane // empty' "$record")
   socket=$(jq -r '.socket // empty' "$record")
+  unidentified="agy worker '$name' was recorded without its agy instance, so herdr cannot show that pane $pane runs it rather than another agy. Run migrate-workers.sh, or read the pane yourself."
   case $action in
     status)
       agy_check "$record"
@@ -51,6 +47,7 @@ if [ "$(record_provider "$record")" = agy ]; then
       ;;
     output)
       agy_check "$record"
+      if [ "$agy_state" = unidentified ]; then echo "$unidentified" >&2; exit 1; fi
       if [ "$agy_state" != running ]; then
         echo "agy worker '$name' is not running in its pane $pane, so there is no screen to read." >&2
         exit 1
@@ -69,6 +66,7 @@ if [ "$(record_provider "$record")" = agy ]; then
       fi
       agy_check "$record"
       # The pane must show the agy spawn.sh started, as it showed it then, just before the send.
+      if [ "$agy_state" = unidentified ]; then echo "$unidentified" >&2; exit 1; fi
       if [ "$agy_state" != running ]; then
         echo "agy worker '$name' is not running in its pane $pane, so the direction was not sent." >&2
         exit 1

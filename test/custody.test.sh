@@ -2,7 +2,8 @@
 set -euo pipefail
 
 if [ "$#" -eq 0 ]; then
-  for scenario in clear codex-route claude-route renamed-owner fallback-route prefix rename-steer rename-adopt upgrade; do
+  for scenario in clear codex-route claude-route renamed-owner fallback-route prefix rename-steer rename-adopt upgrade resume-clear \
+    adopted-restart; do
     "$BASH" "$0" "$scenario"
   done
   exit 0
@@ -195,6 +196,8 @@ case "$1" in
     fi
     ;;
   upgrade)
+    # A worker record from before launch ids: its Stop hook no longer guesses which session it is, and in its repository
+    # nothing is claimed until migrate-workers.sh stamps it from its live session.
     codex_claim; write_worker
     jq --arg launch "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
       .startedAt = $launch | .spawnerProvider = "codex" | .reportTransport = "transcript" | del(.claudeLaunchId)' "$worker" > "$work/legacy"
@@ -210,14 +213,48 @@ case "$1" in
       stop_input "$id"
     done
     register "$replacement" replacement-id original "$dir"
-    stop "$replacement" replacement-id >/dev/null 2>&1
-    jq -e '.claudeSession == null' "$worker" >/dev/null
-    rm "$sessions/$replacement.json"
     register "$target" legacy-id original "$dir"
+    # Its Stop hook binds nothing, so it leaves at once rather than watching for directions.
+    stop "$target" legacy-id >/dev/null 2>&1 &
+    hook=$!
+    pids="$pids $hook"
+    for _ in $(seq 1 25); do
+      kill -0 "$hook" 2>/dev/null || break
+      sleep 0.2
+    done
+    if kill -0 "$hook" 2>/dev/null || ! jq -e '.claudeSession == null' "$worker" >/dev/null; then
+      echo "The Stop hook bound a record from before launch ids on a guess"
+      exit 1
+    fi
+    code=0
+    env CLAUDE_PID="$target" CLAUDE_CODE_SESSION_ID=legacy-id "$scripts/claim.sh" --project upgraded > "$work/claim" 2>&1 || code=$?
+    if [ "$code" -ne 4 ] || ! grep -q 'migrate-workers.sh' "$work/claim"; then echo "An unmigrated record did not hold the claim back"; exit 1; fi
+    # Two live sessions in its checkout: neither is known to be the worker, so the record is left for a person.
+    cp "$worker" "$work/before"
+    code=0
+    "$scripts/migrate-workers.sh" --apply > "$work/migrate" 2>&1 || code=$?
+    if [ "$code" -ne 1 ] || ! grep -qF "original: left for a person: 2 live sessions run in $dir" "$work/migrate" ||
+      ! cmp -s "$worker" "$work/before"; then
+      echo "An ambiguous record was not left alone"
+      exit 1
+    fi
+    rm "$sessions/$replacement.json"
+    # One live session, running in the worker's pane: a dry run says what it would stamp and writes nothing.
+    "$scripts/migrate-workers.sh" > "$work/migrate"
+    if ! grep -qF "original: would be stamped with session legacy-id (pid $target), the one live session in $dir: it runs in the worker's tmux pane %5" "$work/migrate" ||
+      ! cmp -s "$worker" "$work/before"; then
+      echo "The dry run did not report the stamp, or wrote it"
+      exit 1
+    fi
+    "$scripts/migrate-workers.sh" --apply > "$work/migrate"
+    jq -e --argjson pid "$target" '.claudeSession | .id == "legacy-id" and .pid == $pid and .procStart != ""' "$worker" >/dev/null ||
+      { echo "The verified legacy worker was not stamped"; exit 1; }
+    cp "$worker" "$work/stamped"
+    "$scripts/migrate-workers.sh" --apply > "$work/migrate"
+    if ! grep -q '^original: identified: ' "$work/migrate" || ! cmp -s "$worker" "$work/stamped"; then echo "A second run changed the record"; exit 1; fi
     reply legacy-id 'RESULT: upgraded worker'
     stop "$target" legacy-id > "$work/stop" 2>&1 & watcher=$!
     pids="$pids $watcher"
-    wait_binding legacy-id || { echo "The verified legacy worker did not bind"; exit 1; }
     sweep > "$work/reports"
     grep -qFx 'RESULT: upgraded worker' "$work/reports"
     env CODEX_THREAD_ID=fixture-codex "$scripts/worker.sh" message original 'Directions still reach this worker.'
@@ -225,6 +262,52 @@ case "$1" in
     wait "$watcher" || code=$?
     [ "$code" -eq 2 ]
     grep -q 'Directions still reach this worker.' "$work/stop"
+    ;;
+  resume-clear)
+    # A resume runs the worker's session as a new process, and /clear before its first turn ends gives that process a new
+    # session id: the startup hook of the resume records the process, so the worker keeps custody of its new session.
+    codex_claim; write_worker; child; first=$pid
+    session=00000000-0000-4000-8000-0000000000a1
+    register "$first" "$session" original "$dir"
+    : > "$projects/fixture/$session.jsonl"
+    bind "$session" "$first"
+    kill "$first"
+    wait "$first" 2>/dev/null || true
+    rm -f "$sessions/$first.json"
+    jq -nc --arg dir "$dir" --arg file "$projects/fixture/$session.jsonl" --arg id "$session" '
+      {session_id:$id,cwd:$dir,transcript_path:$file,hook_event_name:"SessionStart",source:"resume"}' > "$work/resume.start"
+    # The hook runs under the resumed process, which then stays: exec keeps its pid and its start time.
+    bash -c 'CLAUDE_PID=$$ CLAUDE_CODE_SESSION_ID=$3 "$1" --claude-start < "$2"; exec sleep 120' _ "$scripts/watch.sh" "$work/resume.start" \
+      "$session" &
+    resumed=$!
+    pids="$pids $resumed"
+    for _ in $(seq 1 25); do
+      if jq -e --argjson pid "$resumed" '.claudeSession.pid == $pid' "$worker" >/dev/null; then break; fi
+      sleep 0.2
+    done
+    register "$resumed" cleared-id original "$dir"
+    code=0
+    env CLAUDE_PID="$resumed" CLAUDE_CODE_SESSION_ID=cleared-id "$scripts/claim.sh" --project resumed > "$work/claim" 2>&1 || code=$?
+    if [ "$code" -ne 3 ] || ! grep -q "managed as worker 'original'" "$work/claim"; then
+      echo "A resumed worker cleared before its first Stop escaped its record"
+      exit 1
+    fi
+    ;;
+  adopted-restart)
+    # /restart keeps an adopted session's process and rewrites its registry entry with a new startedAt; /clear then gives
+    # it a new session id. Its record names its process by pid and start time, so it is still the adopted worker.
+    codex_claim; child; target=$pid
+    jq -nc --argjson pid "$target" --arg dir "$root" --argjson at "$(( $(date +%s) - $(proc_age "$target") ))000" '
+      {pid:$pid,sessionId:"adopted-id",cwd:$dir,name:"handmade",startedAt:$at}' > "$sessions/$target.json"
+    env CODEX_THREAD_ID=fixture-codex "$scripts/adopt.sh" handmade > /dev/null
+    jq --argjson later "$(( $(date +%s) + 5 ))000" '.startedAt = $later | .sessionId = "adopted-cleared"' "$sessions/$target.json" > "$work/restarted"
+    mv "$work/restarted" "$sessions/$target.json"
+    code=0
+    env CLAUDE_PID="$target" CLAUDE_CODE_SESSION_ID=adopted-cleared "$scripts/claim.sh" --project adopted > "$work/claim" 2>&1 || code=$?
+    if [ "$code" -ne 3 ] || ! grep -q "managed as worker 'handmade'" "$work/claim"; then
+      echo "An adopted worker escaped its record after /restart and /clear"
+      exit 1
+    fi
     ;;
   *) exit 2 ;;
 esac

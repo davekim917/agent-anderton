@@ -9,7 +9,7 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/anderton-test.XXXXXX")
 work=$(cd "$work" && pwd -P)
 sleepers=""
 cleanup() {
-  for p in $sleepers; do kill "$p" 2>/dev/null || true; done
+  for p in $sleepers $(cat "$work/claude-log.sleepers" 2>/dev/null); do kill "$p" 2>/dev/null || true; done
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -49,8 +49,9 @@ FAKE
 chmod +x "$work/bin/fake-prompt-transcript"
 # A fake herdr. Open tabs are lines "<server socket> <tab id> <label>" in $FAKE_LOG.tabs-open, so a tab is
 # found only in the server ($HERDR_SOCKET_PATH) it was opened in, under its own label.
-# `tab create` opens tab $FAKE_HERDR_TAB (default w9:t5), or fails with $FAKE_HERDR_CREATE_FAIL. `agent start` and `agent prompt` log what they got;
-# with $FAKE_HERDR_START_LIVE, start lists the session as live. `tab get` reports the tab, or tab_not_found, or
+# `tab create` opens tab $FAKE_HERDR_TAB (default w9:t5) with root pane $FAKE_HERDR_PANE (default w9:p5), or fails with
+# $FAKE_HERDR_CREATE_FAIL. `agent start` and `agent prompt` log what they got; start shows a Claude session it started
+# with --session-id in its pane, as `agent get` reads it, and with $FAKE_HERDR_START_LIVE lists the session as live. `tab get` reports the tab, or tab_not_found, or
 # with $FAKE_HERDR_GET_GARBAGE an unreadable answer, or with $FAKE_HERDR_NO_SERVER server_not_running. `tab close` logs the tab and its server, closes it (not with
 # $FAKE_HERDR_CLOSE_FAIL) and, with $FAKE_HERDR_CLOSE_ENDS, ends the session in it.
 cat > "$work/bin/herdr" <<'FAKE'
@@ -69,7 +70,8 @@ case "$1 $2" in
     tab=${FAKE_HERDR_TAB:-w9:t5}
     echo "$sock $tab $label" >> "$FAKE_LOG.tabs-open"
     printf '%s\n' "$cwd" > "$FAKE_LOG.tab-cwd"
-    printf '{"id":"cli:tab:create","result":{"root_pane":{"pane_id":"w9:p5","tab_id":"%s"},"tab":{"tab_id":"%s"},"type":"tab_created"}}\n' "$tab" "$tab"
+    printf '{"id":"cli:tab:create","result":{"root_pane":{"pane_id":"%s","tab_id":"%s"},"tab":{"tab_id":"%s"},"type":"tab_created"}}\n' \
+      "${FAKE_HERDR_PANE:-w9:p5}" "$tab" "$tab"
     ;;
   "agent start")
     printf '%s\n' "$@" > "$FAKE_LOG.start"
@@ -77,7 +79,11 @@ case "$1 $2" in
     start_pane="" previous=""
     for arg; do
       if [ "$previous" = --pane ]; then start_pane=$arg; fi
-      if [ "$previous" = --session-id ] && [ -n "$start_pane" ]; then printf '%s\n' "$arg" > "$FAKE_LOG.claude-session.$start_pane"; fi
+      if [ "$previous" = --session-id ] && [ -n "$start_pane" ]; then
+        printf '%s\n' "$arg" > "$FAKE_LOG.claude-session.$start_pane"
+        jq -nc --arg pane "$start_pane" --arg sid "$arg" '{result: {agent: {agent: "claude", agent_status: "idle", pane_id: $pane,
+          agent_session: {agent: "claude", kind: "id", value: $sid}}}}' | sed "s|^|$sock |" > "$FAKE_LOG.agent-get.$start_pane"
+      fi
       previous=$arg
     done
     if [ -n "${FAKE_HERDR_START_LIVE:-}" ]; then printf '[{"kind":"interactive","name":"%s","id":null}]\n' "$3" > "$FAKE_AGENTS"; fi
@@ -89,6 +95,8 @@ case "$1 $2" in
     ;;
   "agent list") cat "$FAKE_LOG.herdr-agents" 2>/dev/null || echo '{"result":{"agents":[]}}' ;;
   "agent get")
+    if [ -n "${FAKE_HERDR_GET_GARBAGE:-}" ]; then echo "permission denied" >&2; exit 1; fi
+    if [ -n "${FAKE_HERDR_NO_SERVER:-}" ]; then echo '{"error":{"code":"server_not_running"}}' >&2; exit 1; fi
     # The agent in pane $3 of this server: a "<server socket> <json>" line in $FAKE_LOG.agent-get.<pane>, or agent_not_found.
     # A <pane>.then file replaces that answer after this one, as if the agent exited and something else took the pane
     # between two reads.
@@ -109,6 +117,8 @@ case "$1 $2" in
     echo "$3 $4" >> "$FAKE_LOG.keys"
     ;;
   "pane get")
+    if [ -n "${FAKE_HERDR_GET_GARBAGE:-}" ]; then echo "permission denied" >&2; exit 1; fi
+    if [ -n "${FAKE_HERDR_NO_SERVER:-}" ]; then echo '{"error":{"code":"server_not_running"}}'; exit 1; fi
     # A pane in $FAKE_LOG.herdr-panes ("<server socket> <pane id> <title>"), or pane_not_found.
     title=$(awk -v s="$sock" -v p="$3" '$1 == s && $2 == p { $1 = ""; $2 = ""; sub(/^  /, ""); print; f = 1 } END { exit !f }' "$FAKE_LOG.herdr-panes" 2>/dev/null) ||
       { echo '{"error":{"code":"pane_not_found"}}'; exit 1; }
@@ -116,8 +126,10 @@ case "$1 $2" in
     ;;
   "pane close")
     echo "pane $3" >> "$FAKE_LOG.closed"
+    echo "$sock" >> "$FAKE_LOG.closed-socket"
     if [ -n "${FAKE_HERDR_CLOSE_FAIL:-}" ]; then exit 1; fi
     rm -f "$FAKE_LOG.agent-get.$3"
+    if [ -n "${FAKE_HERDR_CLOSE_ENDS:-}" ]; then echo '[]' > "$FAKE_AGENTS"; fi
     awk -v s="$sock" -v p="$3" '!($1 == s && $2 == p)' "$FAKE_LOG.herdr-panes" > "$FAKE_LOG.herdr-panes.tmp" 2>/dev/null || true
     mv "$FAKE_LOG.herdr-panes.tmp" "$FAKE_LOG.herdr-panes"
     ;;
@@ -147,7 +159,10 @@ chmod +x "$work/bin/herdr"
 # session in it registers, with $FAKE_TMUX_GONE the window has already closed. `list-windows` prints
 # "<pid> <id> <name>" for that server's windows, or reports it dead ($FAKE_TMUX_NO_SERVER, its socket left
 # behind), its socket missing ($FAKE_TMUX_NO_SOCKET) or an answer the check cannot read ($FAKE_TMUX_GARBAGE). `kill-window` logs the server and target, closes it (not
-# with $FAKE_TMUX_KILL_FAIL) and, with $FAKE_TMUX_KILL_ENDS, ends the session.
+# with $FAKE_TMUX_KILL_FAIL) and, with $FAKE_TMUX_KILL_ENDS, ends the session. The window's pane is $FAKE_TMUX_PANE (default
+# %7 and the window's number); with $FAKE_TMUX_LIVE its process is the Claude session, registered as Claude Code does, and
+# `list-panes` names it as "<server pid> <pane id> <pane pid>" ($FAKE_LOG.pane-pids). `kill-pane` closes that pane and,
+# with $FAKE_TMUX_KILL_ENDS, ends its session.
 cat > "$work/bin/tmux" <<'FAKE'
 #!/usr/bin/env bash
 sock=""
@@ -176,10 +191,20 @@ case $1 in
       done
     fi
     window=${FAKE_TMUX_WINDOW:-@7}
+    pane=${FAKE_TMUX_PANE:-%7${window#@}}
     if [ -z "${FAKE_TMUX_GONE:-}" ]; then
       echo "${TMUX%%,*} $(printf '%s' "$TMUX" | cut -d, -f2) $window $7" >> "$FAKE_LOG.windows-open"
+      pane_pid=1
+      if [ -n "${FAKE_TMUX_LIVE:-}" ] && [ -n "$window_sid" ]; then
+        sleep 600 </dev/null >/dev/null 2>&1 &
+        pane_pid=$!
+        echo "$pane_pid" >> "$FAKE_LOG.sleepers"
+        jq -nc --argjson pid "$pane_pid" --arg sid "$window_sid" --arg cwd "$window_dir" --arg name "$7" \
+          '{pid: $pid, sessionId: $sid, cwd: $cwd, name: $name}' > "$CLAUDE_CONFIG_DIR/sessions/$pane_pid.json"
+      fi
+      echo "${TMUX%%,*} $(printf '%s' "$TMUX" | cut -d, -f2) $pane $pane_pid $window" >> "$FAKE_LOG.pane-pids"
     fi
-    echo "$window ${FAKE_TMUX_PANE:-%70}"
+    echo "$window $pane"
     ;;
   list-windows)
     # With $FAKE_TMUX_ON_LIST, the first listing first runs that script: something that happens while a caller works.
@@ -190,14 +215,31 @@ case $1 in
     awk -v s="$sock" '$1 == s { print $2, $3, $4 }' "$FAKE_LOG.windows-open" 2>/dev/null || true
     ;;
   list-panes)
-    # With titles, "<server pid> <pane id> <title>" for that server's panes in $FAKE_LOG.panes-open; else prompt.sh's panes.
+    # With titles, "<server pid> <pane id> <title>" for that server's panes in $FAKE_LOG.panes-open; with the pane's
+    # process, from $FAKE_LOG.pane-pids; else prompt.sh's panes.
     case "$*" in
+      *'#{pid} #{pane_id} #{pane_pid}'*)
+        if [ -n "${FAKE_TMUX_ON_LIST:-}" ] && [ ! -e "$FAKE_TMUX_ON_LIST.done" ]; then sh "$FAKE_TMUX_ON_LIST"; : >"$FAKE_TMUX_ON_LIST.done"; fi
+        if [ -n "${FAKE_TMUX_NO_SERVER:-}" ]; then echo "no server running on $sock" >&2; exit 1; fi
+        if [ -n "${FAKE_TMUX_NO_SOCKET:-}" ]; then echo "error connecting to $sock (No such file or directory)" >&2; exit 1; fi
+        if [ -n "${FAKE_TMUX_GARBAGE:-}" ]; then echo "error connecting to $sock (Permission denied)" >&2; exit 1; fi
+        awk -v s="$sock" '$1 == s { print $2, $3, $4 }' "$FAKE_LOG.pane-pids" 2>/dev/null || true
+        ;;
       *pane_title*) awk -v s="$sock" '$1 == s { $1 = ""; sub(/^ /, ""); print }' "$FAKE_LOG.panes-open" 2>/dev/null || true ;;
       *) cat "$FAKE_LOG.tmux-panes" 2>/dev/null ;;
     esac
     ;;
   kill-pane)
     echo "$sock pane $3" >> "$FAKE_LOG.killed"
+    if [ -n "${FAKE_TMUX_KILL_FAIL:-}" ]; then exit 1; fi
+    if [ -n "${FAKE_TMUX_KILL_ENDS:-}" ]; then
+      echo '[]' > "$FAKE_AGENTS"
+      awk -v s="$sock" -v p="$3" '$1 == s && $3 == p { print $4 }' "$FAKE_LOG.pane-pids" 2>/dev/null | while read -r ended; do
+        if [ "$ended" != 1 ]; then kill "$ended" 2>/dev/null || true; rm -f "$CLAUDE_CONFIG_DIR/sessions/$ended.json"; fi
+      done
+    fi
+    awk -v s="$sock" -v p="$3" '!($1 == s && $3 == p)' "$FAKE_LOG.pane-pids" > "$FAKE_LOG.pane-pids.tmp" 2>/dev/null || true
+    mv "$FAKE_LOG.pane-pids.tmp" "$FAKE_LOG.pane-pids"
     awk -v s="$sock" -v p="$3" '!($1 == s && $3 == p)' "$FAKE_LOG.panes-open" > "$FAKE_LOG.panes-open.tmp" 2>/dev/null || true
     mv "$FAKE_LOG.panes-open.tmp" "$FAKE_LOG.panes-open"
     ;;
@@ -558,7 +600,7 @@ check "telling it to report to the caller by name" grep -qF 'Message "lead-sessi
 check "with the four kinds a report opens with" eval 'for k in RESULT: QUESTION: BLOCKED: ANSWER:; do grep -q "^  $k" "$FAKE_LOG.window" || exit 1; done'
 check "and no acknowledgements or waiting notes" grep -qF 'Never send acknowledgements, "still waiting"' "$FAKE_LOG.window"
 check "telling it to give each sub-agent an explicit effort" grep -qF 'Give every sub-agent you start an explicit effort' "$FAKE_LOG.window"
-check "recording its tmux window and pane" [ "$(jq -r '"\(.launcher) \(.tab) \(.pane)"' "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.json")" = "tmux @1 %70" ]
+check "recording its tmux window and pane" [ "$(jq -r '"\(.launcher) \(.tab) \(.pane)"' "$CLAUDE_CONFIG_DIR/anderton/workers/fix-login.json")" = "tmux @1 %71" ]
 check "at the effort it was given" [ "$(grep -A1 -x -- --effort "$FAKE_LOG.window" | tail -n 1)" = high ]
 check "on Opus when no model is named" [ "$(grep -A1 -x -- --model "$FAKE_LOG.window" | tail -n 1)" = opus ]
 
@@ -724,6 +766,8 @@ out=$(echo "Task." | env CLAUDE_CODE_SESSION_ID=anon-1 CLAUDE_PID="$p_anon" \
 status=$?
 set -e
 check "an unnamed caller is refused: the worker would have no one to report to" contains "has no name"
+kill "$p_worker" 2>/dev/null || true
+wait "$p_worker" 2>/dev/null || true
 run env FAKE_TMUX_KILL_ENDS=1 "$scripts/retire.sh" fix-login
 check "the interactive report worker can be retired" [ "$status" -eq 0 ]
 
@@ -890,7 +934,7 @@ jq -nc --arg sid "$hc_sid" --arg at "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" '{type:
 printf 'cat %q >>%q\n' "$work/late-line" "$hc_t" >"$work/late-message"
 hc_retire_late() { : >"$FAKE_LOG.killed"; run env FAKE_TMUX_KILL_ENDS=1 FAKE_TMUX_ON_LIST="$work/late-message" "$scripts/retire.sh" "$@"; }
 hc_retire_late hc-late
-check "a message that arrives after the first read, before the window closes, holds it: it is read again just before" \
+check "a message that arrives after the first read, before the pane closes, holds it: it is read again just before" \
   eval '[ "$status" -eq 4 ] && contains "the user: Hold on, one more thing." && [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-hc-late" ]'
 rm -f "$work/late-message" "$work/late-message.done" "$work/late-line"
 hc_retire hc-late --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -927,9 +971,6 @@ git -C "$alpha" worktree add -q --detach "$work/wt-legacy-bg" HEAD
 jq -nc --arg root "$alpha" --arg dir "$work/wt-legacy-bg" --arg base "$(git -C "$alpha" rev-parse HEAD)" '
   {name:"legacy-bg", launcher:"bg", id:"a1b2c3d4", root:$root, dir:$dir, base:$base,
    worktree:true, spawner:"lead-session", spawnerSession:"lead-1"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/legacy-bg.json"
-# Its session, from before records kept a launch id, is found by the brief that names it and its worktree.
-fake-prompt-transcript legacy-bg-session "$work/wt-legacy-bg" "Task.
-You are a worker the Anderton session \"lead-session\" started for the task above, in $work/wt-legacy-bg."
 printf '{"type":"assistant","timestamp":"%s","message":{"content":[{"type":"text","text":"Blocked: which bucket?"}]}}\n' \
   "$recent" > "$CLAUDE_CONFIG_DIR/projects/p/bg-1.jsonl"
 printf '{"type":"assistant","timestamp":"%s","message":{"content":[{"type":"text","text":"I will check the settings."}]}}\n{"type":"assistant","timestamp":"%s","message":{"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"questions":[{"question":"Which bucket for prod?","options":[{"label":"east"},{"label":"west"}]}]}}]}}\n' \
@@ -947,6 +988,13 @@ jq -nc --arg a "$alpha" --arg w "$work/wt-legacy-bg" --arg b "$beta" '[
   {kind: "background", name: "beta-bg", sessionId: "bg-1", cwd: $b, state: "blocked"},
   {kind: "background", name: "asking-bg", sessionId: "bg-4", cwd: $a, state: "blocked"},
   {kind: "background", name: "prompt-bg", sessionId: "bg-5", cwd: $a, state: "blocked"}]' > "$FAKE_AGENTS"
+jq '.[2].id = "a1b2c3d4"' "$FAKE_AGENTS" > "$FAKE_AGENTS.tmp" && mv "$FAKE_AGENTS.tmp" "$FAKE_AGENTS"
+# Its record, from before records kept a session id, names only the id claude --bg gave it: migrate-workers.sh stamps the
+# session claude agents lists under that id.
+run "$scripts/migrate-workers.sh" --apply
+check "migrate-workers.sh stamps a background worker from before session ids with the session claude agents lists for its id" \
+  eval 'contains "legacy-bg: stamped with background session a1b2c3d4, which claude agents lists as session bg-3" &&
+    [ "$(jq -r .claudeSession.id "$CLAUDE_CONFIG_DIR/anderton/workers/legacy-bg.json")" = bg-3 ]'
 out=$(env CLAUDE_PID="$p_lead" "$scripts/waiting.sh")
 check "lists a blocked background session in the project, with its last text" contains "=== photo  $alpha  (background, blocked"
 check "shows what it said" contains "Blocked: which bucket?"
@@ -1008,12 +1056,12 @@ check "recording its tab and herdr server, which retire.sh closes it in" [ "$(jq
 check "sending the brief to its pane, not to a name another agent can take" [ "$(cat "$FAKE_LOG.prompt-target")" = w9:p5 ]
 check "and recording that pane, whose title retire.sh reads for a Codex worker" [ "$(jq -r .pane "$CLAUDE_CONFIG_DIR/anderton/workers/tab-worker.json")" = w9:p5 ]
 
-# A named project's Anderton puts its own name on its workers' tabs, and retire.sh still finds and closes them.
+# A named project's Anderton puts its own name on its workers' tabs, and retire.sh still closes the worker's pane in it.
 (cd "$alpha" && env CLAUDE_PID="$p_lead" CLAUDE_CODE_SESSION_ID=lead-1 "$scripts/claim.sh" --project tabs >/dev/null)
 lead_reg="$CLAUDE_CONFIG_DIR/sessions/$p_lead.json"
 cp "$lead_reg" "$work/lead-reg.bak"
 jq -c '.name = "Lead Session"' "$work/lead-reg.bak" > "$lead_reg"
-run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t7 "$scripts/spawn.sh" --effort high proj-worker <<'BRIEF'
+run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t7 FAKE_HERDR_PANE=w9:p7 "$scripts/spawn.sh" --effort high proj-worker <<'BRIEF'
 Task.
 BRIEF
 check "a project's Anderton opens its worker in a tab" [ "$status" -eq 0 ]
@@ -1024,7 +1072,7 @@ agents_before=$(cat "$FAKE_AGENTS")
 echo '[]' > "$FAKE_AGENTS"
 : > "$FAKE_LOG.closed"
 run "$scripts/retire.sh" proj-worker
-check "retire.sh closes the labelled tab" eval '[ "$status" -eq 0 ] && grep -qx "w9:t7" "$FAKE_LOG.closed"'
+check "retire.sh closes the worker's pane in the labelled tab" eval '[ "$status" -eq 0 ] && grep -qx "pane w9:p7" "$FAKE_LOG.closed"'
 printf '%s\n' "$agents_before" > "$FAKE_AGENTS"
 mv "$work/lead-reg.bak" "$lead_reg"
 rm -f "$(holder_path "$(project_root "$alpha")" tabs)"
@@ -1050,7 +1098,7 @@ check "and a workgroup role's claim emits its start, and nothing else" eval 'wai
 check "the same session keeps its claim id, and a rebind emits nothing" eval 'sleep 0.5;
   [ "$(jq -r .claimId "$ev_record")" = "$ev_claim" ] && [ "$(grep -c . "$events")" -eq 1 ]'
 
-run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t8 "$scripts/spawn.sh" --effort high ev-worker <<'BRIEF'
+run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t8 FAKE_HERDR_PANE=w9:p8 "$scripts/spawn.sh" --effort high ev-worker <<'BRIEF'
 Task.
 BRIEF
 ev_worker="$CLAUDE_CONFIG_DIR/anderton/workers/ev-worker.json"
@@ -1121,6 +1169,8 @@ wait "$ev_watch" 2>/dev/null || true
 
 agents_before=$(cat "$FAKE_AGENTS")
 echo '[]' > "$FAKE_AGENTS"
+kill "$p_ev" 2>/dev/null || true
+wait "$p_ev" 2>/dev/null || true
 run "$scripts/retire.sh" ev-worker
 check "retiring the worker emits its done" eval 'wait_events 9 &&
   [ "$(event 9)" = "{\"claimId\":\"$ev_claim\",\"scope\":\"workgroup:acme/ci\",\"kind\":\"done\",\"worker\":\"ev-worker\"}" ]'
@@ -1198,7 +1248,7 @@ check "without launching or allocating a worker" eval '[ ! -e "$FAKE_LOG.tab" ] 
   [ ! -e "$FAKE_LOG.bg" ] && [ ! -e "$work/wt-bare-herdr" ] && [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/bare-herdr.json" ]'
 
 : > "$FAKE_LOG.closed"
-run env "${tmux_env[@]}" "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t6 FAKE_HERDR_START_FAIL=1 "$scripts/spawn.sh" --effort high stuck-tab <<'BRIEF'
+run env "${tmux_env[@]}" "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t6 FAKE_HERDR_PANE=w9:p6 FAKE_HERDR_START_FAIL=1 "$scripts/spawn.sh" --effort high stuck-tab <<'BRIEF'
 Task.
 BRIEF
 check "a tab whose claude never becomes ready fails the spawn" [ "$status" -eq 1 ]
@@ -1229,13 +1279,13 @@ check "without dispatching elsewhere or leaving a retry marker" eval '[ ! -e "$F
   [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/no-tab.herdr-failed" ]'
 check "removing the unused worktree and record" eval '[ ! -e "$work/wt-no-tab" ] &&
   [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/no-tab.json" ]'
-run env "${herdr_env[@]}" "$scripts/spawn.sh" --effort high no-tab <<'BRIEF'
+run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t12 FAKE_HERDR_PANE=w9:p12 "$scripts/spawn.sh" --effort high no-tab <<'BRIEF'
 Task.
 BRIEF
 check "the same worker name can be retried interactively" [ "$status" -eq 0 ]
 run "$scripts/retire.sh" no-tab
 
-run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t7 FAKE_HERDR_START_FAIL=1 FAKE_HERDR_START_LIVE=1 FAKE_HERDR_CLOSE_FAIL=1 "$scripts/spawn.sh" --effort high live-stuck <<'BRIEF'
+run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t7 FAKE_HERDR_PANE=w9:p13 FAKE_HERDR_START_FAIL=1 FAKE_HERDR_START_LIVE=1 FAKE_HERDR_CLOSE_FAIL=1 "$scripts/spawn.sh" --effort high live-stuck <<'BRIEF'
 Task.
 BRIEF
 check "a failed tab whose session is not confirmed stopped fails the spawn" [ "$status" -eq 1 ]
@@ -1245,7 +1295,7 @@ check "and a record retire.sh can finish from" [ "$(jq -r '"\(.launcher) \(.tab)
 : >"$FAKE_LOG.closed"
 run env FAKE_HERDR_CLOSE_ENDS=1 "$scripts/retire.sh" live-stuck
 check "its brief never arrived, so no transcript shows it was not told anything: retire.sh holds it, closing nothing" \
-  eval '[ "$status" -eq 4 ] && contains "could not be read" && [ -d "$work/wt-live-stuck" ] && ! grep -qx "w9:t7" "$FAKE_LOG.closed" 2>/dev/null'
+  eval '[ "$status" -eq 4 ] && contains "could not be read" && [ -d "$work/wt-live-stuck" ] && ! grep -qx "pane w9:p13" "$FAKE_LOG.closed" 2>/dev/null'
 run env FAKE_HERDR_CLOSE_ENDS=1 "$scripts/retire.sh" live-stuck --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 check "which it does once the session ends" [ "$status" -eq 0 ]
 check "removing that worktree" [ ! -e "$work/wt-live-stuck" ]
@@ -1254,17 +1304,31 @@ check "removing that worktree" [ ! -e "$work/wt-live-stuck" ]
 : > "$FAKE_LOG.life"
 echo '[{"kind":"interactive","name":"tab-worker","id":null,"cwd":"/","status":"busy"}]' > "$FAKE_AGENTS"
 run "$scripts/retire.sh" tab-worker
-check "retire.sh keeps a tab worker that is still running after its tab closed" eval '[ "$status" -eq 1 ] && [ -d "$work/wt-tab-worker" ]'
+check "retire.sh keeps a tab worker that is still running after its pane closed" eval '[ "$status" -eq 1 ] && [ -d "$work/wt-tab-worker" ]'
 check "and its record" [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/tab-worker.json" ]
 : > "$FAKE_LOG.closed-socket"
 echo '[]' > "$FAKE_AGENTS"
-echo "$work/herdr.sock w9:t5 tab-worker" >> "$FAKE_LOG.tabs-open"
+# show_claude <pane> <session id>: herdr shows that Claude session in that pane again.
+show_claude() {
+  jq -nc --arg pane "$1" --arg sid "$2" '{result: {agent: {agent: "claude", agent_status: "idle", pane_id: $pane,
+    agent_session: {agent: "claude", kind: "id", value: $sid}}}}' | sed "s|^|$work/herdr.sock |" > "$FAKE_LOG.agent-get.$1"
+}
+show_claude w9:p5 "$tab_session"
 run env FAKE_HERDR_CLOSE_FAIL=1 "$scripts/retire.sh" tab-worker
-check "retire.sh keeps a tab worker whose tab did not close, listed or not" [ "$status" -eq 1 ]
+check "retire.sh keeps a tab worker whose pane did not close, listed or not" [ "$status" -eq 1 ]
 check "its worktree" [ -d "$work/wt-tab-worker" ]
+# The user split the worker's tab: that tab holds a pane of theirs, and the worker's pane now runs another conversation.
+show_claude w9:p5 another-conversation
+echo "$work/herdr.sock w9:t5 tab-worker" >> "$FAKE_LOG.tabs-open"
+: > "$FAKE_LOG.closed"
+run env FAKE_HERDR_CLOSE_ENDS=1 "$scripts/retire.sh" tab-worker
+check "retire.sh closes nothing while the worker's pane shows another Claude session" eval '[ "$status" -eq 1 ] &&
+  contains "does not show its Claude session" && [ ! -s "$FAKE_LOG.closed" ] && [ -d "$work/wt-tab-worker" ]'
+show_claude w9:p5 "$tab_session"
 echo '[{"kind":"interactive","name":"tab-worker","id":null,"cwd":"/","status":"busy"}]' > "$FAKE_AGENTS"
 run env FAKE_HERDR_CLOSE_ENDS=1 HERDR_SOCKET_PATH=/elsewhere/herdr.sock "$scripts/retire.sh" tab-worker
-check "it retires a tab worker by closing its tab" eval '[ "$status" -eq 0 ] && grep -qx "w9:t5" "$FAKE_LOG.closed"'
+check "it retires a tab worker by closing its own pane, never the tab the user's pane shares" eval '[ "$status" -eq 0 ] &&
+  grep -qx "pane w9:p5" "$FAKE_LOG.closed" && ! grep -qx "w9:t5" "$FAKE_LOG.closed"'
 check "in the herdr server it was opened in, not the caller's" grep -qx "$work/herdr.sock" "$FAKE_LOG.closed-socket"
 check "removing its worktree" [ ! -e "$work/wt-tab-worker" ]
 check "and its record" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/tab-worker.json" ]
@@ -1281,15 +1345,15 @@ check "in a new window, detached, named for it, on its worktree, running claude 
   [ "$(head -n 20 "$FAKE_LOG.window" | tr '\n' ' ')" = "new-window -d -P -F #{window_id} #{pane_id} -n tmux-worker -c $work/wt-tmux-worker -e CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR claude -n tmux-worker --permission-mode acceptEdits --effort high --model opus " ]
 check "with the brief and its report-by-name rule as one argument" grep -qF 'Message "lead-session" by SendMessage only when' "$FAKE_LOG.window"
 check "not started in the background" [ ! -e "$FAKE_LOG.bg" ]
-check "recording its pane, by which retire.sh finds a Codex worker" [ "$(jq -r .pane "$CLAUDE_CONFIG_DIR/anderton/workers/tmux-worker.json")" = %70 ]
+check "recording its pane, the only one retire.sh closes" [ "$(jq -r .pane "$CLAUDE_CONFIG_DIR/anderton/workers/tmux-worker.json")" = %77 ]
 check "recording its window and tmux server, which retire.sh kills it in" [ "$(jq -r '"\(.launcher) \(.tab) \(.socket)"' "$CLAUDE_CONFIG_DIR/anderton/workers/tmux-worker.json")" = "tmux @7 /tmp/fake-tmux" ]
-run env TMUX=/tmp/fake-tmux,1,0 "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t8 "$scripts/spawn.sh" --effort high both-muxes <<'BRIEF'
+run env TMUX=/tmp/fake-tmux,1,0 "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t8 FAKE_HERDR_PANE=w9:p18 "$scripts/spawn.sh" --effort high both-muxes <<'BRIEF'
 Task.
 BRIEF
 check "inside herdr and tmux at once, herdr opens it" [ "$(jq -r .launcher "$CLAUDE_CONFIG_DIR/anderton/workers/both-muxes.json" 2>/dev/null)" = herdr ]
 echo '[]' > "$FAKE_AGENTS"
 run "$scripts/retire.sh" both-muxes
-check "and retire.sh closes that tab" [ "$status" -eq 0 ]
+check "and retire.sh closes its pane there" eval '[ "$status" -eq 0 ] && grep -qx "pane w9:p18" "$FAKE_LOG.closed"'
 run env TMUX=/tmp/fake-tmux,1,0 HERDR_ENV=1 HERDR_WORKSPACE_ID=w9 FAKE_TMUX_WINDOW=@13 FAKE_TMUX_LIVE=1 "$scripts/spawn.sh" --effort high 1-no-herdr-socket <<'BRIEF'
 Task.
 BRIEF
@@ -1310,7 +1374,8 @@ BRIEF
 check "a tmux worker still unregistered with its window open is kept" eval '[ "$status" -eq 0 ] && [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/slow-window.json" ]'
 check "with a note that it may wait at a startup prompt" contains "may be waiting at a startup prompt"
 run env FAKE_TMUX_KILL_FAIL=1 "$scripts/retire.sh" slow-window
-check "retire.sh keeps an unregistered tmux worker whose window did not close" [ "$status" -eq 1 ]
+check "retire.sh keeps an unregistered tmux worker: its pane shows no session the record names, so it closes nothing" \
+  eval '[ "$status" -eq 1 ] && contains "does not show its Claude session" && ! grep -q "%78" "$FAKE_LOG.killed" 2>/dev/null'
 check "its worktree" [ -d "$work/wt-slow-window" ]
 check "and its record" [ -f "$CLAUDE_CONFIG_DIR/anderton/workers/slow-window.json" ]
 run env FAKE_TMUX_KILL_FAIL=1 FAKE_TMUX_NO_SERVER=1 "$scripts/retire.sh" slow-window
@@ -1320,36 +1385,41 @@ check "removing its worktree" [ ! -e "$work/wt-slow-window" ]
 : > "$FAKE_LOG.life"
 echo '[{"kind":"interactive","name":"tmux-worker","id":null,"cwd":"/","status":"busy"}]' > "$FAKE_AGENTS"
 run env TMUX=/tmp/other-tmux,2,0 FAKE_TMUX_KILL_ENDS=1 "$scripts/retire.sh" tmux-worker
-check "retire.sh retires a tmux worker by killing its window" [ "$status" -eq 0 ]
-check "that window, in the server it was opened in, not the caller's" grep -qx "/tmp/fake-tmux @7" "$FAKE_LOG.killed"
+check "retire.sh retires a tmux worker by killing its pane" [ "$status" -eq 0 ]
+check "that pane, in the server it was opened in, not the caller's, and never its window" eval '
+  grep -qx "/tmp/fake-tmux pane %77" "$FAKE_LOG.killed" && ! grep -qx "/tmp/fake-tmux @7" "$FAKE_LOG.killed"'
 check "removing its worktree" [ ! -e "$work/wt-tmux-worker" ]
 check "without claude stop or rm" [ ! -s "$FAKE_LOG.life" ]
 
-# A restarted server reuses ids: retire.sh closes only a tab or window that is still the worker's.
+# A restarted server reuses ids: retire.sh closes only a pane that is still the worker's, in the server it was opened in.
 echo '[]' > "$FAKE_AGENTS"
 : > "$FAKE_LOG.killed"
 run env TMUX=/tmp/fake-tmux,1,0 FAKE_TMUX_WINDOW=@10 FAKE_TMUX_LIVE=1 "$scripts/spawn.sh" --effort high reuse-window <<'BRIEF'
 Task.
 BRIEF
-awk '$3 != "@10"' "$FAKE_LOG.windows-open" > "$FAKE_LOG.w.tmp" && mv "$FAKE_LOG.w.tmp" "$FAKE_LOG.windows-open"
-echo "/tmp/fake-tmux 99 @10 someone-else" >> "$FAKE_LOG.windows-open"
+# The worker's server restarted, ending its session, and the new server gave pane id %710 to a pane of its own.
+reuse_pid=$(awk '$3 == "%710" { print $4 }' "$FAKE_LOG.pane-pids")
+kill "$reuse_pid" 2>/dev/null || true
+rm -f "$CLAUDE_CONFIG_DIR/sessions/$reuse_pid.json"
+awk '$3 != "%710"' "$FAKE_LOG.pane-pids" > "$FAKE_LOG.p.tmp" && mv "$FAKE_LOG.p.tmp" "$FAKE_LOG.pane-pids"
+echo "/tmp/fake-tmux 99 %710 1 @10" >> "$FAKE_LOG.pane-pids"
 echo '[]' > "$FAKE_AGENTS"
 run "$scripts/retire.sh" reuse-window
-check "a tmux window id now held by another server's window is not killed" no_match "@10" "$FAKE_LOG.killed"
+check "a tmux pane id now held by another server's pane is not killed" no_match "%710" "$FAKE_LOG.killed"
 check "and the worker counts as gone, so it is retired" [ "$status" -eq 0 ]
-check "leaving that other window open" grep -q "99 @10 someone-else" "$FAKE_LOG.windows-open"
+check "leaving that other pane open" grep -q "99 %710" "$FAKE_LOG.pane-pids"
 : > "$FAKE_LOG.closed"
-run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t9 "$scripts/spawn.sh" --effort high reuse-tab <<'BRIEF'
+run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t9 FAKE_HERDR_PANE=w9:p19 "$scripts/spawn.sh" --effort high reuse-tab <<'BRIEF'
 Task.
 BRIEF
 awk '$2 != "w9:t9"' "$FAKE_LOG.tabs-open" > "$FAKE_LOG.t.tmp" && mv "$FAKE_LOG.t.tmp" "$FAKE_LOG.tabs-open"
 echo "$work/herdr.sock w9:t9 someone-else" >> "$FAKE_LOG.tabs-open"
 run "$scripts/retire.sh" reuse-tab
-check "a herdr tab id now labelled for something else is not closed" no_match "w9:t9" "$FAKE_LOG.closed"
-check "and the worker is retired" [ "$status" -eq 0 ]
+check "a herdr tab now labelled for something else is not closed" no_match "w9:t9" "$FAKE_LOG.closed"
+check "only the worker's own pane in it, and the worker is retired" eval '[ "$status" -eq 0 ] && grep -qx "pane w9:p19" "$FAKE_LOG.closed"'
 
 # An answer the check cannot read keeps the worker; a missing tmux socket means its server is gone.
-run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t10 "$scripts/spawn.sh" --effort high murky-tab <<'BRIEF'
+run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t10 FAKE_HERDR_PANE=w9:p20 "$scripts/spawn.sh" --effort high murky-tab <<'BRIEF'
 Task.
 BRIEF
 run env FAKE_HERDR_GET_GARBAGE=1 "$scripts/retire.sh" murky-tab
@@ -1357,7 +1427,7 @@ check "retire.sh keeps a tab worker whose herdr answer it cannot read" [ "$statu
 check "with its worktree" [ -d "$work/wt-murky-tab" ]
 run "$scripts/retire.sh" murky-tab
 check "and retires it once herdr answers" [ "$status" -eq 0 ]
-run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t11 "$scripts/spawn.sh" --effort high dead-herdr <<'BRIEF'
+run env "${herdr_env[@]}" FAKE_HERDR_TAB=w9:t11 FAKE_HERDR_PANE=w9:p21 "$scripts/spawn.sh" --effort high dead-herdr <<'BRIEF'
 Task.
 BRIEF
 run env FAKE_HERDR_CLOSE_FAIL=1 FAKE_HERDR_NO_SERVER=1 "$scripts/retire.sh" dead-herdr
@@ -1366,6 +1436,10 @@ run env TMUX=/tmp/fake-tmux,1,0 FAKE_TMUX_WINDOW=@11 FAKE_TMUX_LIVE=1 "$scripts/
 Task.
 BRIEF
 echo '[]' > "$FAKE_AGENTS"
+# A server whose socket is gone has ended, and the session in its pane with it.
+nosock_pid=$(awk '$3 == "%711" { print $4 }' "$FAKE_LOG.pane-pids")
+kill "$nosock_pid" 2>/dev/null || true
+rm -f "$CLAUDE_CONFIG_DIR/sessions/$nosock_pid.json"
 run env FAKE_TMUX_KILL_FAIL=1 FAKE_TMUX_NO_SOCKET=1 "$scripts/retire.sh" nosock-window
 check "a tmux worker whose server socket is gone is retired" [ "$status" -eq 0 ]
 run env TMUX=/tmp/fake-tmux,1,0 FAKE_TMUX_WINDOW=@14 FAKE_TMUX_LIVE=1 "$scripts/spawn.sh" --effort high murky-window <<'BRIEF'
@@ -1375,7 +1449,7 @@ echo '[]' > "$FAKE_AGENTS"
 run env FAKE_TMUX_GARBAGE=1 "$scripts/retire.sh" murky-window
 check "retire.sh keeps a tmux worker whose server answer it cannot read" [ "$status" -eq 1 ]
 check "with its worktree" [ -d "$work/wt-murky-window" ]
-run "$scripts/retire.sh" murky-window
+run env FAKE_TMUX_KILL_ENDS=1 "$scripts/retire.sh" murky-window
 check "and retires it once tmux answers" [ "$status" -eq 0 ]
 
 # A spawn cut short after its window opened still leaves a record retire.sh can finish from.
@@ -1390,8 +1464,13 @@ kill -TERM "$cut" 2>/dev/null || true
 wait "$cut" 2>/dev/null || true
 check "a spawn killed while waiting keeps the worker's record" [ "$(jq -r '"\(.launcher) \(.tab)"' "$CLAUDE_CONFIG_DIR/anderton/workers/cut-short.json" 2>/dev/null)" = "tmux @12" ]
 check "and its worktree" [ -d "$work/wt-cut-short" ]
+: > "$FAKE_LOG.killed"
 run env FAKE_TMUX_KILL_ENDS=1 "$scripts/retire.sh" cut-short
-check "which retire.sh then stops" [ "$status" -eq 0 ]
+check "which never registered, so its pane shows no session the record names: retire.sh closes nothing" \
+  eval '[ "$status" -eq 1 ] && contains "does not show its Claude session" && [ ! -s "$FAKE_LOG.killed" ] && [ -d "$work/wt-cut-short" ]'
+awk '$3 != "%712"' "$FAKE_LOG.pane-pids" > "$FAKE_LOG.p.tmp" && mv "$FAKE_LOG.p.tmp" "$FAKE_LOG.pane-pids"
+run "$scripts/retire.sh" cut-short
+check "and retires it once its pane is closed" eval '[ "$status" -eq 0 ] && [ ! -e "$work/wt-cut-short" ]'
 
 # The sections above take over a minute; sessions from here on start now, or their start time would
 # drift past registered_alive's window.
@@ -1429,7 +1508,7 @@ spawn; p_tw=$pid; session "$p_tw" twrk-1 "$work/wt-watch-worker" watch-worker
 spawn; p_tw2=$pid; session "$p_tw2" twrk-2 "$alpha" watch-worker
 transcript twrk-1 "$recent" assistant "Worker in a tab asks something."
 transcript twrk-2 "$recent" assistant "Unrelated session with the same name asks."
-jq -nc --arg d "$work/wt-watch-worker" '{name: "watch-worker", launcher: "herdr", dir: $d}' \
+jq -nc --arg d "$work/wt-watch-worker" '{name: "watch-worker", launcher: "herdr", dir: $d, claudeLaunchId: "twrk-1"}' \
   > "$CLAUDE_CONFIG_DIR/anderton/workers/watch-worker.json"
 echo '[]' > "$FAKE_AGENTS"
 out=$(env CLAUDE_PID="$p_lead" "$scripts/waiting.sh" --all)
@@ -1540,7 +1619,7 @@ check "leaves a session in another project alone" [ "$status" -eq 0 ]
 
 # A worker the scope's holder started, reporting to it and to the project's holder.
 spawn; p_ew=$pid; session "$p_ew" eew-1 "$epsilon" eps-worker
-jq -nc --arg d "$epsilon" '{name: "eps-worker", dir: $d, spawner: "epsilon-fleet-a"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/eps-worker.json"
+jq -nc --arg d "$epsilon" '{name: "eps-worker", dir: $d, spawner: "epsilon-fleet-a", claudeLaunchId: "eew-1"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/eps-worker.json"
 send eew-1 "$epsilon" epsilon-fleet-a '"RESULT: export fixed, PR https://example.invalid/pr/2"'
 check "a worker reports to the scope's holder that started it" [ "$status" -eq 0 ]
 send eew-1 "$epsilon" epsilon-host '"RESULT: export fixed, PR https://example.invalid/pr/2"'
@@ -1598,13 +1677,13 @@ check "and its message to another project's holder" [ "$status" -eq 0 ]
 check "unchanged" [ -z "$out" ]
 
 # A holder that is also recorded as a worker is judged as a holder.
-jq -nc --arg d "$epsilon" '{name: "epsilon-host", dir: $d, spawner: "epsilon-other"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-host.json"
+jq -nc --arg d "$epsilon" '{name: "epsilon-host", dir: $d, spawner: "epsilon-other", claudeLaunchId: "eeh-1"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-host.json"
 gate eeh-1 "$epsilon" epsilon-other '"Got it."'
 check "the project's holder recorded as a worker is still never held" [ "$status" -eq 0 ]
-jq -nc --arg d "$epsilon" '{name: "epsilon-fleet-a", dir: $d, spawner: "epsilon-host"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
+jq -nc --arg d "$epsilon" '{name: "epsilon-fleet-a", dir: $d, spawner: "epsilon-host", claudeLaunchId: "eea-1"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
 send eea-1 "$epsilon" epsilon-host '"DEPLOY: ship the dashboard fix, merged as https://example.invalid/pr/8"'
 check "a scope's holder recorded as a worker is still judged as a scope's holder" [ "$status" -eq 0 ]
-jq -nc --arg d "$epsilon" '{name: "epsilon-fleet-a", dir: $d, spawner: "epsilon-other", spawnerSession: "eeo-1"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
+jq -nc --arg d "$epsilon" '{name: "epsilon-fleet-a", dir: $d, spawner: "epsilon-other", spawnerSession: "eeo-1", claudeLaunchId: "eea-1"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
 send eea-1 "$epsilon" epsilon-other '"QUESTION: keep the export schedule? I recommend yes."'
 check "reporting to the session that started it, it has a worker's kinds" [ "$status" -eq 0 ]
 gate eea-1 "$epsilon" epsilon-other '"Got it."'
@@ -1674,7 +1753,7 @@ session "$p_wa" wa-1 "$watched" other
 session "$p_wb" wb-1 "$watched" scope-lead
 for id in wh-1 wa-1 wb-1; do transcript "$id" "$recent" asking "Before the question."; done
 # "other" is a worker the repository's Anderton started; each Anderton hears only about the sessions it started.
-jq -nc --arg d "$watched" '{name: "other", dir: $d, spawner: "holder"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/other.json"
+jq -nc --arg d "$watched" '{name: "other", dir: $d, spawner: "holder", claudeLaunchId: "wa-1"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/other.json"
 (cd "$watched" && env CLAUDE_PID="$p_wh" CLAUDE_CODE_SESSION_ID=wh-1 "$scripts/claim.sh" >/dev/null)
 (cd "$watched" && env CLAUDE_PID="$p_wb" CLAUDE_CODE_SESSION_ID=wb-1 "$scripts/claim.sh" --scope lead >/dev/null)
 holder_file=$(jq -rn --arg d "$CLAUDE_CONFIG_DIR/anderton" --arg k "$(project_key "$(project_root "$watched")")" '"\($d)/\($k).json"')
@@ -1752,13 +1831,18 @@ out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
 check "an adopted session is still its Anderton's after /clear" contains "=== hand-tab (worker)  $watched"
 wt_reg="$CLAUDE_CONFIG_DIR/sessions/$p_wt.json"
 cp "$wt_reg" "$work/wt-reg.bak"
-jq -c '.sessionId = "wt-reuse" | .startedAt = (.startedAt + 5000)' "$work/wt-reg.bak" > "$wt_reg"
+# A later process given the same pid starts at another time: the adoption names the process it recorded, by both.
+adopted_rec="$CLAUDE_CONFIG_DIR/anderton/workers/hand-tab.json"
+cp "$adopted_rec" "$work/hand-tab.bak"
+jq -c '.procStart = "1"' "$work/hand-tab.bak" > "$adopted_rec"
+jq -c '.sessionId = "wt-reuse"' "$work/wt-reg.bak" > "$wt_reg"
 transcript wt-reuse "$recent" asking "A later process given the same pid."
 out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
 check "a later process given the adopted session's pid is not adopted" eval '! contains "=== hand-tab"'
 out=$(cd "$watched" && env CLAUDE_PID="$p_wa" "$scripts/waiting.sh" --blocked)
 check "while it is still a live session" contains "=== hand-tab  $watched"
 mv "$work/wt-reg.bak" "$wt_reg"
+mv "$work/hand-tab.bak" "$adopted_rec"
 registry "$p_wt" idle
 spawn; p_im=$pid; session "$p_im" im-1 "$watched" hand-tab "$(date +%s)000"
 transcript im-1 "$recent" asking "A new session reusing the name."
@@ -1913,7 +1997,7 @@ registry "$p_wb" idle
 
 # A named project's Anderton hears about the workers it started; the repository's hears about them only once it is gone.
 spawn; p_ww=$pid; session "$p_ww" ww-1 "$watched" lead-worker "$(date +%s)000"
-jq -nc --arg d "$watched" '{name: "lead-worker", dir: $d, spawner: "scope-lead"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/lead-worker.json"
+jq -nc --arg d "$watched" '{name: "lead-worker", dir: $d, spawner: "scope-lead", claudeLaunchId: "ww-1"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/lead-worker.json"
 transcript ww-1 "$recent" asking "Before the worker's question."
 registry "$p_ww" waiting "permission prompt"
 watch_run wb-1
@@ -1977,10 +2061,12 @@ mv "$holder_file.gone" "$holder_file"
 export ANDERTON_WATCH_TICK=2
 watch_start wh-2
 export ANDERTON_WATCH_TICK=0.05
+# A worker claims no role: "other" is released for the take-over, and recorded again after it.
+mv "$CLAUDE_CONFIG_DIR/anderton/workers/other.json" "$work/other-worker.json"
 (cd "$watched" && env CLAUDE_PID="$p_wa" CLAUDE_CODE_SESSION_ID=wa-1 "$scripts/claim.sh" --take-over >/dev/null)
 spawn; p_tw=$pid; session "$p_tw" tw-1 "$watched" taker-worker "$(date +%s)000"
 transcript tw-1 "$recent" asking "Before the question."
-jq -nc --arg d "$watched" '{name: "taker-worker", dir: $d, spawner: "other"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/taker-worker.json"
+jq -nc --arg d "$watched" '{name: "taker-worker", dir: $d, spawner: "other", claudeLaunchId: "tw-1"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/taker-worker.json"
 now_ms=$((now_ms + 1000))
 registry "$p_tw" waiting "permission prompt"
 watch_run wa-1
@@ -1988,6 +2074,7 @@ check "a new holder's watch replaces the old holder's" [ "$status" -eq 2 ]
 check "and reports to the new holder" contains "=== taker-worker (worker)"
 registry "$p_tw" idle
 (cd "$watched" && env CLAUDE_PID="$p_wh" CLAUDE_CODE_SESSION_ID=wh-2 "$scripts/claim.sh" --take-over >/dev/null)
+mv "$work/other-worker.json" "$CLAUDE_CONFIG_DIR/anderton/workers/other.json"
 unset ANDERTON_WATCH_TICK
 
 # A holder from an earlier version has its record in the machine-wide file and may have no anderton directory.
@@ -2260,7 +2347,7 @@ spawn dead; p_old=$pid; session "$p_old" rs-1 "$resumed" resumer
 spawn; p_rb=$pid; session "$p_rb" rb-1 "$resumed" asker
 spawn; p_rx=$pid; session "$p_rx" rx-1 "$resumed" bystander
 for id in rb-1 rx-1; do transcript "$id" "$recent" asking "Before the question."; done
-jq -nc --arg d "$resumed" '{name: "asker", dir: $d, spawner: "resumer"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/asker.json"
+jq -nc --arg d "$resumed" '{name: "asker", dir: $d, spawner: "resumer", claudeLaunchId: "rb-1"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/asker.json"
 (cd "$resumed" && env CLAUDE_PID="$p_old" CLAUDE_CODE_SESSION_ID=rs-1 "$scripts/claim.sh" >/dev/null)
 registry "$p_rb" waiting "permission prompt"
 resume_run() { # resume_run <session id>: sets $out and $status
@@ -2317,7 +2404,7 @@ check "a registered background session is listed once" [ "$(printf '%s\n' "$out"
 echo '[]' > "$FAKE_AGENTS"
 
 # A background session an Anderton's record names is left out like any Anderton, with no registry entry too.
-jq -nc --arg d "$watched" '{name: "bg-lead", dir: $d, spawner: "holder"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/bg-lead.json"
+jq -nc --arg d "$watched" '{name: "bg-lead", dir: $d, spawner: "holder", claudeLaunchId: "bgp-1"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/bg-lead.json"
 transcript bgp-1 "$recent" asking "A background Anderton's question."
 jq -nc --arg w "$watched" '[{kind: "background", name: "bg-lead", sessionId: "bgp-1", cwd: $w, state: "blocked"}]' > "$FAKE_AGENTS"
 out=$(cd "$watched" && env CLAUDE_PID="$p_wh" "$scripts/waiting.sh" --blocked)
@@ -2328,10 +2415,11 @@ check "but not once it holds an Anderton role of its own" eval '! contains "bg-l
 rm -f "$(holder_path "$(project_root "$watched")" bg-proj)" "$CLAUDE_CONFIG_DIR/anderton/workers/bg-lead.json"
 echo '[]' > "$FAKE_AGENTS"
 
-# A worker is matched by the name it was started under. Renamed, it is released like a tab the user opened, and so
-# is any other session opened in its worktree; an Anderton can adopt either.
+# A worker is matched by the session its record names, never by a name or its worktree: another session opened in its
+# worktree is not it, under any name, and an Anderton can adopt that session.
 mkdir -p "$watched/wt-renamed/src"
-jq -nc --arg d "$watched/wt-renamed" '{name: "first-name", dir: $d, spawner: "holder", worktree: true}' > "$CLAUDE_CONFIG_DIR/anderton/workers/first-name.json"
+jq -nc --arg d "$watched/wt-renamed" '{name: "first-name", dir: $d, spawner: "holder", worktree: true, claudeLaunchId: "first-launch"}' \
+  > "$CLAUDE_CONFIG_DIR/anderton/workers/first-name.json"
 spawn; p_rn=$pid; session "$p_rn" rn-1 "$watched/wt-renamed/src" second-name "$(date +%s)000"
 transcript rn-1 "$recent" asking "A question from a session in a worker's worktree."
 registry "$p_rn" waiting "permission prompt"
@@ -2679,7 +2767,8 @@ rho_worker() { # rho_worker <name> [spawner]: a worker record and its worktree a
   mkdir -p "$CLAUDE_CONFIG_DIR/anderton/workers"
   git -C "$rho" worktree add -q --detach "$work/wt-$1" origin/main
   jq -nc --arg name "$1" --arg dir "$work/wt-$1" --arg root "$rho" --arg base "$(git -C "$work/wt-$1" rev-parse HEAD)" --arg spawner "${2:-rho-lead}" \
-    '{name: $name, launcher: "bg", id: ("id-" + $name), dir: $dir, root: $root, base: $base, worktree: true, spawner: $spawner}' \
+    '{name: $name, launcher: "bg", id: ("id-" + $name), dir: $dir, root: $root, base: $base, worktree: true, spawner: $spawner,
+      claudeLaunchId: ("rho-" + $name)}' \
     > "$CLAUDE_CONFIG_DIR/anderton/workers/$1.json"
   fake-prompt-transcript "rho-$1" "$work/wt-$1" "Task.
 You are a worker the Anderton session \"${2:-rho-lead}\" started for the task above, in $work/wt-$1."

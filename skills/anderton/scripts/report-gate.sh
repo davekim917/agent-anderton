@@ -73,7 +73,7 @@ EOF
   done <<EOF
 $(project_holders "$root")
 EOF
-  wrec=$(worker_record "$name" "$cwd" "$sid" "$pid" "$(jq -r '.startedAt // empty | floor' "$reg" 2>/dev/null)")
+  wrec=$(worker_record "$sid" "$pid")
   if [ -n "$wrec" ]; then
     worker=1
     gate_stale_worker_report "$wrec" "$root"
@@ -179,7 +179,7 @@ EOF
 }
 
 gate_stale_worker_report() {
-  local wrec=$1 root=$2 old old_sid old_pid owner owner_provider transcript
+  local wrec=$1 root=$2 old old_sid old_pid owner owner_provider
   old=$(jq -r '.spawner // empty' "$wrec")
   old_sid=$(jq -r '.spawnerSession // empty' "$wrec")
   [ -n "$old$old_sid" ] || return 0
@@ -214,17 +214,7 @@ gate_stale_worker_report() {
   printf '%s\n' "$first" | sed -nE -e 's/^[[:space:]*_#>`-]*//' -e 's/^(RESULT|QUESTION|BLOCKED|ANSWER):.*/x/p' | grep -qx x || exit 0
 
   if [ "$owner_provider" = codex ] || [ "$owner_provider" = agy ]; then
-    if ! claude_worker_identity_matches "$wrec" "$sid" "$pid" "$(jq -r '.startedAt // empty | floor' "$reg")"; then
-      transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty')
-      case $transcript in "$home"/projects/*/"$sid.jsonl")
-        "$anderton_scripts/claude-worker.py" legacy-launch-matches "$wrec" "$transcript" >/dev/null 2>&1 || transcript="" ;;
-        *) transcript="" ;;
-      esac
-    else
-      transcript=verified
-    fi
-    if [ -n "${transcript:-}" ] &&
-      printf '%s' "$input" | "$anderton_scripts/claude-worker.py" record-native-route "$wrec" "$owner" >/dev/null 2>&1; then
+    if printf '%s' "$input" | "$anderton_scripts/claude-worker.py" record-native-route "$wrec" "$owner" >/dev/null 2>&1; then
       if [ "$owner_provider" = codex ]; then owner_label=Codex; else owner_label=agy; fi
       echo "The native SendMessage was held. Your $owner_label Anderton will read this milestone from your transcript." >&2
     else

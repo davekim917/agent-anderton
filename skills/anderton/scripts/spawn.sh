@@ -432,8 +432,8 @@ It is not confirmed stopped, so $dir and its record are kept: close tab $tab, th
     failed "$provider_name in herdr tab '$name' did not take the brief: $out
 $screen"
   fi
-  # herdr learns an agy's session from its first prompt, when herdr's antigravity-cli integration is installed. Once
-  # recorded, later steps act only on that session; without it, on the agy herdr shows in this pane and worktree.
+  # herdr learns an agy's session from its first prompt, when herdr's antigravity-cli integration is installed. Later
+  # steps act only on that session, so a worker herdr never names could not be told from another agy in its pane.
   if [ "$provider" = agy ]; then
     for _ in 1 2 3 4 5 6 7 8 9 10; do
       agy_instance=$(herdr agent get "$pane" 2>/dev/null |
@@ -441,6 +441,15 @@ $screen"
       [ -z "$agy_instance" ] || break
       sleep 0.5
     done
+    if [ -z "$agy_instance" ]; then
+      herdr tab close "$tab" >/dev/null 2>&1 || true
+      out="herdr did not report which agy session runs in pane $pane (its antigravity-cli integration does), so worker.sh and retire.sh could not tell this worker from another agy."
+      if ! worker_gone herdr "$socket" "$tab" "$name" "" "$label"; then
+        echo "$out It is not confirmed stopped, so $dir and its record are kept: close tab $tab, then run retire.sh $name." >&2
+        exit 1
+      fi
+      failed "$out Its tab was closed."
+    fi
     write_record
     present=$(grep -v '	absent$' "$agy_config" | cut -f1 | grep -F "$dir/" || true)
     if [ -n "$present" ]; then

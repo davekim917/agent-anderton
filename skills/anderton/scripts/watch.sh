@@ -23,8 +23,9 @@ fi
 # shellcheck source=SCRIPTDIR/session-lib.sh
 . "$(dirname "$0")/session-lib.sh"
 
-# A startup hook can arrive before Claude writes its registry. Its native session id, PID and
-# ancestry pin the launched process so a later /clear can keep custody after the ID changes.
+# A startup hook can arrive before Claude writes its registry. Its native session id, PID and ancestry pin the process a
+# worker runs as, so /clear keeps custody after the ID changes: a fresh launch's, and a resumed session's once the
+# process its record names has ended, since a resume runs a new process under the same id.
 register_claude_launch() {
   local payload=$1 sid pid cwd transcript start worker
   sid=$(jq -r '.session_id // empty' <<< "$payload") || return 1
@@ -39,16 +40,27 @@ register_claude_launch() {
   [ -n "$start" ] || return 1
   for worker in "$holders"/workers/*.json; do
     [ -f "$worker" ] || continue
-    jq -e --arg sid "$sid" --arg cwd "$cwd" '
-      .claudeLaunchId == $sid and .dir == $cwd and .claudeSession == null' "$worker" >/dev/null 2>&1 || continue
+    claude_start_binds "$worker" "$sid" "$cwd" "$pid" "$start" || continue
     take_repository_lock "$(project_root "$cwd")"
     lock_worker "$worker" || return 1
-    process_start_matches "$pid" "$start" &&
-      jq -e --arg sid "$sid" --arg cwd "$cwd" '
-        .claudeLaunchId == $sid and .dir == $cwd and .claudeSession == null' "$worker" >/dev/null 2>&1 &&
+    process_start_matches "$pid" "$start" && claude_start_binds "$worker" "$sid" "$cwd" "$pid" "$start" &&
       bind_claude_worker "$worker" "$sid" "$pid" "$start" "$transcript"
     return
   done
+}
+
+# claude_start_binds <record> <session id> <cwd> <pid> <start>: true when a session starting in <cwd> as that id and process
+# is the worker the record names and the record should now name that process: its launch, not yet bound, or a session
+# the record names whose recorded process no longer runs.
+claude_start_binds() {
+  local bound
+  jq -e --arg cwd "$3" '(.provider // "claude") == "claude" and (.dir // "") != "" and
+    (.dir == $cwd or ($cwd | startswith(.dir + "/")))' "$1" >/dev/null 2>&1 || return 1
+  if jq -e --arg sid "$2" '.claudeLaunchId == $sid and .claudeSession == null' "$1" >/dev/null 2>&1; then return 0; fi
+  claude_worker_identity_matches "$1" "$2" || return 1
+  bound=$(jq -r '(.claudeSession // (if .adopted == true then . else {} end)) | "\(.pid // "") \(.procStart // "")"' "$1") || return 1
+  [ "$bound" != "$4 $5" ] || return 1
+  ! process_start_matches "${bound% *}" "${bound#* }"
 }
 
 if [ "${1:-}" = --claude-start ]; then
@@ -98,28 +110,27 @@ deliver_claude_direction() {
 }
 
 watch_claude_worker() {
-  local worker root owner owner_provider transcript target pending tick worker_sid worker_pid worker_start worker_reg now
+  local worker root owner owner_provider transcript pending tick worker_sid worker_pid worker_start worker_reg now
   worker_sid=$sid
   worker_pid=$(session_pid "$worker_sid")
   [ -n "$worker_pid" ] || return 0
   worker_start=$(proc_start "$worker_pid")
   worker_reg="$sessions/$worker_pid.json"
-  target=$(jq -r '.name // empty' "$worker_reg") || return 0
   transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty') || return 0
   case $transcript in "$home"/projects/*/"$worker_sid.jsonl") ;; *) return 0 ;; esac
   case $worker_sid in '' | *[!a-zA-Z0-9-]*) return 0 ;; esac
   [ -f "$transcript" ] && [ -r "$transcript" ] || return 0
   [ -z "${CLAUDE_CODE_SESSION_ID:-}" ] || [ "$CLAUDE_CODE_SESSION_ID" = "$worker_sid" ] || return 0
   [ -z "${CLAUDE_PID:-}" ] || [ "$CLAUDE_PID" = "$worker_pid" ] || return 0
-  worker=$(worker_record "$target" "$(jq -r '.cwd // empty' "$worker_reg")" "$worker_sid" "$worker_pid" "$(jq -r '.startedAt // empty | floor' "$worker_reg")")
+  worker=$(worker_record "$worker_sid" "$worker_pid")
   [ -n "$worker" ] && [ "$(record_provider "$worker")" = claude ] || return 0
   root=$(jq -r '.root // empty' "$worker")
   owner=$(answering_claim "$worker" "$root")
   [ -n "$owner" ] || return 0
   owner_provider=$(record_provider "$owner")
-  claude_stop_matches "$worker" "$worker_sid" "$worker_pid" "$worker_start" "$transcript" || return 0
+  claude_stop_matches "$worker" "$worker_sid" "$worker_pid" "$worker_start" || return 0
   take_claude_worker_watch "${worker%.json}.$worker_sid.watch" || return 0
-  with_claude_worker_lock "$root" "$worker" "$worker_sid" "$worker_pid" "$worker_start" "$transcript" \
+  with_claude_worker_lock "$root" "$worker" "$worker_sid" "$worker_pid" "$worker_start" \
     bind_claude_worker "$worker" "$worker_sid" "$worker_pid" "$worker_start" "$transcript" || return 0
   uses_claude_transcript "$worker" "$owner_provider" || return 0
   tick=${ANDERTON_WATCH_TICK:-30}
@@ -130,7 +141,7 @@ watch_claude_worker() {
       pending=$(jq -er --arg sid "$worker_sid" --arg from "$(jq -r '.sessionId // empty' "$owner")" --argjson now "$now" '
       .claudeDirection | select(.target == $sid and .from == $from and ($now - (.attemptedAt // 0)) >= 60) | .id // empty
       ' "$worker" 2>/dev/null) && claude_direction_unreceived "$worker"; then
-      if with_claude_worker_lock "$root" "$worker" "$worker_sid" "$worker_pid" "$worker_start" "$transcript" \
+      if with_claude_worker_lock "$root" "$worker" "$worker_sid" "$worker_pid" "$worker_start" \
         deliver_claude_direction "$worker" "$root" "$owner" "$worker_reg" "$worker_sid" "$pending"; then
         return 2
       elif [ "$?" != 3 ]; then

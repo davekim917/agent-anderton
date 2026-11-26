@@ -419,11 +419,8 @@ def worker_identities(worker, home):
             raise Unreadable("the record's launch id is not a session id")
         found = sorted((home / "projects").glob(f"*/{launch}.jsonl"))
         identities = [{"id": launch, "transcript": str(path)} for path in found[:1]] if len(found) == 1 else []
-    if not identities and worker.get("dir") and worker.get("spawner"):
-        # A record from before launch ids: the one transcript whose brief names this worker and its worktree.
-        legacy = {"startedAt": "1970-01-01T00:00:00Z", **worker}
-        found = legacy_worker_transcript(legacy, home, instant(legacy["startedAt"]))
-        identities = [found] if found else []
+    if not identities and not worker.get("claudeLaunchId"):
+        raise Unreadable("its record names no Claude session (migrate-workers.sh stamps one on a record from before session ids)")
     if not identities:
         raise Unreadable("its record names no transcript, and none was found for its launch")
     for identity in identities:
@@ -491,13 +488,16 @@ def main():
     scan = commands.add_parser("sweep")
     scan.add_argument("record", type=Path)
     scan.add_argument("--claim", type=Path)
-    scan.add_argument("--legacy-home", type=Path)
     route = commands.add_parser("record-native-route")
     route.add_argument("record", type=Path)
     route.add_argument("claim", type=Path)
+    # migrate-workers.sh's evidence for a record from before session ids, which nothing else reads.
     legacy = commands.add_parser("legacy-launch-matches")
     legacy.add_argument("record", type=Path)
     legacy.add_argument("transcript", type=Path)
+    launched = commands.add_parser("legacy-launch-transcript")
+    launched.add_argument("record", type=Path)
+    launched.add_argument("--home", type=Path, required=True)
     peer = commands.add_parser("peer-received")
     peer.add_argument("transcript", type=Path)
     peer.add_argument("session")
@@ -529,18 +529,16 @@ def main():
     if args.command == "legacy-launch-matches":
         worker["claudeSession"] = {"id": args.transcript.stem, "transcript": str(args.transcript)}
         return 0 if legacy_launch_matches(worker) else 3
+    if args.command == "legacy-launch-transcript":
+        found = legacy_worker_transcript(worker, args.home, instant(worker["startedAt"]))
+        if not found:
+            return 3
+        print(json.dumps(found))
+        return 0
     if args.command == "acknowledged":
         return 0 if acknowledged(worker) else 3
     if args.command == "sweep":
         claim = json.loads(args.claim.read_text()) if args.claim else {}
-        if args.legacy_home:
-            if claim.get("provider") not in NON_CLAUDE:
-                return 0
-            cutoff = native_report_cutoff(worker, claim) or instant(worker["startedAt"])
-            identity = legacy_worker_transcript(worker, args.legacy_home, cutoff)
-            if not identity:
-                return 0
-            worker["claudeSession"] = identity
         sweep(worker, claim, args.claim.parent / "reports/routes" if args.claim else None)
     else:
         last = None

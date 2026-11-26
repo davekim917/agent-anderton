@@ -329,19 +329,6 @@ uses_claude_transcript() {
     ($owner != "claude" or .reportTransport == "transcript" or (.spawnerProvider // "claude") != "claude")' "$1" >/dev/null 2>&1
 }
 
-# Call under the repository lock. The worker record naming Codex thread $2, from home $1 in checkout $3, other than $4.
-codex_worker_record() {
-  local r
-  for r in "$holders"/workers/*.json; do
-    if [ ! -f "$r" ] || [ "$r" = "${4:-}" ]; then continue; fi
-    if session_is_worker "$r" codex "$2" "$1" "$3"; then
-      printf '%s\n' "$r"
-      return
-    fi
-  done
-  return 0
-}
-
 # The caller holds the repository lock and this worker's lock.
 bind_codex_worker() {
   local record=$1 thread=$2 launch=$3 details codex dir conflict updated
@@ -354,11 +341,21 @@ bind_codex_worker() {
   fi
   codex=$(printf '%s' "$details" | jq -r .codexHome)
   dir=$(printf '%s' "$details" | jq -r .dir)
-  conflict=$(codex_worker_record "$codex" "$thread" "$dir" "$record")
+  if ! conflict=$(managed_invoker "$(jq -r '.root // empty' "$record")" codex "$thread" "$codex" "$dir" "$record"); then
+    echo "Codex thread $thread was not registered: $conflict. Retry." >&2
+    return 1
+  fi
   if [ -n "$conflict" ]; then
     echo "Codex thread $thread already has a worker record at $conflict." >&2
     return 1
   fi
+  # A thread holding a role answers to the user; it is never also a worker.
+  for conflict in "$holders"/*.json; do
+    if [ -f "$conflict" ] && jq -e --arg id "$thread" '.provider == "codex" and .sessionId == $id' "$conflict" >/dev/null 2>&1; then
+      echo "Codex thread $thread holds an Anderton role ($conflict), so it was not registered as a worker." >&2
+      return 1
+    fi
+  done
   if [ "$(printf '%s' "$details" | jq -r .id)" = "$thread" ]; then return 0; fi
   updated=$(mktemp "$record.XXXXXX") || return 1
   if jq --arg id "$thread" '.id = $id' "$record" > "$updated" && mv -f "$updated" "$record"; then return 0; fi
@@ -366,66 +363,81 @@ bind_codex_worker() {
   return 1
 }
 
-# The worker record naming the calling session, for claim.sh and adopt.sh: $2 is its provider, $3 its session id (for
-# agy, the agy instance herdr shows in its pane), $4 its pid (a Codex home for Codex), $5 a Codex thread's checkout.
+# managed_invoker <repository> <provider> <session id> <pid | Codex home> [Codex checkout] [record to skip]: the worker
+# record naming that session, by session_is_worker, for claim.sh, adopt.sh and a Codex worker's registration. Returns 2
+# with the reason on stdout when some record cannot be told apart from the session now: the caller refuses, to retry.
 managed_invoker() {
-  local r
+  local r status unknown=""
   for r in "$holders"/workers/*.json; do
-    [ -f "$r" ] || continue
-    if session_is_worker "$r" "$2" "$3" "$4" "${5:-}" "$1"; then
-      printf '%s\n' "$r"
-      return
-    fi
+    if [ ! -f "$r" ] || [ "$r" = "${6:-}" ]; then continue; fi
+    status=0
+    session_is_worker "$r" "$2" "$3" "$4" "${5:-}" "$1" || status=$?
+    case $status in
+      0) printf '%s\n' "$r"; return 0 ;;
+      2) unknown=${unknown:-$identity_unknown} ;;
+    esac
   done
+  if [ -n "$unknown" ]; then printf '%s\n' "$unknown"; return 2; fi
 }
 
-# session_is_worker <record> <provider> <session id> <pid or Codex home> [Codex checkout] [repository]: true when that
-# session is the worker the record names, by any identity the sweeps and the retirement scan read for it. Claude: its
-# launch, its current or any earlier session (claudePreviousSessions), its process, or, for a record from before
-# launch ids, its checkout with its name, its launch brief, or its recorded pane. Codex: its thread, on any account's
-# home, or a pending launch on that home that the thread may be. agy: only the agy instance the record names, so a
-# record with none names no session.
+# True for a worker record from before its provider's identity was recorded, which migrate-workers.sh has neither
+# stamped nor marked: nothing in it tells its session from another. An agy record without an instance names no session.
+unmigrated_worker() {
+  jq -e 'type == "object" and .migration == null and .adopted != true and
+    if (.provider // "claude") == "claude" then .claudeLaunchId == null and .claudeSession == null
+    elif .provider == "codex" then (.id // "") == "" and (.codexLaunchToken // "") == ""
+    else false end' "$1" >/dev/null 2>&1
+}
+
+# session_is_worker <record> <provider> <session id> <pid | Codex home> [Codex checkout] [repository]: whether that session
+# is the worker the record names, by the identities the record holds and nothing else. 0: it is. 1: it is not. 2: that
+# cannot be told now, and identity_unknown says why; a caller never reads that as either answer.
+#   Claude: its launch id, its current or any earlier session id, an adopted session's id, or its process: pid and start
+#     time together, never the pid alone.
+#   Codex: its thread, whichever account's home runs it, or for a launch with no thread yet, the launch's token in the
+#     thread's first message, read from the caller's home ($4).
+#   agy: the agy instance it names; $3 is the instance herdr shows in the caller's pane, empty when herdr could not say.
+# A record from before its identity was recorded cannot be told apart in its repository until migrate-workers.sh runs.
 session_is_worker() {
-  local r=$1 provider=$2 sid=$3 identity=$4 dir=${5:-} root=${6:-} status reg name cwd started file
+  local r=$1 provider=$2 sid=$3 identity=$4 dir=${5:-} root=${6:-} kind status instance
+  identity_unknown=""
   [ "$(record_provider "$r")" = "$provider" ] || return 1
+  if unmigrated_worker "$r"; then
+    jq -e --arg root "$root" '$root == "" or .root == $root' "$r" >/dev/null 2>&1 || return 1
+    identity_unknown="worker record $r predates recorded session identities; run migrate-workers.sh"
+    return 2
+  fi
   case $provider in
+    claude) claude_worker_identity_matches "$r" "$sid" "$identity" ;;
     codex)
-      case $(jq -r --arg home "$identity" --arg id "$sid" --arg dir "$dir" '
-        if .id == $id and $id != "" then "registered"
-        elif .codexHome == $home and .id == "" and .dir == $dir and (.codexLaunchToken // "") != "" then "pending"
-        else empty end' "$r" 2>/dev/null) in
+      kind=$(jq -r --arg id "$sid" --arg dir "$dir" '
+        if $id != "" and .id == $id then "registered"
+        elif (.id // "") == "" and (.codexLaunchToken // "") != "" and .dir == $dir then "pending"
+        else "other" end' "$r" 2>/dev/null) || kind=unreadable
+      case $kind in
         registered) return 0 ;;
+        other) return 1 ;;
         pending)
           status=0
-          "$anderton_scripts/codex-worker.py" launch-matches "$r" "$sid" >/dev/null 2>&1 || status=$?
-          [ "$status" -ne 3 ]
-          return
+          "$anderton_scripts/codex-worker.py" launch-matches "$r" "$sid" "$identity" >/dev/null 2>&1 || status=$?
+          case $status in 0) return 0 ;; 3) return 1 ;; esac
+          identity_unknown="Codex could not show whether thread $sid is the launch worker record $r waits for"
           ;;
+        *) identity_unknown="worker record $r could not be read" ;;
       esac
-      return 1
+      return 2
       ;;
     agy)
-      [ -n "$sid" ] && jq -e --arg instance "$sid" '(.agyInstance // "") == $instance' "$r" >/dev/null 2>&1
-      return
+      instance=$(jq -r '.agyInstance // empty' "$r" 2>/dev/null)
+      [ -n "$instance" ] || return 1
+      if [ -z "$sid" ]; then
+        identity_unknown="herdr did not show which agy instance runs in this pane"
+        return 2
+      fi
+      [ "$sid" = "$instance" ]
       ;;
+    *) return 1 ;;
   esac
-  reg="$sessions/$identity.json"
-  name=$(jq -r '.name // empty' "$reg" 2>/dev/null || true)
-  cwd=$(jq -r '.cwd // empty' "$reg" 2>/dev/null || true)
-  started=$(jq -r '.startedAt // empty | floor' "$reg" 2>/dev/null || true)
-  if claude_worker_identity_matches "$r" "$sid" "$identity" "$started"; then return 0; fi
-  if [ -n "$sid" ] && jq -e --arg sid "$sid" 'any(.claudePreviousSessions[]?; .id == $sid)' "$r" >/dev/null 2>&1; then return 0; fi
-  # A launch predating session UUIDs cannot be identified by name after a rename, nor by its brief after /clear.
-  # Its dedicated checkout, and the pane it was opened in, remain managed until it is retired.
-  dir=$(jq -r --arg root "$root" 'select(.root == $root and .adopted != true and
-    .claudeLaunchId == null and .claudeSession == null) | .dir // empty' "$r")
-  [ -n "$dir" ] && [[ $cwd == "$dir" || $cwd == "$dir/"* ]] || return 1
-  if jq -e --arg name "$name" '.worktree == true or .name == $name' "$r" >/dev/null; then return 0; fi
-  case $sid in '' | *[!a-zA-Z0-9-]*) return 1 ;; esac
-  for file in "$home"/projects/*/"$sid.jsonl"; do
-    if [ -f "$file" ] && "$anderton_scripts/claude-worker.py" legacy-launch-matches "$r" "$file" >/dev/null 2>&1; then return 0; fi
-  done
-  claude_in_worker_pane "$r" "$sid" "$identity"
 }
 
 # What a Claude worker reads as direction $1 (an id) from its Anderton, with text $2; claude-worker.py acknowledged
@@ -442,25 +454,28 @@ claude_binding_process_matches() {
     .claudeSession | (.pid | tostring) == $pid and .procStart == $start' "$file" >/dev/null
 }
 
+# claude_worker_identity_matches <record> <session id> [pid]: true when the record names that Claude session.
 claude_worker_identity_matches() {
-  [ -n "$(claude_worker_identities "$2" "$3" "$4" "$1")" ]
+  [ -n "$(claude_worker_identities "$2" "${3:-}" "$1")" ]
 }
 
+# claude_worker_identities <session id> <pid> <record>...: the Claude worker records naming that session, by a session id
+# each holds (its launch, its current or an earlier session, an adopted session) or by the process it recorded, pid and
+# start time together. A registry's startedAt is not a process's start: /restart rewrites it.
 claude_worker_identities() {
-  local sid=$1 pid=$2 started=$3 process_start="" result file
+  local sid=$1 pid=$2 process_start="" result file
   local -a args
-  shift 3
+  shift 2
   [ "$#" -gt 0 ] || return 0
   if [ "$#" -eq 1 ] && [ ! -f "$1" ]; then return 0; fi
   if [ -n "$pid" ]; then process_start=$(proc_start "$pid"); fi
   # shellcheck disable=SC2016 # jq expands the filter variables.
-  args=(-r --arg sid "$sid" --arg pid "$pid" --arg start "$started" --arg process "$process_start" '
+  args=(-r --arg sid "$sid" --arg pid "$pid" --arg process "$process_start" '
     select(type == "object" and (.provider // "claude") == "claude")
     | select(($sid != "" and (.claudeLaunchId == $sid or .claudeSession.id == $sid or
-        (.adopted == true and .sessionId == $sid))) or
-      (.adopted == true and $pid != "" and $start != "" and
-        (.pid | tostring) == $pid and ((.sessionStartedAt // "") | tostring | split(".")[0]) == $start) or
-      ($process != "" and (.claudeSession.pid | tostring) == $pid and .claudeSession.procStart == $process))
+        any(.claudePreviousSessions[]?; .id == $sid) or (.adopted == true and .sessionId == $sid))) or
+      ($process != "" and (((.claudeSession.pid | tostring) == $pid and .claudeSession.procStart == $process) or
+        (.adopted == true and (.pid | tostring) == $pid and .procStart == $process))))
     | input_filename
     ')
   if result=$(jq "${args[@]}" "$@" 2>/dev/null); then
@@ -471,8 +486,10 @@ claude_worker_identities() {
   for file; do jq "${args[@]}" "$file" 2>/dev/null || true; done
 }
 
+# live_claude_worker <record> [--allow-rebind]: the registry entry of the live session the Claude worker record names,
+# in its checkout. A session other than the one bound counts only with --allow-rebind and on the bound process.
 live_claude_worker() {
-  local file=$1 binding=${2:-} transcript=${3:-} reg dir sid pid started bound worker_dir
+  local file=$1 binding=${2:-} reg dir sid pid bound worker_dir
   [ "$(record_provider "$file")" = claude ] || return 1
   worker_dir=$(jq -r '.dir // empty' "$file")
   [ -n "$worker_dir" ] || return 1
@@ -483,16 +500,13 @@ live_claude_worker() {
     case $dir in "$worker_dir" | "$worker_dir"/*) ;; *) continue ;; esac
     sid=$(jq -r '.sessionId // empty' "$reg")
     pid=$(jq -r '.pid // empty' "$reg")
-    started=$(jq -r '.startedAt // empty | floor' "$reg")
     [ -n "$sid" ] && [ -n "$pid" ] || continue
-    if ! claude_worker_identity_matches "$file" "$sid" "$pid" "$started"; then
-      legacy_claude_stop_matches "$file" "$sid" "$pid" "$transcript" || continue
-    fi
+    claude_worker_identity_matches "$file" "$sid" "$pid" || continue
     if [ -n "$bound" ] && [ "$sid" != "$bound" ]; then
       [ "$binding" = --allow-rebind ] || continue
       claude_binding_process_matches "$file" "$pid" || continue
     fi
-    if registered_alive "$pid" "$started" "$(jq -r '.procStart // empty' "$reg")"; then
+    if registered_alive "$pid" "$(jq -r '.startedAt // empty | floor' "$reg")" "$(jq -r '.procStart // empty' "$reg")"; then
       printf '%s\n' "$reg"
     fi
   done
@@ -501,20 +515,20 @@ live_claude_worker() {
 claude_stop_matches() {
   local registry="$sessions/$3.json"
   process_start_matches "$3" "$4" &&
-    [ "$(live_claude_worker "$1" --allow-rebind "${5:-}")" = "$registry" ] &&
+    [ "$(live_claude_worker "$1" --allow-rebind)" = "$registry" ] &&
     jq -e --arg sid "$2" --arg pid "$3" '
       .sessionId == $sid and (.pid | tostring) == $pid' "$registry" >/dev/null
 }
 
 with_claude_worker_lock() {
-  local root=$1 worker=$2 session_id=$3 process=$4 start=$5 transcript=$6 attempt status
-  shift 6
+  local root=$1 worker=$2 session_id=$3 process=$4 start=$5 attempt status
+  shift 5
   for attempt in 1 2 3; do
-    claude_stop_matches "$worker" "$session_id" "$process" "$start" "$transcript" || return 3
+    claude_stop_matches "$worker" "$session_id" "$process" "$start" || return 3
     if (
       take_repository_lock "$root" 75 || exit 1
       lock_worker "$worker" || exit 75
-      claude_stop_matches "$worker" "$session_id" "$process" "$start" "$transcript" || exit 3
+      claude_stop_matches "$worker" "$session_id" "$process" "$start" || exit 3
       "$@"
     ); then
       return 0
@@ -543,37 +557,65 @@ bind_claude_worker() {
   return 1
 }
 
-claude_in_worker_pane() {
-  local file=$1 sid=$2 pid=$3 launcher socket pane server listed pane_pid
+# What Claude worker record $1's recorded pane holds now: "session <id>" (the Claude session herdr shows there),
+# "process <pid>" (the tmux pane's own process, in the server the pane was opened in), other (herdr shows no Claude
+# session), gone, or unknown (its server gave no answer these scripts can read).
+claude_pane() {
+  local launcher socket pane server out shown listed pane_pid
   IFS=$'\x1f' read -r launcher socket pane server <<EOF
-$(jq -r '[.launcher, .socket, .pane, .server] | map(. // "") | join("\u001f")' "$file")
+$(jq -r '[.launcher, .socket, .pane, .server] | map(. // "") | join("\u001f")' "$1")
 EOF
-  [ -n "$socket" ] && [ -n "$pane" ] || return 1
+  if [ -z "$socket" ] || [ -z "$pane" ]; then echo unknown; return; fi
   case $launcher in
     herdr)
-      listed=$(HERDR_SOCKET_PATH="$socket" herdr agent list 2>/dev/null) || return 1
-      printf '%s' "$listed" | jq -e --arg sid "$sid" --arg pane "$pane" '
-        [.result.agents[]? | select(.agent_session.value == $sid) | .pane_id] == [$pane]' >/dev/null ;;
+      # herdr exits non-zero, with its error on stderr, for a pane with no agent and for a missing pane.
+      out=$(HERDR_SOCKET_PATH="$socket" herdr agent get "$pane" 2>&1) || true
+      if printf '%s' "$out" | jq -e '.error.code == "agent_not_found"' >/dev/null 2>&1; then
+        case $(codex_pane herdr "$socket" "$pane") in gone) echo gone ;; present*) echo other ;; *) echo unknown ;; esac
+      elif printf '%s' "$out" | jq -e '.error.code == "pane_not_found" or .error.code == "server_not_running"' >/dev/null 2>&1; then
+        echo gone
+      elif shown=$(printf '%s' "$out" | jq -er --arg pane "$pane" '.result.agent | select(.pane_id == $pane)
+        | if .agent == "claude" then (.agent_session.value // "" | tostring) else "" end' 2>/dev/null); then
+        if [ -n "$shown" ]; then echo "session $shown"; else echo other; fi
+      else
+        echo unknown
+      fi
+      ;;
     tmux)
-      [ -n "$server" ] || return 1
-      listed=$(tmux -S "$socket" list-panes -a -F '#{pid} #{pane_id} #{pane_pid}' 2>/dev/null) || return 1
-      pane_pid=$(printf '%s\n' "$listed" | awk -v p="$server" -v id="$pane" '$1 == p && $2 == id {print $3}')
-      [ -n "$pane_pid" ] && has_ancestor "$pid" "$pane_pid" ;;
-    *) return 1 ;;
+      if [ -z "$server" ]; then echo unknown; return; fi
+      if listed=$(tmux -S "$socket" list-panes -a -F '#{pid} #{pane_id} #{pane_pid}' 2>&1); then
+        pane_pid=$(printf '%s\n' "$listed" | awk -v p="$server" -v id="$pane" '$1 == p && $2 == id { print $3; exit }')
+        if [ -n "$pane_pid" ]; then echo "process $pane_pid"; else echo gone; fi
+      else
+        case $listed in *"no server running"* | *"No such file or directory"*) echo gone ;; *) echo unknown ;; esac
+      fi
+      ;;
+    *) echo unknown ;;
   esac
 }
 
-legacy_claude_stop_matches() {
-  local file=$1 sid=$2 pid=$3 transcript=$4 launched age drift
-  case $transcript in "$home"/projects/*/"$sid.jsonl") ;; *) return 1 ;; esac
-  launched=$(jq -er 'select(.claudeLaunchId == null and .claudeSession == null and .adopted != true and
-    .spawnerProvider == "codex") | .startedAt | fromdateiso8601' "$file" 2>/dev/null) || return 1
-  age=$(proc_age "$pid")
-  [ -n "$age" ] || return 1
-  drift=$(( $(date +%s) - age - launched ))
-  # The old launcher reserved the record before opening the pane and waited up to 120 seconds for readiness.
-  [ "$drift" -ge -2 ] && [ "$drift" -le 120 ] && claude_in_worker_pane "$file" "$sid" "$pid" &&
-    "$anderton_scripts/claude-worker.py" legacy-launch-matches "$file" "$transcript"
+# claude_pane_state <record>: worker while the record's pane shows the worker's own session (herdr: a session the record
+# names; tmux: a live session the record names, running under the pane's process), else other, gone or unknown.
+claude_pane_state() {
+  local now reg
+  now=$(claude_pane "$1")
+  case $now in
+    "session "*)
+      if claude_worker_identity_matches "$1" "${now#session }" "$(session_pid "${now#session }")"; then echo worker; else echo other; fi
+      ;;
+    "process "*)
+      while IFS= read -r reg; do
+        if [ -n "$reg" ] && has_ancestor "$(jq -r '.pid // empty' "$reg")" "${now#process }"; then
+          echo worker
+          return
+        fi
+      done <<EOF
+$(live_claude_worker "$1" --allow-rebind)
+EOF
+      echo other
+      ;;
+    *) echo "$now" ;;
+  esac
 }
 
 has_ancestor() {
@@ -743,9 +785,10 @@ place_state() {
 }
 
 # Where agy record $1 (a worker or an agy Anderton's claim) stands, from one herdr snapshot of its pane. Sets:
-#   agy_state: running (herdr shows agy in the recorded pane, in the worktree, as the agy session the record bound when
-#     it bound one, and, for a claim, while the agy process it recorded still runs), gone (herdr says the pane is gone), elsewhere (the pane shows no agent, another one, or another
-#     session) or unknown (herdr gave no answer these scripts can read);
+#   agy_state: running (herdr shows agy in the recorded pane, in the worktree, as the agy instance a worker's record names,
+#     or for a claim, while the agy process it recorded still runs), unidentified (it shows an agy there, but the worker's
+#     record names no instance to tell it from another), gone (herdr says the pane is gone), elsewhere (the pane shows no
+#     agent, another one, or another session) or unknown (herdr gave no answer these scripts can read);
 #   agy_status: herdr's status for the pane (idle, working, blocked, done), or nothing;
 #   agy_agent, agy_cwd: what that snapshot shows in the pane, or nothing.
 # shellcheck disable=SC2034 # the scripts that source this file read what it sets
@@ -775,6 +818,7 @@ EOF
     { [ "$agy_cwd" = "$dir" ] || case $agy_cwd in "$dir"/*) true ;; *) false ;; esac; } &&
     { [ -z "$apid" ] || process_start_matches "$apid" "$astart"; }; then
     agy_state=running
+    if [ -z "$instance" ] && [ -z "$apid" ]; then agy_state=unidentified; fi
   else
     agy_state=elsewhere
   fi
@@ -857,28 +901,14 @@ worker_gone() { # worker_gone <launcher> <socket> <tab> <name> [server] [label]:
   [ "$(place_state "$1" "$2" "$3" "$label" "${5:-}")" = absent ] && session_gone "$4"
 }
 
-# Native identity survives display renames. A launch without an identity can only be found by its old name
-# and directory, which lets its Stop hook recheck the original pane before assigning identity.
+# worker_record <session id> [pid]: the Claude worker record naming that session (session_is_worker's Claude rule), or
+# nothing. A display name or a directory names no worker: a renamed worker keeps its record, and a session in its
+# checkout is not it.
 worker_record() {
-  local f dir
-  if [ -n "${3:-}${4:-}" ]; then
-    f=$(claude_worker_identities "${3:-}" "${4:-}" "${5:-}" "$holders"/workers/*.json)
-    if [ -n "$f" ]; then printf '%s\n' "${f%%$'\n'*}"; return; fi
-  fi
-  f="$holders/workers/$1.json"
-  if [ -n "$1" ] && [ -f "$f" ]; then
-    case $(record_provider "$f") in codex | agy) return 0 ;; esac
-    dir=$(jq -r '.dir // empty' "$f" 2>/dev/null || true)
-    case $2 in
-      "$dir" | "$dir"/*)
-        if [ -n "$dir" ] && jq -e '
-          .adopted != true and .claudeLaunchId == null and .claudeSession == null' "$f" >/dev/null 2>&1; then
-          printf '%s\n' "$f"
-          return
-        fi
-        ;;
-    esac
-  fi
+  local f
+  [ -n "${1:-}${2:-}" ] || return 0
+  f=$(claude_worker_identities "${1:-}" "${2:-}" "$holders"/workers/*.json)
+  if [ -n "$f" ]; then printf '%s\n' "${f%%$'\n'*}"; fi
 }
 
 # True when that session is a worker: it reports to its spawner, not the user.

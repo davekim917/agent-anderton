@@ -49,9 +49,9 @@ hooks="$root/hooks/hooks.json"
 jq -e '.hooks.UserPromptSubmit | length == 1 and (.[0].hooks[0] | .type == "command" and (.asyncRewake | not)
   and (.command | endswith("/skills/anderton/scripts/watch.sh\" --turn-start")))' "$hooks" >/dev/null ||
   fail "the UserPromptSubmit hook must run watch.sh --turn-start"
-jq -e '.hooks.SessionStart[0] | .matcher == "startup" and
+jq -e '.hooks.SessionStart[0] | .matcher == "startup|resume" and
   (.hooks[0].command | endswith("/skills/anderton/scripts/watch.sh\" --claude-start"))' "$hooks" >/dev/null ||
-  fail "the startup hook must register the Claude launch"
+  fail "the startup and resume hook must register the Claude launch"
 for event in PreToolUse PostToolUse; do
   jq -e --arg e "$event" '.hooks[$e] | length == 1 and .[0].matcher == "SendMessage"
     and (.[0].hooks[0].command | endswith("/skills/anderton/scripts/report-gate.sh\""))' "$hooks" >/dev/null ||
@@ -71,7 +71,8 @@ awk 'NR == 1 { if ($0 != "---") exit; next }
   END { exit (closed && found) ? 0 : 1 }' "$root/skills/anderton/SKILL.md" ||
   fail "SKILL.md frontmatter must set disable-model-invocation: true"
 
-for script in claim.sh waiting.sh spawn.sh retire.sh adopt.sh watch.sh prompt.sh report-gate.sh codex-anderton.sh worker.sh role-message.sh agy-hooks.sh agy-anderton.sh; do
+for script in claim.sh waiting.sh spawn.sh retire.sh adopt.sh watch.sh prompt.sh report-gate.sh codex-anderton.sh worker.sh role-message.sh agy-hooks.sh agy-anderton.sh \
+  migrate-workers.sh; do
   [ -x "$root/skills/anderton/scripts/$script" ] || fail "scripts/$script must exist and be executable"
 done
 [ -f "$root/skills/anderton/scripts/session-lib.sh" ] || fail "scripts/session-lib.sh must exist"

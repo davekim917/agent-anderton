@@ -8,8 +8,9 @@
 # the holder when it prints something; --no-probe removes it. A claim that names neither keeps the role's probe.
 # Each claim has a claimId, kept by the same session and new for any other; a project role's claim emits a start
 # event to ANDERTON_EVENT_COMMAND when the host sets one (see emit_event in session-lib.sh).
-# Exit 0: claimed (or already held by this session). Exit 3: held by another live session, or this
-# session already holds another role in the repository.
+# Exit 0: claimed (or already held by this session). Exit 3: held by another live session, this session already holds
+# another role in the repository, or it is a worker. Exit 4: whether it is a worker cannot be told now (a lookup gave no
+# answer, or a worker record awaits migrate-workers.sh): nothing changed; retry.
 # Portable to macOS's bash 3.2 and BSD userland.
 set -euo pipefail
 # shellcheck source=SCRIPTDIR/session-lib.sh
@@ -89,12 +90,18 @@ state=$(holder_path "$root" "$scope")
 mkdir -p "$holders"
 take_repository_lock "$root"
 if [ "$provider" = agy ]; then
-  # A worker record names an agy session by the agy instance herdr shows in its pane.
+  # A worker record names an agy session by the agy instance herdr shows in its pane: nothing when herdr cannot say.
   agy_instance=$(HERDR_SOCKET_PATH="$agy_socket" herdr agent get "$agy_pane" 2>/dev/null |
     jq -r '.result.agent | select(.agent == "agy") | .agent_session.value // empty' 2>/dev/null) || agy_instance=""
-  worker=$(managed_invoker "$root" agy "$agy_instance" "$agy_pane")
+  who=(agy "$agy_instance" "$agy_pane")
 else
-  worker=$(managed_invoker "$root" "$provider" "$sid" "${codex_home:-$pid}" "$codex_dir")
+  who=("$provider" "$sid" "${codex_home:-$pid}" "$codex_dir")
+fi
+unknown=0
+worker=$(managed_invoker "$root" "${who[@]}") || unknown=$?
+if [ "$unknown" -ne 0 ]; then
+  echo "Whether this session is managed as a worker cannot be told now: $worker. Nothing was claimed; retry."
+  exit 4
 fi
 if [ -n "$worker" ]; then
   echo "This session is managed as worker '$(jq -r .name "$worker")'. Its Anderton must release it before it can claim a role."

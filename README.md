@@ -56,7 +56,7 @@ Anderton hands that job to a Claude Code or Codex session in your repository. In
   check rather than another instruction. It prefers, in order: a design that can't express the
   mistake, a type, a CI rule, a test, and a written rule only as a last resort. Each new check must fail on the
   original mistake.
-- **Cleans up.** Retiring a worker stops its session, closes its tab and removes its worktree. A
+- **Cleans up.** Retiring a worker stops its session, closes its pane and removes its worktree. A
   worktree with uncommitted or unpushed work is kept; gitignored files are not.
 
 The scripts enforce one deploying Anderton per repo and do the starting, listing and cleanup. Reviewing,
@@ -435,13 +435,21 @@ An Anderton must release an adopted worker before that session can claim a role.
 A worker launched by Anderton must be retired before it can be replaced by a coordinator session.
 Changing the worker's Claude display name leaves that claim restriction in place.
 One check, `session_is_worker` (`session-lib.sh`), decides that a session is the worker a record names, for
-`claim.sh` (every provider, `--rebind` and `--take-over` included) and `adopt.sh`. It covers every identity the
-sweeps and the retirement scan read for the record:
-- Claude: its launch, its current or any earlier session (`claudePreviousSessions`), or its process.
-- A record from before launch ids: its checkout with its name, its launch brief, or the pane it was opened in.
-- Codex: its thread, on any account's home.
-- agy: only the agy instance the record names. A record with none names no session, and `retire.sh` won't close a
-  pane on its word.
+`claim.sh` (every provider, `--rebind` and `--take-over` included), `adopt.sh` and a Codex worker's registration,
+and the Stop hook, `waiting.sh` and the report hook find a Claude worker by the same rule. Only an identity the record
+holds counts, never a name, a checkout, a launch brief or a pane:
+- Claude: its launch id, its current or any earlier session id (`claudePreviousSessions`), an adopted session's id, or
+  its process: pid and start time together, never the pid alone, and never the registry's `startedAt`, which
+  `/restart` rewrites.
+- Codex: its thread, on any account's home. A launch still waiting for its thread is the thread whose first message
+  carries its launch token, read from the home the caller's thread runs on.
+- agy: only the agy instance the record names. A record with none names no session; `worker.sh` won't read or direct
+  its pane, and `retire.sh` won't close it.
+
+An answer that cannot be had is neither a match nor a mismatch: when Codex cannot show a pending launch's first
+message, herdr cannot say which agy runs in the caller's pane while a record names an instance, or a record from before
+session identities sits in the repository, `claim.sh` and `adopt.sh` exit 4 and change nothing, to be retried (or, for
+the old record, after `migrate-workers.sh`).
 
 **`waiting.sh`** lists the live sessions in the caller's repository (`--all`: every repository) that
 wait on a person, leaving out every Anderton in the caller's repository, the repository's and each
@@ -511,20 +519,23 @@ startup details for the operator. Existing background sessions use `claude attac
   SendMessage. Other pairings report in final replies. The brief also sets the rules for sub-agents
   and external actions.
 - The worker is recorded in `~/.claude/anderton/workers/<name>.json`, with the herdr or tmux server
-  it was opened in. For Claude the record reserves its session UUID before opening the worker.
-  The startup hook records its process identity. A `/clear` in the same process keeps the worker's
-  previous transcript available for unread reports. An older Codex-launched Claude worker can bind
-  on its next Stop when its original pane and launch brief still verify its identity. Direct other
-  unbound workers in their own panes or retire them and start fresh workers.
+  and the pane it was opened in. For Claude the record reserves its session UUID before opening the worker.
+  The startup hook records its process identity, and records it again when the session is resumed as a new
+  process, so a `/clear` before its first Stop keeps it the worker. A `/clear` in the same process keeps the worker's
+  previous transcript available for unread reports. An agy worker is recorded only once herdr names its agy
+  instance; otherwise the spawn closes its tab and fails.
 - When a worker messages its former Claude Anderton, the SendMessage hook can hold the stale route
   and let its current Codex Anderton read that milestone from the transcript. This applies when
   the repository's Codex Anderton inherits a scoped worker. Recovery of native sends with an unknown
   recipient requires the worker to report again in its final reply.
 
-**`retire.sh <name> [--reviewed-through <ISO time>]`** stops that worker, then removes its worktree and record. A herdr tab or tmux
-window is closed only when it still carries the label it was opened with, in the server recorded at spawn, and
-the worker counts as stopped only when that tab or window is gone and its name has left
-`claude agents`; an existing background worker is stopped with `claude stop`. It exits 3 and keeps the
+**`retire.sh <name> [--reviewed-through <ISO time>]`** stops that worker, then removes its worktree and record. It closes
+only the worker's own herdr or tmux pane, in the server recorded at spawn, and only while that pane still shows the
+worker's session: herdr names it, or for tmux, a live session the record names runs under the pane's process. A tab or
+window is never closed, since the user may have split it. A pane showing anything else, or a worker that never
+registered, is left for the user to close, and then a rerun finishes. The worker counts as stopped only when its pane
+is gone, its name has left `claude agents`, and no live session the record names, nor any in its own worktree,
+remains; an existing background worker is stopped with `claude stop`. It exits 3 and keeps the
 worktree when the worktree has uncommitted changes, or commits since it started that no remote
 branch has. Untracked files count whatever `status.showUntrackedFiles` says, and a worktree git
 cannot read or compare with its base is kept too. Gitignored files don't count as changes.
@@ -557,13 +568,25 @@ registry reads as another session's.
 **`adopt.sh <name>`** makes the calling Anderton answer for a live session the user opened in its
 repository, as for a worker it started: it writes a worker record naming the caller, so the session's
 messages to it are judged as a worker's and its blocks wake the caller. The record keeps the session's
-id, pid and start time. It recognizes the same session on resume, restart or display rename, and the
-same process after `/clear`. It refuses a caller holding no
+id, pid and process start time. It recognizes the same session on resume, restart or display rename, and the
+same process after `/clear` or `/restart`. It also refuses a session a Claude claim names, even while that holder,
+resumed as a new process, has not yet rebound the claim. It refuses a caller holding no
 role, another Anderton, and a session another Anderton already answers for. The Anderton then tells
 the session by SendMessage that it reports there. `retire.sh <name>` releases an adopted session
 without stopping it.
 Re-adopting a Codex thread starts reporting at the new adoption point. A change in Anderton for an
 existing adoption keeps its report bookmark.
+
+**`migrate-workers.sh [--dry-run | --apply]`** settles, once, the worker records written before session identities
+were recorded, which otherwise make every claim, adoption and rebind in their repository refuse (`waiting.sh` lists
+each). With no flag, or `--dry-run`, it prints what each record would get and writes nothing. `--apply` writes it,
+under the repository's lock and the worker's lock, after reading the record again there. A Claude record is stamped with
+the session it names only on unambiguous evidence: the one live session in its checkout, which its launch brief opens or
+its pane shows, and which holds no role; a background launch, with the session `claude agents` lists under its id; a
+record with no live session, with the one transcript its launch brief opens. One with none of that is marked as naming
+no session. A Codex launch waiting for its thread is registered when its launch token finds one. An agy record is
+stamped with the instance herdr shows in its pane, unless a role's claim names that pane. Anything else is printed and
+left for a person (exit 1). A second run changes nothing; it removes no record and no worktree.
 
 **`watch.sh`** runs as Claude's background `Stop` hook and as the Codex coordinator's detached watcher.
 The Codex watcher keeps checking for blockers while a notice is pending. Consecutive requests can

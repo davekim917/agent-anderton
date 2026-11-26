@@ -716,6 +716,7 @@ def main():
     launch = commands.add_parser("launch-matches")
     launch.add_argument("record", type=Path)
     launch.add_argument("thread")
+    launch.add_argument("home", type=Path)
     identity = commands.add_parser("identity")
     identity.add_argument("home", type=Path)
     identity.add_argument("thread")
@@ -775,11 +776,12 @@ def main():
             return 3
         print(thread)
     elif args.command == "launch-matches":
+        # Read from the home the caller's thread runs on, which can read it: a launch may have resumed on another home.
         worker = json.loads(args.record.read_text())
-        with Codex(Path(worker["codexHome"])) as client:
+        with Codex(args.home) as client:
             thread = thread_identity(client, args.thread)
             if thread["dir"] != str(Path(worker["dir"]).resolve()):
-                raise ValueError("Codex worker launch directory differs from the thread")
+                return 3
             marker = f"Anderton launch {uuid.UUID(worker['codexLaunchToken'])}"
             match = started_with(client, thread["id"], marker)
             if match is None:

@@ -379,7 +379,8 @@ class WorkerTest(unittest.TestCase):
         directory = Path(self.worker["dir"])
         directory.mkdir()
         self.record.write_text(json.dumps({**self.worker, "codexLaunchToken": token}))
-        with patch.object(worker_api.sys, "argv", ["codex-worker.py", "launch-matches", str(self.record), thread]):
+        caller_home = Path(self.worker["codexHome"]).parent / "caller-home"
+        with patch.object(worker_api.sys, "argv", ["codex-worker.py", "launch-matches", str(self.record), thread, str(caller_home)]):
             original = self.client.call
             with patch.object(self.client, "call", side_effect=lambda method, params:
                               {"data": []} if method == "thread/turns/list" else original(method, params)):
@@ -396,6 +397,21 @@ class WorkerTest(unittest.TestCase):
             self.client.items[thread] = [user_message(f"Anderton launch {token}\n\nBrief")]
             self.assertEqual(0, worker_api.main())
             self.assertEqual(thread, str(worker_api.find_thread(self.client, directory, "", token)))
+        # Read from the home the caller's thread runs on, not the one the launch started on: a thread can resume elsewhere.
+        self.assertTrue(worker_api.Codex.call_args_list)
+        self.assertTrue(all(call.args == (caller_home,) for call in worker_api.Codex.call_args_list))
+
+    def test_launch_match_in_another_checkout_is_a_mismatch_not_an_unknown(self):
+        thread = self.worker["id"]
+        token = "00000000-0000-4000-8000-000000000789"
+        Path(self.worker["dir"]).mkdir()
+        elsewhere = Path(self.worker["dir"]).parent / "elsewhere"
+        elsewhere.mkdir()
+        self.record.write_text(json.dumps({**self.worker, "dir": str(elsewhere), "codexLaunchToken": token}))
+        self.client.items[thread] = [user_message(f"Anderton launch {token}\n\nBrief")]
+        with patch.object(worker_api.sys, "argv", ["codex-worker.py", "launch-matches", str(self.record), thread,
+                                                  self.worker["codexHome"]]):
+            self.assertEqual(3, worker_api.main())
 
     def test_a_launch_is_found_among_threads_created_since_it_without_a_cwd_filter(self):
         token = "00000000-0000-4000-8000-000000000789"

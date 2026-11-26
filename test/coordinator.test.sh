@@ -43,6 +43,7 @@ case $1 in
     while [ -n "${FIXTURE_LOADED_GATE:-}" ] && [ ! -e "$FIXTURE_LOADED_GATE" ]; do sleep 0.1; done
     echo "$2 $3" >> "$FIXTURE_ROOT/../loaded-checks"; [ -z "${FIXTURE_NOT_LOADED:-}" ] ;;
   launch-matches)
+    [ -z "${LAUNCH_HOME_LOG:-}" ] || echo "$4" >> "$LAUNCH_HOME_LOG"
     [ -z "${LAUNCH_LOOKUP_FAIL:-}" ] || exit 1
     [ "$3" = "${MATCHING_LAUNCH:-}" ] || exit 3
     ;;
@@ -256,13 +257,46 @@ jq -nc --arg dir "$PWD" --arg home "$CODEX_HOME" '
   > "$claims/workers/registering-codex.json"
 refused_claim env CODEX_THREAD_ID="$pending" MATCHING_LAUNCH="$pending" "$script/claim.sh" --project worker-scope
 grep -q "managed as worker 'registering-codex'" "$tmp/refused"
+# A pending launch's thread resumed on another account's home is that worker too, read from the home it runs on.
+refused_claim env CODEX_HOME="$moved_home" CODEX_THREAD_ID="$pending" MATCHING_LAUNCH="$pending" LAUNCH_HOME_LOG="$tmp/launch-homes" \
+  "$script/claim.sh" --project worker-scope
+grep -q "managed as worker 'registering-codex'" "$tmp/refused"
+grep -qxF "$moved_home" "$tmp/launch-homes"
 if MATCHING_LAUNCH="$pending" codex_role "$script/adopt.sh" --provider codex duplicate-pending "$pending" > "$tmp/refused" 2>&1; then exit 1; fi
 grep -q 'already has a worker record' "$tmp/refused"
-if LAUNCH_LOOKUP_FAIL=1 codex_role "$script/adopt.sh" --provider codex uncertain-pending "$pending" > "$tmp/refused" 2>&1; then exit 1; fi
-grep -q 'already has a worker record' "$tmp/refused"
+# A lookup that gives no answer is neither: the claim and the adoption refuse, to be retried, and nothing is written.
+unrelated=019a0000-cccc-7222-8333-444455556666
+status=0
+env CODEX_THREAD_ID="$unrelated" LAUNCH_LOOKUP_FAIL=1 "$script/claim.sh" --project lookup-failed > "$tmp/refused" 2>&1 || status=$?
+[ "$status" = 4 ]
+grep -q 'cannot be told now' "$tmp/refused"
+[ ! -e "$(dirname "$root_claim")/$(printf '%s\nscope=%s' "$PWD" lookup-failed | git hash-object --stdin).json" ]
+status=0
+LAUNCH_LOOKUP_FAIL=1 codex_role "$script/adopt.sh" --provider codex uncertain-pending "$pending" > "$tmp/refused" 2>&1 || status=$?
+[ "$status" = 4 ]
+grep -q 'cannot be told now' "$tmp/refused"
+[ ! -e "$claims/workers/uncertain-pending.json" ]
 codex_role "$script/adopt.sh" --provider codex independent-thread "$pending"
 codex_role "$script/retire.sh" independent-thread
 rm "$claims/workers/registering-codex.json"
+# Registering a launch's thread checks, under the binding lock, that the thread holds no role.
+held_thread=019a0000-dddd-7222-8333-444455556666
+jq -nc --arg dir "$PWD" --arg home "$CODEX_HOME" '
+  {name:"held-launch",root:$dir,dir:$dir,provider:"codex",codexHome:$home,id:"",codexLaunchToken:"fixture"}' \
+  > "$claims/workers/held-launch.json"
+jq -nc --arg dir "$PWD" --arg home "$CODEX_HOME" --arg id "$held_thread" '
+  {root:$dir,scope:"held-thread",provider:"codex",sessionId:$id,codexHome:$home,claimedAt:"2030-01-01T00:00:00Z"}' \
+  > "$claims/held-thread.json"
+(
+  # shellcheck source=SCRIPTDIR/../skills/anderton/scripts/session-lib.sh
+  . "$script/session-lib.sh"
+  take_repository_lock "$PWD"
+  lock_worker "$claims/workers/held-launch.json"
+  if bind_codex_worker "$claims/workers/held-launch.json" "$held_thread" fixture; then exit 1; fi
+) 2> "$tmp/refused"
+grep -q 'holds an Anderton role' "$tmp/refused"
+jq -e '.id == ""' "$claims/workers/held-launch.json" > /dev/null
+rm "$claims/workers/held-launch.json" "$claims/held-thread.json"
 printf 'Fixture task.\n' | claude_role env TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 \
   "$script/spawn.sh" --effort low --provider claude --mode default explicit-claude
 jq -e '(.provider // "claude") == "claude"' "$claims/workers/explicit-claude.json" >/dev/null
@@ -337,14 +371,21 @@ jq -nc --argjson pid "$replacement_pid" --arg dir "$tmp/plain" '
 jq -nc --arg dir "$tmp/plain" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
   {name:"plain-legacy",root:$dir,dir:$dir,worktree:false,launcher:"tmux",spawner:"fixture-claude",startedAt:$at}
 ' > "$claims/workers/plain-legacy.json"
-refused_claim env CLAUDE_PID="$replacement_pid" CLAUDE_CODE_SESSION_ID=plain-legacy-id "$script/claim.sh"
-grep -q "managed as worker 'plain-legacy'" "$tmp/refused"
+# A record from before launch ids names no session: in its repository no claim proceeds on a guess, by name or checkout.
+status=0
+env CLAUDE_PID="$replacement_pid" CLAUDE_CODE_SESSION_ID=plain-legacy-id "$script/claim.sh" > "$tmp/refused" 2>&1 || status=$?
+[ "$status" = 4 ]
+grep -q 'migrate-workers.sh' "$tmp/refused"
+# Its launch brief opens the one live session's transcript: migrate-workers.sh stamps that session, and from then on it is
+# the worker by its own id, whatever it is named.
 jq --arg dir "$tmp/plain" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" -nc '
   {type:"user",sessionId:"plain-legacy-id",timestamp:$at,cwd:$dir,message:{
     content:("Brief.\nYou are a worker the Anderton session \"fixture-claude\" started for the task above, in " + $dir + ".")
   }}' > "$CLAUDE_CONFIG_DIR/projects/fixture/plain-legacy-id.jsonl"
 jq '.name = "renamed-plain-worker"' "$CLAUDE_CONFIG_DIR/sessions/$replacement_pid.json" > "$tmp/renamed-plain"
 mv "$tmp/renamed-plain" "$CLAUDE_CONFIG_DIR/sessions/$replacement_pid.json"
+"$script/migrate-workers.sh" --apply > "$tmp/migrated"
+grep -q "plain-legacy: stamped with session plain-legacy-id (pid $replacement_pid)" "$tmp/migrated"
 refused_claim env CLAUDE_PID="$replacement_pid" CLAUDE_CODE_SESSION_ID=plain-legacy-id "$script/claim.sh" --project plain-renamed
 grep -q "managed as worker 'plain-legacy'" "$tmp/refused"
 rm "$claims/workers/plain-legacy.json"
@@ -530,16 +571,26 @@ mv "$tmp/updated-worker" "$claims/workers/prev-session.json"
 refused_claim claude_role "$script/claim.sh" --project identity-check
 grep -q "managed as worker 'prev-session'" "$tmp/refused"
 rm "$claims/workers/prev-session.json"
-# the pane a record from before launch ids was opened in, whatever the session there is now named,
+# and nothing else: the session in the pane a record from before launch ids was opened in is not taken for it, nor is any
+# other session in its repository, until migrate-workers.sh stamps or marks it.
+claude_role "$script/claim.sh" --project identity-check | grep -q "project identity-check claimed"
 jq -nc --arg dir "$PWD" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
   {name:"pane-legacy",root:$dir,dir:$dir,worktree:false,launcher:"tmux",socket:"/tmp/fixture-tmux",pane:"%42",server:"4242",
    spawner:"fixture-codex",startedAt:$at}' > "$claims/workers/pane-legacy.json"
-refused_claim claude_role env FIXTURE_TMUX_PANES="4242 %42 $claimer" "$script/claim.sh" --project identity-check
-grep -q "managed as worker 'pane-legacy'" "$tmp/refused"
-claude_role env FIXTURE_TMUX_PANES="4242 %42 1" "$script/claim.sh" --project identity-check | grep -q "project identity-check claimed"
-release_identity_check
+status=0
+claude_role env FIXTURE_TMUX_PANES="4242 %42 $claimer" "$script/claim.sh" --project identity-check > "$tmp/refused" 2>&1 || status=$?
+[ "$status" = 4 ]
+grep -q 'migrate-workers.sh' "$tmp/refused"
+# migrate-workers.sh does not stamp a session holding a role as a worker, whatever pane it runs in.
+cp "$claims/workers/pane-legacy.json" "$tmp/pane-legacy.before"
+status=0
+env FIXTURE_TMUX_PANES="4242 %42 $claimer" "$script/migrate-workers.sh" --apply > "$tmp/migrated" 2>&1 || status=$?
+[ "$status" = 1 ]
+grep -q "pane-legacy: left for a person: the live session in $PWD (fixture-claude) holds an Anderton role" "$tmp/migrated"
+cmp -s "$claims/workers/pane-legacy.json" "$tmp/pane-legacy.before"
 rm "$claims/workers/pane-legacy.json"
-# and a Codex thread recorded as a worker on another account's home, which shares the conversation store.
+release_identity_check
+# A Codex thread recorded as a worker on another account's home, which shares the conversation store, is that worker too.
 jq --arg id "$FIXTURE_THREAD" '.id = $id' "$claims/workers/other-home.json" > "$tmp/updated-worker"
 mv "$tmp/updated-worker" "$claims/workers/other-home.json"
 refused_claim codex_role "$script/claim.sh"
@@ -552,6 +603,24 @@ jq -nc --arg dir "$PWD" --arg home "$tmp/other-home" '
 if codex_role "$script/adopt.sh" --provider codex adopt-other 019a0000-3333-7222-8333-444455556666 > "$tmp/refused" 2>&1; then exit 1; fi
 grep -q 'holds an Anderton role of its own' "$tmp/refused"
 rm "$claims/other-home-role.json"
+# A Claude holder resumed as a new process holds its role by session id until its first Stop rebinds the claim to that
+# process, so it is not adopted in between.
+sleep 60 &
+resumed_holder=$!
+sleep 0 &
+gone_holder=$!
+wait "$gone_holder"
+jq -nc --arg dir "$PWD" --argjson pid "$gone_holder" '
+  {root:$dir,scope:"resumed-role",provider:"claude",sessionId:"resumed-holder-id",pid:$pid,claimedAt:"2030-01-01T00:00:00Z"}' \
+  > "$claims/resumed-role.json"
+jq -nc --argjson pid "$resumed_holder" --arg cwd "$PWD" '{pid:$pid, sessionId:"resumed-holder-id", name:"resumed-holder", cwd:$cwd}' \
+  > "$CLAUDE_CONFIG_DIR/sessions/$resumed_holder.json"
+if codex_role "$script/adopt.sh" resumed-holder > "$tmp/refused" 2>&1; then exit 1; fi
+grep -q 'holds an Anderton role of its own' "$tmp/refused"
+[ ! -e "$claims/workers/resumed-holder.json" ]
+kill "$resumed_holder"
+wait "$resumed_holder" 2>/dev/null || true
+rm "$claims/resumed-role.json" "$CLAUDE_CONFIG_DIR/sessions/$resumed_holder.json"
 
 cutoff=2030-01-02T00:00:00Z
 jq --arg cutoff "$cutoff" '.claudeReportSince = $cutoff |
@@ -559,9 +628,12 @@ jq --arg cutoff "$cutoff" '.claudeReportSince = $cutoff |
 mv "$tmp/updated-claim" "$root_claim"
 legacy="$claims/workers/legacy-reporter.json"
 legacy_transcript="$CLAUDE_CONFIG_DIR/projects/fixture/legacy-native-report.jsonl"
-jq '.name = "legacy-reporter" | .spawner = "former-claude" | .spawnerScope = null | .spawnerSession = "former-id" |
-    .spawnerProvider = "claude" | .startedAt = "2030-01-01T01:00:01Z" |
-    del(.claudeLaunchId,.claudeSession,.reportTransport)' "$inherited" > "$legacy"
+# A worker a former Claude Anderton started, its record stamped by migrate-workers.sh with the session its brief opens.
+jq --arg transcript "$legacy_transcript" '.name = "legacy-reporter" | .spawner = "former-claude" | .spawnerScope = null |
+    .spawnerSession = "former-id" | .spawnerProvider = "claude" | .startedAt = "2030-01-01T01:00:01Z" |
+    .claudeSession = {id:"legacy-native-report",transcript:$transcript} |
+    .migration = {at:"2030-01-03T00:00:00Z",result:"stamped",why:"its launch transcript"} |
+    del(.claudeLaunchId,.reportTransport)' "$inherited" > "$legacy"
 rm "$CLAUDE_CONFIG_DIR/sessions/$replacement_pid.json"
 jq -nc --arg dir "$clearable_dir" '
   def entry($id; $time): {sessionId:"legacy-native-report",uuid:$id,cwd:$dir,
@@ -664,12 +736,6 @@ grep -qx 'RESULT: example PR opened' "$tmp/agy-native-output"
 grep -qx 'RESULT: example CI passed' "$tmp/agy-native-output"
 if codex_role "$script/worker.sh" message legacy-reporter 'Refuse legacy transcript-only identity.' > "$tmp/refused" 2>&1; then exit 1; fi
 mv "$tmp/native-stage/"*.json "$tmp/native-state/"
-codex_role env ANDERTON_PROBE_STATE="$tmp/native-state" ANDERTON_PROBE_STAGE="$tmp/native-stage" "$script/worker.sh" sweep > "$tmp/native-output"
-[ ! -s "$tmp/native-output" ]
-sed 's/started for the task/never started for the task/' "$legacy_transcript" > "$tmp/replacement-transcript"
-mv "$tmp/replacement-transcript" "$legacy_transcript"
-TZ=UTC touch -t 203001030100 "$legacy_transcript"
-rm "$tmp/native-state/claude-legacy-native-report.json"
 codex_role env ANDERTON_PROBE_STATE="$tmp/native-state" ANDERTON_PROBE_STAGE="$tmp/native-stage" "$script/worker.sh" sweep > "$tmp/native-output"
 [ ! -s "$tmp/native-output" ]
 

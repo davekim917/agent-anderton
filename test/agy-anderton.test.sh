@@ -198,10 +198,30 @@ check "a record without an agy instance names no session, so an agy Anderton in 
 as "${lead[@]}" -- "$scripts/retire.sh" agy-named --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 check "and retire.sh does not close that pane on the record's word" eval '[ "$status" -eq 1 ] && contains "recorded without its agy instance" &&
   grep -qx w9:p81 "$FAKE/panes" && [ -f "$named" ]'
-rm -f "$named"
+: > "$FAKE/prompts"
+as "${lead[@]}" -- "$scripts/worker.sh" output agy-named
+check "nor does worker.sh read that pane as the worker's" eval '[ "$status" -eq 1 ] && contains "recorded without its agy instance"'
+as "${lead[@]}" -- "$scripts/worker.sh" message agy-named "Rebase on main."
+check "or send it a direction" eval '[ "$status" -eq 1 ] && contains "recorded without its agy instance" && [ ! -s "$FAKE/prompts" ]'
+as "${lead[@]}" -- "$scripts/worker.sh" status agy-named
+check "and worker.sh status says the pane cannot be told to be the worker's" eval '[ "$status" -eq 0 ] &&
+  [ "$(printf "%s" "$out" | jq -r .worker)" = unidentified ]'
+# migrate-workers.sh does not stamp the instance of an agy whose pane a role's claim names.
+as -- "$scripts/migrate-workers.sh" --apply
+check "migrate-workers.sh leaves a record whose pane an agy Anderton holds a role in" eval '[ "$status" -eq 1 ] &&
+  contains "agy-named: left for a person: agy instance conv-w9:p81 in pane w9:p81 is also named by" && [ "$(jq -r ".agyInstance // empty" "$named")" = "" ]'
 for f in "$CLAUDE_CONFIG_DIR"/anderton/*.json; do
   if [ "$(jq -r '.scope // empty' "$f")" = named ]; then rm -f "$f"; fi
 done
+as -- "$scripts/migrate-workers.sh" --apply
+check "and once that role is gone, stamps the instance herdr shows in the record's pane" eval '[ "$status" -eq 0 ] &&
+  contains "agy-named: stamped with agy instance conv-w9:p81" && [ "$(jq -r .agyInstance "$named")" = conv-w9:p81 ]'
+# An agy instance herdr cannot show is no answer: a claim from a pane herdr says nothing about refuses, to be retried.
+lookup_failed=(ANDERTON_AGY_SESSION=agy-unknown-1 ANDERTON_AGY_NAME=agy-unknown "ANDERTON_AGY_DIR=$repo" "ANDERTON_AGY_PID=$$" "${herdr_env[@]}" HERDR_PANE_ID=w9:p83)
+as "${lookup_failed[@]}" -- "$scripts/claim.sh" --project unknown
+check "while a worker record names an agy instance, a claim herdr cannot place refuses, to be retried" eval '[ "$status" -eq 4 ] &&
+  contains "cannot be told now" && [ -z "$(jq -r "select(.scope == \"unknown\") | .scope" "$CLAUDE_CONFIG_DIR"/anderton/*.json)" ]'
+rm -f "$named"
 
 # A named project's Anderton on agy is the same claim, scoped.
 agent_in w9:p78 agy

@@ -36,7 +36,10 @@ when another live session holds that role. Both runtimes use the same registry
 and lock. If Claude Code uses `CLAUDE_CONFIG_DIR`, pass that same directory when
 opening Codex. A Codex claim follows its exact thread UUID through daemon restarts.
 On refusal, stop and tell the user which session holds the role. Do not take it over
-unless the user says so. A prose rule is not a lock.
+unless the user says so. A prose rule is not a lock. Exit 4 means it could not tell
+whether this session is a worker: retry once the lookup it names answers, or, for a
+worker record from before session identities, run `scripts/migrate-workers.sh`, read
+what it would change, and run it with `--apply`.
 
 When the user invokes you for one project in the repository, or names one, claim with
 `scripts/claim.sh --project <name>` instead. A project's Anderton starts and reviews that
@@ -214,9 +217,8 @@ If either end is Codex, tell it to use the four kinds below at the start of its
 final replies. Use `scripts/worker.sh message <name> "<instruction>"` for the
 direction and `status` or `output` to inspect it. A Claude worker must load the
 Anderton plugin and end a turn before a Codex Anderton can steer it through its
-Stop hook. A legacy Codex-launched Claude worker can register on Stop when its
-original pane and launch brief verify its identity. Direct an unbound worker in
-its own pane or retire it and start a fresh worker. Keep using the worker name
+Stop hook. Direct an unbound worker in its own pane or retire it and start a fresh
+worker. Keep using the worker name
 recorded at launch or adoption after it changes its Claude display name.
 `scripts/retire.sh <name>` releases it and leaves it running. For an adopted
 Codex session, wait until its Anderton directions have finished.
@@ -249,9 +251,11 @@ After starting a worker:
 - Retire every worker `scripts/waiting.sh` lists under **Ready to retire**, and one
   whose work you dropped, with `scripts/retire.sh <name>`. A line that says `idle`
   found no finished work: ask the worker or check its PR first, and retire it once
-  its work is merged or dropped. It stops the session and
-  removes the worktree, unless the worktree holds work no remote has: a line that
-  names such work is yours to push or discard first.
+  its work is merged or dropped. It stops the session by closing only the worker's
+  own pane, while that pane still shows its session, and removes the worktree,
+  unless the worktree holds work no remote has: a line that names such work is
+  yours to push or discard first. When it refuses because the pane shows something
+  else, ask the user to close it once nothing in it needs keeping, then rerun it.
 - `retire.sh` exits 4 and closes nothing when the worker's conversation has a message
   since its last report to you from anyone but you: the user typing in its tab, a voice
   relay, another session. It lists each one's time and first line. Read them: if one asks
