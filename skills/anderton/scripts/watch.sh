@@ -143,42 +143,12 @@ watch_claude_worker() {
   return 0
 }
 
-# tell_displaced: the one-line notice claim.sh --take-over left for this session, told once: to Claude as this hook's
-# wake, to Codex queued on its thread, to agy prompted into its pane once it is idle.
-tell_displaced() {
-  local notice="$holders/displaced/$runtime-$sid" claim staged status
-  [ -f "$notice" ] || return 0
-  case $runtime in
-    claude)
-      cat "$notice" >&2
-      rm -f "$notice"
-      exit 2
-      ;;
-    agy)
-      claim=$(mktemp "$holders/.displaced.XXXXXX") || return 0
-      printf '%s' "$claim_json" > "$claim"
-      record=$claim
-      for _ in 1 2 3 4 5 6 7 8 9 10; do
-        if agy_deliver "$(cat "$notice")"; then
-          rm -f "$notice"
-          break
-        fi
-        sleep "${tick:-30}"
-      done
-      rm -f "$claim"
-      ;;
-    codex)
-      claim=$(mktemp "$holders/.displaced.XXXXXX") || return 0
-      staged=$(mktemp -d "$holders/.displaced.XXXXXX") || { rm -f "$claim"; return 0; }
-      printf '%s' "$claim_json" > "$claim"
-      cp "$notice" "$staged/message"
-      status=0
-      "$anderton_scripts/codex-worker.py" notice "$claim" "$staged" >/dev/null 2>&1 || status=$?
-      # A notice is queued on the thread on its first try (3); confirming it would need this watch to stay.
-      if [ "$status" = 0 ] || [ "$status" = 3 ]; then rm -f "$notice"; fi
-      rm -rf "$claim" "$staged"
-      ;;
-  esac
+# tell_taken_over: a Claude session that no longer holds a role hears, once, of a take-over claim.sh logged from it.
+tell_taken_over() {
+  local text
+  [ "$runtime" = claude ] || return 0
+  text=$(taken_over_notice claude "$sid")
+  [ -z "$text" ] || { printf '%s\n' "$text" >&2; exit 2; }
 }
 
 runtime=claude
@@ -260,7 +230,7 @@ EOF
   fi
   emit_turn idle "$sid" "$cwd" >/dev/null 2>&1
   if [ -z "$record" ]; then
-    tell_displaced
+    tell_taken_over
     watch_claude_worker
     exit $?
   fi
@@ -271,12 +241,6 @@ still_holds_role() {
     codex) caller_matches_claim "$record" ;;
     *) is_holder "$reg" "$record" ;;
   esac
-}
-claim_json=$(cat "$record" 2>/dev/null)
-# The role was lost: a take-over's notice, if claim.sh left one for this session, is told once.
-lost_role() {
-  tell_displaced
-  exit 0
 }
 # agy_deliver <text>: prompts the agy holder's pane with <text>, only while herdr shows that agy there, idle.
 agy_deliver() {
@@ -313,6 +277,11 @@ orphaned() { # orphaned <pid> <the parent it started under>
   [ "$2" != 0 ] || return 1
   now=$(ps -o ppid= -p "$1" 2>/dev/null)
   [ -n "$now" ] && [ "$now" -ne "$2" ]
+}
+# The role was lost; a watch whose Claude Code process is gone would tell no one.
+lost_role() {
+  orphaned "$$" "$parent_pid" || tell_taken_over
+  exit 0
 }
 same_script() { # same_script <command line>: true when it runs this watch.sh, from this install of the plugin
   case $0 in /*) ;; *) return 0 ;; esac
