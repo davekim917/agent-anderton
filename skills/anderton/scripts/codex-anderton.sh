@@ -3,6 +3,7 @@
 set -euo pipefail
 # shellcheck source=SCRIPTDIR/session-lib.sh
 . "$(dirname "$0")/session-lib.sh"
+require_tools codex-anderton.sh
 
 base_home=$(invoking_codex_home)
 resume=()

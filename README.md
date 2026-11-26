@@ -97,7 +97,8 @@ Anderton, not you. It answers what it can, brings you the decisions that are you
 PR, and deploys what passes.
 
 **Requirements:** Claude Code with `claude agents`, built and
-tested on 2.1.312, and support for `--session-id`; `git`, `jq`, `gh`, and `uuidgen` or Python 3;
+tested on 2.1.312, and support for `--session-id`; `git`, `jq`, `gh`, and Python 3 (`python3`, which reads reports for the
+send hook, the sweeps and retirement; `claim.sh`, `spawn.sh` and the launchers refuse to start without it);
 and herdr or tmux. It runs on Linux and on macOS,
 including macOS's stock bash 3.2.
 

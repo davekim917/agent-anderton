@@ -526,13 +526,21 @@ check "its record keeps the full root" [ "$(jq -r .root "$(holder_path "$long")"
 # Without git, worktrees of one repository would be separate projects: refuse instead.
 nogit="$work/nogit"
 mkdir "$nogit"
-for t in jq ps tr dirname; do ln -s "$(command -v "$t")" "$nogit/$t"; done
+for t in jq ps tr dirname python3; do ln -s "$(command -v "$t")" "$nogit/$t"; done
 set +e
 out=$(env PATH="$nogit" "$BASH" "$scripts/waiting.sh" 2>&1)
 status=$?
 set -e
 check "refuses to run without git" [ "$status" -eq 1 ]
 check "says git is missing" contains "needs: git."
+nopython="$work/nopython"
+mkdir "$nopython"
+for t in jq ps tr dirname git; do ln -s "$(command -v "$t")" "$nopython/$t"; done
+set +e
+out=$(env PATH="$nopython" "$BASH" "$scripts/claim.sh" 2>&1)
+status=$?
+set -e
+check "claim.sh refuses to run without python3, which reads every report" eval '[ "$status" -eq 1 ] && contains "needs: python3."'
 
 # spawn.sh and retire.sh: a worker in its own worktree beside the repository.
 spawn; p_lead=$pid; session "$p_lead" lead-1 "$alpha" lead-session
