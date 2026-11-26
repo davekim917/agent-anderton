@@ -834,6 +834,14 @@ class WorkerTest(unittest.TestCase):
         self.client.items["follow-up"][-1] = message("RESULT: retry check added in the second PR")
         self.assertEqual((0, []), self.inbound())
 
+    def test_a_question_block_or_answer_after_a_typed_turn_leaves_it_held(self):
+        for kind in ("QUESTION", "ANSWER", "BLOCKED"):
+            with self.subTest(kind=kind):
+                self.reported_launch()
+                self.typed_turn("follow-up", "Also add the retry check.", 1795000000250)
+                self.client.items["follow-up"][-1] = message(f"{kind}: the retry check or a second PR?")
+                self.assertEqual(4, self.inbound()[0])
+
     def test_the_andertons_directions_after_the_last_report_do_not_hold_it_after_they_are_pruned(self):
         self.reported_launch()
         self.record.write_text(json.dumps(self.worker))

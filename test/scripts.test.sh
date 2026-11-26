@@ -886,6 +886,21 @@ check "a delivered send to the Anderton that opens with no kind is no report, so
   eval '[ "$status" -eq 4 ] && contains "the user: Hold the merge until I check the export."'
 hc_retire hc-peer --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+# Only a RESULT: says the work is done: a question, a block or an answer, from anyone, leaves the hold in place.
+for kind in QUESTION ANSWER BLOCKED; do
+  hc_name="hc-not-done-$(printf '%s' "$kind" | tr '[:upper:]' '[:lower:]')"
+  hc_spawn "$hc_name"
+  hc_report
+  hc_typed "Hold the merge until I check the export."
+  hc_add "$(jq -nc --arg m "$kind: the export is next" '{type: "assistant", message: {content: [{type: "tool_use", id: "send-not-done",
+    name: "SendMessage", input: {to: "lead-session", message: $m}}]}}')"
+  hc_add '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send-not-done","content":[{"type":"text","text":"{\"success\":true,\"message\":\"sent\"}"}]}]}}'
+  hc_retire "$hc_name"
+  check "a delivered $kind: is no completion, so the typed message still holds the retirement" \
+    eval '[ "$status" -eq 4 ] && contains "the user: Hold the merge until I check the export."'
+  hc_retire "$hc_name" --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+done
+
 hc_spawn hc-resumed
 hc_typed "Use the staging bucket."
 hc_report

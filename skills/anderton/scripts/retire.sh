@@ -3,11 +3,11 @@
 # keeps running and stops reporting to its Anderton. A worktree with uncommitted work, or
 # commits since it started that no remote branch has, is kept and the worker stays recorded: push or discard
 # that work, then rerun.
-# Before closing anything it reads the worker's conversation: a message there since its last report to its Anderton, from
+# Before closing anything it reads the worker's conversation: a message there since its last RESULT: to its Anderton, from
 # anyone but that Anderton (the user in its tab, a voice relay, another session), holds the retirement, and so does a
 # conversation it cannot read. The hold is written beside the record for waiting.sh to list until it is cleared.
 # usage: retire.sh <name> [--reviewed-through <ISO time>]   Exit 0: retired. Exit 3: stopped, worktree kept.
-# Exit 4: held for messages since the last report; --reviewed-through clears those up to that time.
+# Exit 4: held for messages since the last RESULT:; --reviewed-through clears those up to that time.
 # Portable to macOS's bash 3.2 and BSD userland.
 set -euo pipefail
 # shellcheck source=SCRIPTDIR/session-lib.sh
@@ -118,7 +118,7 @@ conversation_gate() {
   rm -f "$errors"
   case $status in
     0) rm -f "$hold_file" ;;
-    4) hold "it has messages since its last report to its Anderton, from someone other than that Anderton:" "$(printf '%s' "$found" | jq -c '.messages')" ;;
+    4) hold "it has messages since its last RESULT: to its Anderton, from someone other than that Anderton:" "$(printf '%s' "$found" | jq -c '.messages')" ;;
     *)
       [ -n "$reviewed" ] || hold "its conversation could not be read (${error:-no reason given}), so nothing shows it has no messages since its last report." "[]" "Read its conversation yourself"
       if [ -z "$unread_noted" ]; then

@@ -261,7 +261,7 @@ After starting a worker:
   removes the worktree, unless the worktree holds work no remote has: a line that
   names such work is yours to push or discard first.
 - `retire.sh` exits 4 and closes nothing when the worker's conversation has a message
-  since its last report to you from anyone but you: the user typing in its tab, a voice
+  since its last `RESULT:` to you from anyone but you: the user typing in its tab, a voice
   relay, another session. It lists each one's time and first line. Read them: if one asks
   for work still open, the worker is not done. Once nothing in them is open, run
   `scripts/retire.sh <name> --reviewed-through <time>` with the last time it listed.

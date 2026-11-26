@@ -525,10 +525,10 @@ worktree when the worktree has uncommitted changes, or commits since it started 
 branch has. Untracked files count whatever `status.showUntrackedFiles` says, and a worktree git
 cannot read or compare with its base is kept too. Gitignored files don't count as changes.
 
-Before it closes anything, `retire.sh` reads the worker's conversation since its last report to its
-Anderton: a delivered `SendMessage` report, or for a Codex Anderton reading a Claude worker's transcript, a
-final reply that is one; for a Codex worker, a completed turn whose final message is one. A report opens with a
-kind, so any other send to the Anderton never clears a hold. A message after it
+Before it closes anything, `retire.sh` reads the worker's conversation since its last completion report (`RESULT:`) to
+its Anderton: a delivered `SendMessage` one, or for a Codex Anderton reading a Claude worker's transcript, a
+final reply that is one; for a Codex worker, a completed turn whose final message is one. A question, a block, an
+answer or any other send never clears a hold, from anyone: a worker that just asked is not done. A message after it
 from anyone but that Anderton (typed in the worker's tab, a voice relay, another session, a Codex TUI turn)
 holds the retirement: it exits 4, lists each message's time and first line, and writes `<name>.held` beside the
 record, which `waiting.sh` (and so the watch) lists until the worker is retired. The Anderton's own messages are
