@@ -250,14 +250,15 @@ claim_id=${claim_id:-$(new_claim_id)} || { echo "Could not make a claim id." >&2
 displaced="" dprovider="" dsid="" dname=""
 if [ -n "$record" ] && [ -n "$force" ] && [ -z "$same_holder" ]; then
   displaced=1
-  dprovider=$(record_provider "$record")
+  dprovider=$(record_provider "$record" || true)
+  dprovider=${dprovider:-unknown}
   dsid=$(jq -r '.sessionId // empty' "$record" 2>/dev/null || true)
   dname=$(jq -r '.name // empty' "$record" 2>/dev/null || true)
   dfrom=$(jq -c --arg provider "$dprovider" '{provider: $provider, sessionId, pid, name, claimId} | with_entries(select(.value != null))' \
     "$record" 2>/dev/null) || dfrom="{\"provider\":\"$dprovider\"}"
   taker_name=$name
   if [ "$provider" = claude ]; then taker_name=$(jq -r '.name // empty' "$sessions/$pid.json" 2>/dev/null || true); fi
-  hand_back="claim.sh${scope:+ --project $(printf '%q' "$scope")} --take-over"
+  hand_back="$(printf '%q' "$anderton_scripts/claim.sh")${scope:+ --project $(printf '%q' "$scope")} --take-over"
 fi
 jq -nc --arg root "$root" --arg scope "$scope" --arg pid "$pid" --arg started "$started" --arg sid "$sid" \
   --arg provider "$provider" --arg codex_home "$codex_home" --arg codex_dir "$codex_dir" --arg name "$name" \
@@ -285,7 +286,7 @@ if [ -n "$displaced" ]; then
     >> "$holders/takeovers.log" 2>/dev/null; then
     logged=1
   else
-    echo "Warning: could not log the take-over in $holders/takeovers.log." >&2
+    echo "Warning: could not log the take-over in $holders/takeovers.log." >&2 || true
   fi
 fi
 # The machine-wide file now speaks for no project, so nothing reads a stale holder from it.
@@ -309,7 +310,7 @@ else
   echo "$role claimed by session $sid (pid $pid)."
 fi
 if [ -n "$displaced" ]; then
-  echo "Took it over from $dprovider session ${dsid:-unknown}${dname:+ ($dname)}.${logged:+ Logged it in $holders/takeovers.log.} To hand it back, that session runs $hand_back once the user says so."
+  echo "Took it over from $dprovider session ${dsid:-unknown}${dname:+ ($dname)}.${logged:+ Logged it in $holders/takeovers.log.} To hand it back, that session runs $hand_back once the user says so." || true
 fi
 if [ -n "$probe_set" ] && [ -n "$probe" ]; then
   echo "Probe set: the watch runs it every ${every:-60} seconds and wakes you when it prints."

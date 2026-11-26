@@ -2015,7 +2015,7 @@ watch_start wh-2
 export ANDERTON_WATCH_TICK=0.05
 out=$(cd "$watched" && env CLAUDE_PID="$p_wa" CLAUDE_CODE_SESSION_ID=wa-1 "$scripts/claim.sh" --take-over 2>&1)
 check "a take-over of another holder says whom it took the role from and how to hand it back" \
-  eval 'contains "Took it over from claude session wh-2" && contains "that session runs claim.sh --take-over"'
+  eval 'contains "Took it over from claude session wh-2" && contains "that session runs $scripts/claim.sh --take-over"'
 check "and logs it" eval 'contains "Logged it in" &&
   jq -e "select(.from.sessionId == \"wh-2\" and .to.sessionId == \"wa-1\")" "$CLAUDE_CONFIG_DIR/anderton/takeovers.log" >/dev/null'
 spawn; p_tw=$pid; session "$p_tw" tw-1 "$watched" taker-worker "$(date +%s)000"
@@ -2053,6 +2053,14 @@ chmod u+w "$CLAUDE_CONFIG_DIR/anderton/takeovers.log"
 check "a take-over the log cannot record is still made, with a warning and no word of logging it" \
   eval '[ "$status" -eq 0 ] && contains "claimed by session qa-3" && contains "could not log the take-over" &&
     ! printf "%s" "$out" | grep -qi "logged it"'
+qa_claim="$CLAUDE_CONFIG_DIR/anderton/$(jq -r 'select(.to.sessionId == "qa-2") | .key' "$CLAUDE_CONFIG_DIR/anderton/takeovers.log").json"
+printf '{' > "$qa_claim"
+set +e
+out=$(cd "$qa" && env CLAUDE_PID="$p_qa2" CLAUDE_CODE_SESSION_ID=qa-2 "$scripts/claim.sh" --project 'Release QA' --take-over 2>&1)
+status=$?
+set -e
+check "a take-over of a claim it cannot read is made, from an unknown holder" \
+  eval '[ "$status" -eq 0 ] && contains "claimed by session qa-2" && contains "Took it over from unknown session"'
 
 # A holder from an earlier version has its record in the machine-wide file and may have no anderton directory.
 export ANDERTON_WATCH_TICK=0.05

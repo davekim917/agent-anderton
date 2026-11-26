@@ -291,8 +291,10 @@ taker_agy=$agy_pid taker_jobs=$agy_jobs
 in_agy "$taker_jobs" ANTIGRAVITY_CONVERSATION_ID=conv-taker ANDERTON_AGY_NAME=agy-taker "${herdr_env[@]}" HERDR_PANE_ID=w9:p82 -- "$scripts/claim.sh" --take-over
 check "an agy take-over of a live holder says how to hand it back" eval '[ "$status" -eq 0 ] && contains "Took it over from agy session agy-$other_agy-" &&
   contains "claim.sh --take-over"'
-in_agy "$other_jobs" "${other[@]}" -- "$scripts/claim.sh" --take-over
-check "and it takes the role back the way it was told" eval '[ "$status" -eq 0 ] && contains "Took it over from agy session agy-$taker_agy-"'
+hand_back=$(printf '%s\n' "$out" | sed -n 's/.*To hand it back, that session runs \(.*\) once the user says so\.$/\1/p')
+in_agy "$other_jobs" "${other[@]}" -- bash -c "$hand_back"
+check "and it takes the role back by running the command it was given" eval '[ -n "$hand_back" ] && [ "$status" -eq 0 ] &&
+  contains "Took it over from agy session agy-$taker_agy-"'
 
 # Opened below the top of a linked worktree, agy runs at the top of that checkout, guarded and trusted for it.
 git -C "$repo" worktree add -q "$tmp/linked"
