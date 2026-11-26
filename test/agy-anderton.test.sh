@@ -95,7 +95,7 @@ as() { # as <env...> -- <command...>: sets $out and $status
   while [ "$1" != -- ]; do envs+=("$1"); shift; done
   shift
   set +e
-  out=$(env "${envs[@]}" "$@" 2>&1)
+  out=$(env ${envs[@]+"${envs[@]}"} "$@" 2>&1)
   status=$?
   set -e
 }
