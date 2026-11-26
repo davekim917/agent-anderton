@@ -110,6 +110,14 @@ plan_claude() {
     live=$reg
   done
   if [ "$count" -eq 0 ]; then
+    # A worker whose registry entry names another directory can still run in its pane: only a pane that is gone, or
+    # shows no Claude session, leaves nothing to stamp.
+    now=$(claude_pane "$r")
+    case $now in
+      gone | other) ;;
+      unknown) plan=leave why="no live session in $dir, and its pane cannot be read to show it is gone"; return ;;
+      *) plan=leave why="no live session in $dir, but its pane $(jq -r '.pane // empty' "$r") still shows one ($now)"; return ;;
+    esac
     if [ -n "$brief_id" ]; then
       transcript=$(printf '%s' "$brief" | jq -r .transcript)
       plan=mark why="no live session in $dir; its launch transcript, session $brief_id, is $transcript$(work_note "$r")"

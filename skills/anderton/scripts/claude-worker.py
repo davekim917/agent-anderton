@@ -494,9 +494,6 @@ def main():
     route.add_argument("record", type=Path)
     route.add_argument("claim", type=Path)
     # migrate-workers.sh's evidence for a record from before session ids, which nothing else reads.
-    legacy = commands.add_parser("legacy-launch-matches")
-    legacy.add_argument("record", type=Path)
-    legacy.add_argument("transcript", type=Path)
     launched = commands.add_parser("legacy-launch-transcript")
     launched.add_argument("record", type=Path)
     launched.add_argument("--home", type=Path, required=True)
@@ -528,9 +525,6 @@ def main():
         claim = json.loads(args.claim.read_text())
         record_native_route(worker, claim, args.claim.parent / "reports/routes", json.load(sys.stdin))
         return 0
-    if args.command == "legacy-launch-matches":
-        worker["claudeSession"] = {"id": args.transcript.stem, "transcript": str(args.transcript)}
-        return 0 if legacy_launch_matches(worker) else 3
     if args.command == "legacy-launch-transcript":
         found = legacy_worker_transcript(worker, args.home, instant(worker["startedAt"]))
         if not found:

@@ -3,7 +3,7 @@ set -euo pipefail
 
 if [ "$#" -eq 0 ]; then
   for scenario in clear codex-route claude-route renamed-owner fallback-route prefix rename-steer rename-adopt upgrade resume-clear \
-    adopted-restart; do
+    adopted-restart dead-legacy; do
     "$BASH" "$0" "$scenario"
   done
   exit 0
@@ -306,6 +306,42 @@ case "$1" in
     env CLAUDE_PID="$target" CLAUDE_CODE_SESSION_ID=adopted-cleared "$scripts/claim.sh" --project adopted > "$work/claim" 2>&1 || code=$?
     if [ "$code" -ne 3 ] || ! grep -q "managed as worker 'handmade'" "$work/claim"; then
       echo "An adopted worker escaped its record after /restart and /clear"
+      exit 1
+    fi
+    ;;
+  dead-legacy)
+    # A record from before launch ids whose worker has gone: once migrate-workers.sh marks it as naming no session, it
+    # no longer holds the repository's claims back, and a second run leaves it as it is.
+    codex_claim; write_worker
+    jq 'del(.claudeLaunchId)' "$worker" > "$work/legacy"
+    mv "$work/legacy" "$worker"
+    child; caller=$pid
+    register "$caller" caller-id caller "$root"
+    code=0
+    env CLAUDE_PID="$caller" CLAUDE_CODE_SESSION_ID=caller-id "$scripts/claim.sh" --project after-migration > "$work/claim" 2>&1 || code=$?
+    if [ "$code" -ne 4 ]; then echo "An unmigrated record did not hold the claim back"; exit 1; fi
+    # Its pane still runs a process: no session in its checkout is not enough to mark it.
+    cp "$worker" "$work/before"
+    code=0
+    env FIXTURE_PANE_PID="$caller" "$scripts/migrate-workers.sh" --apply > "$work/migrate" 2>&1 || code=$?
+    if [ "$code" -ne 1 ] || ! grep -qF "original: left for a person: no live session in $dir, but its pane %5 still shows one" "$work/migrate" ||
+      ! cmp -s "$worker" "$work/before"; then
+      echo "A record whose pane still runs something was marked"
+      exit 1
+    fi
+    # Its pane is gone too: it is marked, and claims proceed.
+    "$scripts/migrate-workers.sh" --apply > "$work/migrate"
+    if ! grep -qF "original: marked as naming no session: no live session in $dir" "$work/migrate" ||
+      ! jq -e '.migration.result == "names no session" and .claudeSession == null' "$worker" >/dev/null; then
+      echo "The dead record was not marked"
+      exit 1
+    fi
+    env CLAUDE_PID="$caller" CLAUDE_CODE_SESSION_ID=caller-id "$scripts/claim.sh" --project after-migration > "$work/claim"
+    grep -q 'project after-migration claimed' "$work/claim"
+    cp "$worker" "$work/marked"
+    "$scripts/migrate-workers.sh" --apply > "$work/migrate"
+    if ! grep -q '^original: identified: settled by an earlier run' "$work/migrate" || ! cmp -s "$worker" "$work/marked"; then
+      echo "A second run changed the marked record"
       exit 1
     fi
     ;;
