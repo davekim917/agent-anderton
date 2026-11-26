@@ -884,6 +884,18 @@ check "a delivered send to the Anderton that opens with no kind is no report, so
   eval '[ "$status" -eq 4 ] && contains "the user: Hold the merge until I check the export."'
 hc_retire hc-peer --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+hc_spawn hc-peer-question
+hc_report
+hc_typed "Hold the merge until I check the export."
+hc_add '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"send-peer-question","name":"SendMessage","input":{"to":"lead-session","message":"QUESTION: does the host backup include transcripts?"}}]}}'
+hc_add '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send-peer-question","content":[{"type":"text","text":"{\"success\":true,\"message\":\"sent\"}"}]}]}}'
+mkdir -p "$CLAUDE_CONFIG_DIR/anderton/reports/peer-sends"
+: > "$CLAUDE_CONFIG_DIR/anderton/reports/peer-sends/send-peer-question"
+hc_retire hc-peer-question
+check "a delivered QUESTION the send hook recorded as a role holder's is no report, so the typed message still holds it" \
+  eval '[ "$status" -eq 4 ] && contains "the user: Hold the merge until I check the export."'
+hc_retire hc-peer-question --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 hc_spawn hc-resumed
 hc_typed "Use the staging bucket."
 hc_report
@@ -1546,6 +1558,7 @@ spawn; p_ew=$pid; session "$p_ew" eew-1 "$epsilon" eps-worker
 jq -nc --arg d "$epsilon" '{name: "eps-worker", dir: $d, spawner: "epsilon-fleet-a"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/eps-worker.json"
 send eew-1 "$epsilon" epsilon-fleet-a '"RESULT: export fixed, PR https://example.invalid/pr/2"'
 check "a worker reports to the scope's holder that started it" [ "$status" -eq 0 ]
+check "and a worker's report is recorded as no peer's" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/reports/peer-sends/$call" ]
 send eew-1 "$epsilon" epsilon-host '"RESULT: export fixed, PR https://example.invalid/pr/2"'
 check "and the same report to the project's holder is not a repeat" [ "$status" -eq 0 ]
 send eew-1 "$epsilon" epsilon-host '"RESULT: export fixed, PR https://example.invalid/pr/2"'
@@ -1580,6 +1593,9 @@ check "the project's holder recorded as a worker is still never held" [ "$status
 jq -nc --arg d "$epsilon" '{name: "epsilon-fleet-a", dir: $d, spawner: "epsilon-host"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
 send eea-1 "$epsilon" epsilon-host '"Deploy the dashboard fix, merged as https://example.invalid/pr/8"'
 check "a scope's holder recorded as the project's holder's worker needs no kind to write to it" [ "$status" -eq 0 ]
+check "and its send is recorded as a peer's, so no scan counts it as that worker's report" [ -f "$CLAUDE_CONFIG_DIR/anderton/reports/peer-sends/$call" ]
+send eea-1 "$epsilon" epsilon-host '"QUESTION: does the host backup include transcripts?"'
+check "a QUESTION it sends there too" eval '[ "$status" -eq 0 ] && [ -f "$CLAUDE_CONFIG_DIR/anderton/reports/peer-sends/$call" ]'
 jq -nc --arg d "$epsilon" '{name: "epsilon-fleet-a", dir: $d, spawner: "epsilon-other", spawnerSession: "eeo-1"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/epsilon-fleet-a.json"
 send eea-1 "$epsilon" epsilon-other '"QUESTION: keep the export schedule? I recommend yes."'
 check "reporting to the session that started it, it has a worker's kinds" [ "$status" -eq 0 ]
