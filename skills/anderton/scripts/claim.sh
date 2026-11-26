@@ -286,7 +286,10 @@ if [ -n "$displaced" ]; then
     >> "$holders/takeovers.log" 2>/dev/null; then
     logged=1
   else
+    # A reader that has gone makes the write fail rather than end the script: the take-over is made.
+    trap '' PIPE
     echo "Warning: could not log the take-over in $holders/takeovers.log." >&2 || true
+    trap - PIPE
   fi
 fi
 # The machine-wide file now speaks for no project, so nothing reads a stale holder from it.
@@ -310,7 +313,9 @@ else
   echo "$role claimed by session $sid (pid $pid)."
 fi
 if [ -n "$displaced" ]; then
+  trap '' PIPE
   echo "Took it over from $dprovider session ${dsid:-unknown}${dname:+ ($dname)}.${logged:+ Logged it in $holders/takeovers.log.} To hand it back, that session runs $hand_back once the user says so." || true
+  trap - PIPE
 fi
 if [ -n "$probe_set" ] && [ -n "$probe" ]; then
   echo "Probe set: the watch runs it every ${every:-60} seconds and wakes you when it prints."
