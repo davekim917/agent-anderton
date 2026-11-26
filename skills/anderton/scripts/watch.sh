@@ -143,14 +143,6 @@ watch_claude_worker() {
   return 0
 }
 
-# tell_taken_over: a Claude session that no longer holds a role hears, once, of a take-over claim.sh logged from it.
-tell_taken_over() {
-  local text
-  [ "$runtime" = claude ] || return 0
-  text=$(taken_over_notice claude "$sid")
-  [ -z "$text" ] || { printf '%s\n' "$text" >&2; exit 2; }
-}
-
 runtime=claude
 if [ "${1:-}" = --codex ]; then
   runtime=codex
@@ -230,7 +222,6 @@ EOF
   fi
   emit_turn idle "$sid" "$cwd" >/dev/null 2>&1
   if [ -z "$record" ]; then
-    tell_taken_over
     watch_claude_worker
     exit $?
   fi
@@ -278,18 +269,13 @@ orphaned() { # orphaned <pid> <the parent it started under>
   now=$(ps -o ppid= -p "$1" 2>/dev/null)
   [ -n "$now" ] && [ "$now" -ne "$2" ]
 }
-# The role was lost; a watch whose Claude Code process is gone would tell no one.
-lost_role() {
-  orphaned "$$" "$parent_pid" || tell_taken_over
-  exit 0
-}
 same_script() { # same_script <command line>: true when it runs this watch.sh, from this install of the plugin
   case $0 in /*) ;; *) return 0 ;; esac
   case " $1 " in *" $0 "*) return 0 ;; esac
   return 1
 }
 until take_watch; do
-  still_holds_role || lost_role
+  still_holds_role || exit 0
   other=""; owner=""; parent=""
   other_start=""
   { read -r other owner parent other_start < "$watcher"; } 2>/dev/null
@@ -647,7 +633,6 @@ while still_holds_role; do
       # A run can take minutes: what it found is this holder's to hear only if the role and the watch are still its.
       if ! still_holds_role || [ "$(watch_owner)" != "$$" ] || orphaned "$$" "$parent_pid"; then
         rm -rf "$probe_run"
-        still_holds_role || lost_role
         exit 0
       fi
       # And only if it is still the role's probe: a run of the one just replaced or removed tells nothing.
@@ -703,4 +688,4 @@ while still_holds_role; do
   fi
   sleep "$tick"
 done
-lost_role
+exit 0

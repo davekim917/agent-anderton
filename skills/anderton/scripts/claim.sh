@@ -199,7 +199,6 @@ if [ -n "$record" ] && [ -z "$force" ] && ! caller_matches_claim "$record"; then
       echo "$role is held by $(record_provider "$record") session ${hsid:-unknown} (${hname:-unknown}, liveness: $health)."
     fi
     echo "Rerun with --take-over only if the user says so."
-    taken_over_notice "$provider" "$sid"
     exit 3
   fi
 fi
@@ -245,29 +244,20 @@ if [ -n "$same_holder" ]; then
   claim_id=$(jq -r '.claimId // empty' "$record" 2>/dev/null || true)
 fi
 claim_id=${claim_id:-$(new_claim_id)} || { echo "Could not make a claim id." >&2; exit 1; }
-# A take-over from another holder, whether or not it still runs, is logged, so a mistaken one is seen and handed back:
-# the displaced session hears of it from the log (taken_over_notice).
+# A take-over from another holder, whether or not it still runs, is logged once the claim has changed, so a mistaken
+# one is seen and handed back. The displaced holder is the one the claim names: by now the registry may give its pid
+# to another session.
 displaced="" dprovider="" dsid="" dname=""
 if [ -n "$record" ] && [ -n "$force" ] && [ -z "$same_holder" ]; then
   displaced=1
   dprovider=$(record_provider "$record")
-  if [ "$dprovider" = claude ]; then
-    dsid=$(jq -r '.sessionId // empty' "$sessions/$(jq -r '.pid // empty' "$record").json" 2>/dev/null || true)
-  fi
-  dsid=${dsid:-$(jq -r '.sessionId // empty' "$record")}
-  dname=$(claim_name "$record")
+  dsid=$(jq -r '.sessionId // empty' "$record" 2>/dev/null || true)
+  dname=$(jq -r '.name // empty' "$record" 2>/dev/null || true)
+  dfrom=$(jq -c --arg provider "$dprovider" '{provider: $provider, sessionId, pid, name, claimId} | with_entries(select(.value != null))' \
+    "$record" 2>/dev/null) || dfrom="{\"provider\":\"$dprovider\"}"
   taker_name=$name
   if [ "$provider" = claude ]; then taker_name=$(jq -r '.name // empty' "$sessions/$pid.json" 2>/dev/null || true); fi
   hand_back="claim.sh${scope:+ --project $(printf '%q' "$scope")} --take-over"
-  # Before the claim changes, so a watch that sees the change finds the line; a line it cannot write is a warning.
-  jq -nc --arg id "$(new_claim_id || true)" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg key "$(basename "$state" .json)" \
-    --arg role "$role" --arg hand_back "$hand_back" --arg dprovider "$dprovider" --arg dsid "$dsid" --arg dname "$dname" \
-    --arg dclaim "$(jq -r '.claimId // empty' "$record" 2>/dev/null || true)" --arg provider "$provider" --arg sid "$sid" \
-    --arg name "$taker_name" --arg claim_id "$claim_id" \
-    '{id: $id, at: $at, key: $key, role: $role, handBack: $hand_back,
-      from: {provider: $dprovider, sessionId: $dsid, name: $dname, claimId: $dclaim},
-      to: {provider: $provider, sessionId: $sid, name: $name, claimId: $claim_id}}' >> "$holders/takeovers.log" ||
-    echo "Warning: could not log the take-over in $holders/takeovers.log." >&2
 fi
 jq -nc --arg root "$root" --arg scope "$scope" --arg pid "$pid" --arg started "$started" --arg sid "$sid" \
   --arg provider "$provider" --arg codex_home "$codex_home" --arg codex_dir "$codex_dir" --arg name "$name" \
@@ -286,6 +276,18 @@ jq -nc --arg root "$root" --arg scope "$scope" --arg pid "$pid" --arg started "$
    + (if $probe == null then {} else {probe: $probe} end)
    + (if $peer == null then {} else {peerMessage: $peer} end)' > "$state.tmp"
 mv "$state.tmp" "$state"
+logged=""
+if [ -n "$displaced" ]; then
+  if jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg key "$(basename "$state" .json)" --arg role "$role" \
+    --argjson from "$dfrom" --arg provider "$provider" --arg sid "$sid" --arg name "$taker_name" --arg claim_id "$claim_id" \
+    '{at: $at, key: $key, role: $role, from: $from,
+      to: ({provider: $provider, sessionId: $sid, name: $name, claimId: $claim_id} | with_entries(select(.value != "")))}' \
+    >> "$holders/takeovers.log" 2>/dev/null; then
+    logged=1
+  else
+    echo "Warning: could not log the take-over in $holders/takeovers.log." >&2
+  fi
+fi
 # The machine-wide file now speaks for no project, so nothing reads a stale holder from it.
 if [ "$record" = "$legacy_holder" ]; then mv "$legacy_holder" "$legacy_holder.migrated"; fi
 # A rebind runs on every turn's end; only a claim starts the role's thread on the host.
@@ -307,9 +309,8 @@ else
   echo "$role claimed by session $sid (pid $pid)."
 fi
 if [ -n "$displaced" ]; then
-  echo "Took it over from $dprovider session $dsid${dname:+ ($dname)}, and logged it in $holders/takeovers.log. That session hears of it at its next turn end (Claude Code) or claim. To hand it back, it runs $hand_back once the user says so."
+  echo "Took it over from $dprovider session ${dsid:-unknown}${dname:+ ($dname)}.${logged:+ Logged it in $holders/takeovers.log.} To hand it back, that session runs $hand_back once the user says so."
 fi
-if [ -z "$rebind" ]; then taken_over_notice "$provider" "$sid"; fi
 if [ -n "$probe_set" ] && [ -n "$probe" ]; then
   echo "Probe set: the watch runs it every ${every:-60} seconds and wakes you when it prints."
 elif [ -n "$probe_set" ]; then

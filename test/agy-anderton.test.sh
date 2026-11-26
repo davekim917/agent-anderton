@@ -284,18 +284,13 @@ other_agy=$agy_pid other_jobs=$agy_jobs
 other=(ANTIGRAVITY_CONVERSATION_ID=conv-other ANDERTON_AGY_NAME=agy-other "${herdr_env[@]}" HERDR_PANE_ID=w9:p79)
 in_agy "$other_jobs" "${other[@]}" -- "$scripts/claim.sh"
 check "another agy session claims a role whose holder's pane is gone" eval '[ "$status" -eq 0 ] && contains "claimed by agy session agy-$other_agy-"'
-# A take-over of a live agy holder is logged, and the displaced session hears of it at its next claim, once.
+# A take-over of a live agy holder is logged and tells the taker how the role is handed back.
 session_agy w9:p82
 taker_agy=$agy_pid taker_jobs=$agy_jobs
 : > "$FAKE/prompts"
 in_agy "$taker_jobs" ANTIGRAVITY_CONVERSATION_ID=conv-taker ANDERTON_AGY_NAME=agy-taker "${herdr_env[@]}" HERDR_PANE_ID=w9:p82 -- "$scripts/claim.sh" --take-over
 check "an agy take-over of a live holder says how to hand it back" eval '[ "$status" -eq 0 ] && contains "Took it over from agy session agy-$other_agy-" &&
   contains "claim.sh --take-over"'
-in_agy "$other_jobs" "${other[@]}" -- "$scripts/claim.sh"
-check "the displaced agy session hears of it at its next claim" eval '[ "$status" -eq 3 ] &&
-  contains "agy session agy-$taker_agy-" && contains "took over your role" && ! grep -q "took over" "$FAKE/prompts"'
-in_agy "$other_jobs" "${other[@]}" -- "$scripts/claim.sh"
-check "once" eval '[ "$status" -eq 3 ] && ! contains "took over your role"'
 in_agy "$other_jobs" "${other[@]}" -- "$scripts/claim.sh" --take-over
 check "and it takes the role back the way it was told" eval '[ "$status" -eq 0 ] && contains "Took it over from agy session agy-$taker_agy-"'
 

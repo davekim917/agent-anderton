@@ -1193,25 +1193,6 @@ new_claim_id() {
   id=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null) || return 1
   printf '%s\n' "$id" | tr '[:upper:]' '[:lower:]'
 }
-# taken_over_notice <provider> <session id>: prints, once each, the take-overs of a role from that session that
-# claim.sh logged in takeovers.log, unless the session holds that role again. Each is marked told before it prints, and
-# one that cannot be marked is not told, so no reader tells it twice or on every turn.
-taken_over_notice() {
-  local log="$holders/takeovers.log" told="$holders/takeovers-told" entry id key
-  [ -s "$log" ] || return 0
-  mkdir -p "$told" 2>/dev/null || return 0
-  while IFS= read -r entry; do
-    id=$(jq -r '.id' <<< "$entry") key=$(jq -r '.key' <<< "$entry")
-    case $id$key in '' | *[!a-zA-Z0-9-]*) continue ;; esac
-    [ ! -e "$told/$id" ] || continue
-    (set -C; : > "$told/$id") 2>/dev/null || continue
-    [ "$(jq -r '.sessionId // empty' "$holders/$key.json" 2>/dev/null)" != "$2" ] || continue
-    jq -r '"Anderton: \(.to.provider) session \(.to.sessionId)\(if .to.name != "" then " (\(.to.name))" else "" end) took over your role, \(.role), at \(.at). Nothing was approved. To hand it back once the user says so, run \(.handBack) from this session."' <<< "$entry"
-  done <<EOF
-$(jq -cR --arg provider "$1" --arg sid "$2" 'fromjson? | select(.from.provider == $provider and .from.sessionId == $sid)' "$log" 2>/dev/null)
-EOF
-}
-
 
 # A tool shell of an agy session (agy sets ANTIGRAVITY_CONVERSATION_ID for them; agy-anderton.sh adds the role's name)
 # gets its identity from the agy process it runs under: that process is the session, so a relaunch is another one and

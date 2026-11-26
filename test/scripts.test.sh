@@ -2014,14 +2014,10 @@ export ANDERTON_WATCH_TICK=2
 watch_start wh-2
 export ANDERTON_WATCH_TICK=0.05
 out=$(cd "$watched" && env CLAUDE_PID="$p_wa" CLAUDE_CODE_SESSION_ID=wa-1 "$scripts/claim.sh" --take-over 2>&1)
-check "a take-over of a live holder says whom it took the role from and how to hand it back" \
-  eval 'contains "Took it over from claude session wh-2" && contains "To hand it back, it runs claim.sh --take-over"'
-check "and logs it" jq -e 'select(.from.sessionId == "wh-2" and .to.sessionId == "wa-1")' "$CLAUDE_CONFIG_DIR/anderton/takeovers.log"
-set +e; wait "$watcher_pid"; status=$?; set -e
-check "the displaced holder's watch wakes it, naming who took the role" \
-  eval '[ "$status" -eq 2 ] && grep -qF "claude session wa-1" "$work/watch.out" && grep -qF "took over your role" "$work/watch.out"'
-watch_run wh-2
-check "once" eval '[ "$status" -eq 0 ] && ! contains "took over your role"'
+check "a take-over of another holder says whom it took the role from and how to hand it back" \
+  eval 'contains "Took it over from claude session wh-2" && contains "that session runs claim.sh --take-over"'
+check "and logs it" eval 'contains "Logged it in" &&
+  jq -e "select(.from.sessionId == \"wh-2\" and .to.sessionId == \"wa-1\")" "$CLAUDE_CONFIG_DIR/anderton/takeovers.log" >/dev/null'
 spawn; p_tw=$pid; session "$p_tw" tw-1 "$watched" taker-worker "$(date +%s)000"
 transcript tw-1 "$recent" asking "Before the question."
 jq -nc --arg d "$watched" '{name: "taker-worker", dir: $d, spawner: "other"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/taker-worker.json"
@@ -2032,30 +2028,31 @@ check "a new holder's watch replaces the old holder's" [ "$status" -eq 2 ]
 check "and reports to the new holder" contains "=== taker-worker (worker)"
 registry "$p_tw" idle
 (cd "$watched" && env CLAUDE_PID="$p_wh" CLAUDE_CODE_SESSION_ID=wh-2 "$scripts/claim.sh" --take-over >/dev/null)
-chmod a-w "$CLAUDE_CONFIG_DIR/anderton/takeovers-told"
-watch_run wa-1
-chmod u+w "$CLAUDE_CONFIG_DIR/anderton/takeovers-told"
-check "a take-over it cannot mark told wakes no one" eval '[ "$status" -eq 0 ] && ! contains "took over your role"'
-watch_run wa-1
-check "a displaced holder whose watch has exited hears it at its next turn end" \
-  eval '[ "$status" -eq 2 ] && contains "claude session wh-2" && contains "took over your role"'
-# A project named with a space is handed back as one argument; a take-over the log cannot record is made all the same.
+unset ANDERTON_WATCH_TICK
+# The log names the holder the claim recorded, though the registry has since given its pid to another session. A
+# project named with a space is handed back as one argument, and a take-over the log cannot record is made all the same.
 qa="$work/qa"
 mkdir -p "$qa"
 git -C "$qa" init -q
 spawn; p_qa1=$pid; session "$p_qa1" qa-1 "$qa" qa-one "$(date +%s)000"
 spawn; p_qa2=$pid; session "$p_qa2" qa-2 "$qa" qa-two "$(date +%s)000"
+spawn; p_qa3=$pid; session "$p_qa3" qa-3 "$qa" qa-three "$(date +%s)000"
 (cd "$qa" && env CLAUDE_PID="$p_qa1" CLAUDE_CODE_SESSION_ID=qa-1 "$scripts/claim.sh" --project 'Release QA' >/dev/null)
+session "$p_qa1" qa-later "$qa" qa-later "$(date +%s)000"
+out=$(cd "$qa" && env CLAUDE_PID="$p_qa2" CLAUDE_CODE_SESSION_ID=qa-2 "$scripts/claim.sh" --project 'Release QA' --take-over 2>&1)
+check "a take-over logs the holder the claim names, not the session now at its pid" eval 'contains "from claude session qa-1" &&
+  jq -e --argjson pid "$p_qa1" "select(.from.sessionId == \"qa-1\" and .from.pid == \$pid and .to.sessionId == \"qa-2\")" \
+    "$CLAUDE_CONFIG_DIR/anderton/takeovers.log" >/dev/null'
+check "and the hand-back keeps a project name with a space as one argument" contains "claim.sh --project Release\\ QA --take-over"
 chmod a-w "$CLAUDE_CONFIG_DIR/anderton/takeovers.log"
 set +e
-out=$(cd "$qa" && env CLAUDE_PID="$p_qa2" CLAUDE_CODE_SESSION_ID=qa-2 "$scripts/claim.sh" --project 'Release QA' --take-over 2>&1)
+out=$(cd "$qa" && env CLAUDE_PID="$p_qa3" CLAUDE_CODE_SESSION_ID=qa-3 "$scripts/claim.sh" --project 'Release QA' --take-over 2>&1)
 status=$?
 set -e
 chmod u+w "$CLAUDE_CONFIG_DIR/anderton/takeovers.log"
-check "a take-over it cannot log is still made, with a warning" \
-  eval '[ "$status" -eq 0 ] && contains "could not log the take-over" && contains "claimed by session qa-2"'
-check "and the hand-back keeps a project name with a space as one argument" contains "claim.sh --project Release\\ QA --take-over"
-unset ANDERTON_WATCH_TICK
+check "a take-over the log cannot record is still made, with a warning and no word of logging it" \
+  eval '[ "$status" -eq 0 ] && contains "claimed by session qa-3" && contains "could not log the take-over" &&
+    ! printf "%s" "$out" | grep -qi "logged it"'
 
 # A holder from an earlier version has its record in the machine-wide file and may have no anderton directory.
 export ANDERTON_WATCH_TICK=0.05
