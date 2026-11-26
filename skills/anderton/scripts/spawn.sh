@@ -435,7 +435,7 @@ $screen"
   # herdr learns an agy's session from its first prompt, when herdr's antigravity-cli integration is installed. Later
   # steps act only on that session, so a worker herdr never names could not be told from another agy in its pane.
   if [ "$provider" = agy ]; then
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
+    for _ in $(seq 1 20); do
       agy_instance=$(herdr agent get "$pane" 2>/dev/null |
         jq -r '.result.agent | select(.agent == "agy") | .agent_session.value // empty' 2>/dev/null) || agy_instance=""
       [ -z "$agy_instance" ] || break

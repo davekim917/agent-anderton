@@ -55,6 +55,8 @@ case "$1 $2" in
     printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$3"
     ;;
   "pane close") rm -f "$FAKE/agent-get.$3"; grep -vx "$3" "$FAKE/panes" > "$FAKE/panes.tmp" || true; mv "$FAKE/panes.tmp" "$FAKE/panes" ;;
+  "tab close") echo "$3" >> "$FAKE/closed-tabs" ;;
+  "tab get") echo '{"error":{"code":"tab_not_found"}}'; exit 1 ;;
   *) exit 1 ;;
 esac
 FAKEHERDR
@@ -166,6 +168,14 @@ check "which reports in its final replies, to the agy Anderton" [ "$(jq -r '"\(.
 check "and the brief says so" grep -qF "w9:p5 Tidy the example module." "$FAKE/prompts"
 mv "$CLAUDE_CONFIG_DIR/anderton/workers/lead-claude.json" "$tmp/lead-claude.json"
 git -C "$repo" worktree remove --force "$ANDERTON_WORKTREES/wt-lead-claude"
+# An agy herdr never names cannot be told from another agy in its pane: spawn.sh closes its tab and records nothing.
+agent_in w9:p5 agy idle ""
+as "${lead[@]}" -- "$scripts/spawn.sh" --provider agy --effort low lead-agy <<'BRIEF'
+Tidy the example module.
+BRIEF
+check "an agy worker herdr names no session for is refused, its tab closed" eval '[ "$status" -eq 1 ] &&
+  contains "did not report which agy session runs in pane w9:p5" && grep -qx w9:t5 "$FAKE/closed-tabs" &&
+  [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/lead-agy.json" ] && [ ! -e "$ANDERTON_WORKTREES/wt-lead-agy" ]'
 agent_in w9:p5 agy
 as "${lead[@]}" -- "$scripts/spawn.sh" --provider agy --effort low lead-agy <<'BRIEF'
 Tidy the example module.

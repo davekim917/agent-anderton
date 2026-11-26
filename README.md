@@ -582,9 +582,8 @@ were recorded, which otherwise make every claim, adoption and rebind in their re
 each). With no flag, or `--dry-run`, it prints what each record would get and writes nothing. `--apply` writes it,
 under the repository's lock and the worker's lock, after reading the record again there. A Claude record is stamped with
 the session it names only on unambiguous evidence: the one live session in its checkout, which its launch brief opens or
-its pane shows, and which holds no role; a background launch, with the session `claude agents` lists under its id; a
-record with no live session, with the one transcript its launch brief opens. One with none of that is marked as naming
-no session. A Codex launch waiting for its thread is registered when its launch token finds one. An agy record is
+its pane shows, and which holds no role; a background launch, with the session `claude agents` lists under its id. A
+record with no live session is marked as naming no session, with its launch transcript named when one is found. A Codex launch waiting for its thread is registered when its launch token finds one. An agy record is
 stamped with the instance herdr shows in its pane, unless a role's claim names that pane. Anything else is printed and
 left for a person (exit 1). A second run changes nothing; it removes no record and no worktree.
 

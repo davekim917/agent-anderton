@@ -199,7 +199,8 @@ case $1 in
         sleep 600 </dev/null >/dev/null 2>&1 &
         pane_pid=$!
         echo "$pane_pid" >> "$FAKE_LOG.sleepers"
-        jq -nc --argjson pid "$pane_pid" --arg sid "$window_sid" --arg cwd "$window_dir" --arg name "$7" \
+        # tmux expands formats in -c, so the session starts in the directory with "##" read as "#".
+        jq -nc --argjson pid "$pane_pid" --arg sid "$window_sid" --arg cwd "$(printf '%s' "$window_dir" | sed 's/##/#/g')" --arg name "$7" \
           '{pid: $pid, sessionId: $sid, cwd: $cwd, name: $name}' > "$CLAUDE_CONFIG_DIR/sessions/$pane_pid.json"
       fi
       echo "${TMUX%%,*} $(printf '%s' "$TMUX" | cut -d, -f2) $pane $pane_pid $window" >> "$FAKE_LOG.pane-pids"
@@ -1833,7 +1834,7 @@ wt_reg="$CLAUDE_CONFIG_DIR/sessions/$p_wt.json"
 cp "$wt_reg" "$work/wt-reg.bak"
 # A later process given the same pid starts at another time: the adoption names the process it recorded, by both.
 adopted_rec="$CLAUDE_CONFIG_DIR/anderton/workers/hand-tab.json"
-cp "$adopted_rec" "$work/hand-tab.bak"
+cp "$adopted_rec" "$work/hand-tab.bak" 2>/dev/null || echo '{}' > "$work/hand-tab.bak"
 jq -c '.procStart = "1"' "$work/hand-tab.bak" > "$adopted_rec"
 jq -c '.sessionId = "wt-reuse"' "$work/wt-reg.bak" > "$wt_reg"
 transcript wt-reuse "$recent" asking "A later process given the same pid."
@@ -1842,7 +1843,7 @@ check "a later process given the adopted session's pid is not adopted" eval '! c
 out=$(cd "$watched" && env CLAUDE_PID="$p_wa" "$scripts/waiting.sh" --blocked)
 check "while it is still a live session" contains "=== hand-tab  $watched"
 mv "$work/wt-reg.bak" "$wt_reg"
-mv "$work/hand-tab.bak" "$adopted_rec"
+if [ "$(cat "$work/hand-tab.bak")" = '{}' ]; then rm -f "$adopted_rec" "$work/hand-tab.bak"; else mv "$work/hand-tab.bak" "$adopted_rec"; fi
 registry "$p_wt" idle
 spawn; p_im=$pid; session "$p_im" im-1 "$watched" hand-tab "$(date +%s)000"
 transcript im-1 "$recent" asking "A new session reusing the name."

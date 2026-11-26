@@ -44,14 +44,14 @@ grep -qx '  allow_implicit_invocation: false' "$root/skills/anderton/agents/open
 hooks="$root/hooks/hooks.json"
 [ "$(jq -c '.hooks | keys' "$hooks")" = '["PostToolUse","PreToolUse","SessionStart","Stop","UserPromptSubmit"]' ] ||
   fail "hooks.json must hook only SessionStart, UserPromptSubmit, Stop, PreToolUse and PostToolUse"
-[ "$(jq '[.hooks[][].hooks[]] | length' "$hooks")" = 5 ] || fail "hooks.json must have five handlers"
+[ "$(jq '[.hooks[][].hooks[]] | length' "$hooks")" = 6 ] || fail "hooks.json must have six handlers"
 # What a UserPromptSubmit hook prints joins the prompt, so it runs only the turn-start branch, which prints nothing.
 jq -e '.hooks.UserPromptSubmit | length == 1 and (.[0].hooks[0] | .type == "command" and (.asyncRewake | not)
   and (.command | endswith("/skills/anderton/scripts/watch.sh\" --turn-start")))' "$hooks" >/dev/null ||
   fail "the UserPromptSubmit hook must run watch.sh --turn-start"
-jq -e '.hooks.SessionStart[0] | .matcher == "startup|resume" and
-  (.hooks[0].command | endswith("/skills/anderton/scripts/watch.sh\" --claude-start"))' "$hooks" >/dev/null ||
-  fail "the startup and resume hook must register the Claude launch"
+jq -e '[.hooks.SessionStart[] | .matcher] == ["startup", "resume"] and
+  all(.hooks.SessionStart[]; .hooks[0].command | endswith("/skills/anderton/scripts/watch.sh\" --claude-start"))' "$hooks" >/dev/null ||
+  fail "the startup and resume hooks must register the Claude launch"
 for event in PreToolUse PostToolUse; do
   jq -e --arg e "$event" '.hooks[$e] | length == 1 and .[0].matcher == "SendMessage"
     and (.[0].hooks[0].command | endswith("/skills/anderton/scripts/report-gate.sh\""))' "$hooks" >/dev/null ||

@@ -111,9 +111,9 @@ plan_claude() {
   done
   if [ "$count" -eq 0 ]; then
     if [ -n "$brief_id" ]; then
-      plan=stamp why="no live session in $dir; its launch was session $brief_id, which a resume would run again$(work_note "$r")"
-      patch=$(printf '%s' "$brief" | jq -c --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '{claudeSession: ., migration: {at: $at, result: "stamped", why: "its launch transcript; no live session"}}')
+      transcript=$(printf '%s' "$brief" | jq -r .transcript)
+      plan=mark why="no live session in $dir; its launch transcript, session $brief_id, is $transcript$(work_note "$r")"
+      patch=$(mark_patch "no live session; its launch transcript is $transcript")
     else
       plan=mark why="no live session in $dir, and no one transcript opens with its launch brief$(work_note "$r")"
       patch=$(mark_patch "no live session, and no launch transcript")

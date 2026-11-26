@@ -420,7 +420,9 @@ def worker_identities(worker, home):
         found = sorted((home / "projects").glob(f"*/{launch}.jsonl"))
         identities = [{"id": launch, "transcript": str(path)} for path in found[:1]] if len(found) == 1 else []
     if not identities and not worker.get("claudeLaunchId"):
-        raise Unreadable("its record names no Claude session (migrate-workers.sh stamps one on a record from before session ids)")
+        settled = (worker.get("migration") or {}).get("why")
+        raise Unreadable(f"its record names no Claude session (migrate-workers.sh: {settled})" if settled else
+                         "its record names no Claude session (migrate-workers.sh stamps one on a record from before session ids)")
     if not identities:
         raise Unreadable("its record names no transcript, and none was found for its launch")
     for identity in identities:
