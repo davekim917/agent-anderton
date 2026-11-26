@@ -11,11 +11,22 @@ import re
 import sys
 import tempfile
 
-REPORT = re.compile(r"^(RESULT|QUESTION|BLOCKED|ANSWER):\s*\S")
+REPORT_KINDS = ("RESULT", "QUESTION", "BLOCKED", "ANSWER")
 NON_CLAUDE = ("codex", "agy")
 
 def report_text(text):
     return text.strip().lstrip(" \t*_#>`-")
+
+
+def kind_of(text, kinds=REPORT_KINDS):
+    """The kind report_text's output opens with, when text follows it (formatting alone is none), else None."""
+    match = re.match(rf"({'|'.join(kinds)}):[\s*_#>`~-]*[^\s*_#>`~-]", text)
+    return match.group(1) if match else None
+
+
+def report_kind(text, kinds=REPORT_KINDS):
+    """The kind a message opens with, normalized once: the parser report-gate.sh, the sweep and the scans share."""
+    return kind_of(report_text(text), kinds)
 
 
 def transcript_events(worker, strict=False):
@@ -203,14 +214,14 @@ def sweep_transcript(worker, claim, routes):
             continue
         text = report_text(text)
         duplicate = text in native
-        if sent and REPORT.match(text):
+        if sent and kind_of(text):
             native.add(text)
         if event_id == checkpoint:
             continue
         if not passed_checkpoint:
             continue
         latest = event_id
-        if REPORT.match(text) and not duplicate:
+        if kind_of(text) and not duplicate:
             print(f"{worker['name']} (Claude {identity['id']}) report:\n{text[:2000]}")
     if not passed_checkpoint:
         raise ValueError("Claude transcript no longer contains its report bookmark")
@@ -355,7 +366,8 @@ def delivered(event, block):
 
 def scan_inbound(events, anderton, launch, final_replies_report, held, seen):
     """Walks one transcript in order, keeping in held the messages that arrived since the worker's last report: a message
-    it delivered to its Anderton, or under a Codex Anderton, which reads its final replies, one that opens with a kind.
+    it delivered to its Anderton, or under a Codex Anderton, which reads its final replies, a reply, either one a
+    RESULT:. A question, a block or an answer is not one: the worker is not done.
     An entry, or a tool call, Claude Code appends again (a resumed or forked session) counts once, where it first
     appeared."""
     sends = {}
@@ -375,10 +387,11 @@ def scan_inbound(events, anderton, launch, final_replies_report, held, seen):
                         continue
                     seen["tools"].add(block.get("id"))
                     args = block.get("input") or {}
-                    if isinstance(args.get("message"), str) and args["message"].strip() and anderton.addressed(args.get("to")):
+                    if isinstance(args.get("message"), str) and report_kind(args["message"]) == "RESULT" and \
+                            anderton.addressed(args.get("to")):
                         sends[block.get("id")] = True
             if final_replies_report and message.get("stop_reason") == "end_turn" and \
-                    REPORT.match(report_text(entry_text(message.get("content")))):
+                    report_kind(entry_text(message.get("content"))) == "RESULT":
                 held.clear()
             continue
         if kind == "attachment":
@@ -508,7 +521,20 @@ def main():
     inbound.add_argument("--reviewed-through")
     reviewed = commands.add_parser("reviewed-time")
     reviewed.add_argument("value")
+    kind = commands.add_parser("report-kind")
+    kind.add_argument("kinds", nargs="?", default="|".join(REPORT_KINDS))
     args = parser.parse_args()
+    if args.command == "report-kind":
+        kinds = args.kinds.split("|")
+        if not all(re.fullmatch(r"[A-Z]+", name) for name in kinds):
+            raise ValueError("kinds are upper-case words joined by |")
+        text = report_text(sys.stdin.read())
+        found = kind_of(text, tuple(kinds))
+        if found:
+            print(found)
+            return 0
+        # 4: a kind with nothing after it, which is no report.
+        return 4 if re.match(rf"({'|'.join(kinds)}):", text) else 3
     if args.command == "reviewed-time":
         reviewed_instant(args.value)
         return 0

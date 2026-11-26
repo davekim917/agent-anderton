@@ -19,7 +19,7 @@ if [ "${HERDR_ENV:-}" != 1 ] || [ -z "${HERDR_PANE_ID:-}" ] || [ -z "${HERDR_SOC
   exit 2
 fi
 command -v agy >/dev/null 2>&1 || { echo "agy-anderton.sh needs the agy CLI on PATH." >&2; exit 1; }
-command -v python3 >/dev/null 2>&1 || { echo "agy-anderton.sh needs python3, which runs the Anderton's watch." >&2; exit 1; }
+require_tools agy-anderton.sh
 # agy loads a workspace's hooks and agents from each directory between its working directory and the top of the
 # checkout, so the Anderton runs at the top of the checkout it was opened in, a linked worktree included.
 dir=$(git rev-parse --show-toplevel 2>/dev/null) || dir=$(pwd -P)

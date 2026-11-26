@@ -4,7 +4,7 @@ set -euo pipefail
 . "$(dirname "$0")/session-lib.sh"
 
 usage() {
-  echo "usage: role-message.sh [--project <name>] '<kind>: <message>'" >&2
+  echo "usage: role-message.sh [--project <name>] '<message>'" >&2
   exit 2
 }
 scope=""
@@ -15,6 +15,18 @@ if [ "${1:-}" = --project ]; then
 fi
 [ "$#" -eq 1 ] || usage
 body=$1
+case $body in *[![:space:]]*) ;; *) usage ;; esac
+status=0
+kind=$(printf '%s' "$body" | "$anderton_scripts/claude-worker.py" report-kind "RESULT|QUESTION|BLOCKED|ANSWER|DIRECTION|DEPLOY|LOOKUP" 2>/dev/null) ||
+  status=$?
+if [ "$status" = 0 ] && [ "$kind" = RESULT ]; then
+  echo "RESULT: is a worker's completion report. Andertons send each other a deploy to run, a lookup, a question or an answer." >&2
+  exit 2
+fi
+if [ "$status" = 4 ]; then
+  echo "A kind with nothing after it says nothing. Say after it what you need." >&2
+  exit 2
+fi
 root=$(invoking_root)
 take_repository_lock "$root"
 source=$(caller_claim "$root")
@@ -27,14 +39,7 @@ if [ "$(record_provider "$source")" = claude ] && [ "$(record_provider "$target"
   echo "Use Claude Code SendMessage for a Claude-to-Claude Anderton message." >&2
   exit 2
 fi
-if [ -z "$scope" ]; then
-  case $body in DEPLOY:* | LOOKUP:* | ANSWER:*) ;; *) usage ;; esac
-elif [ "$(jq -r '.scope // empty' "$source")" = "" ]; then
-  case $body in DIRECTION:* | QUESTION:* | ANSWER:*) ;; *) usage ;; esac
-  body="$body
-
-Report results and decisions for the user in your own tab. Reply here only with ANSWER: to a question from this Anderton."
-else
+if [ -n "$scope" ] && [ "$(jq -r '.scope // empty' "$source")" != "" ]; then
   echo "Project Anderton messages route through the repository Anderton." >&2
   exit 2
 fi

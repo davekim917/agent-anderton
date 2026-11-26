@@ -112,8 +112,16 @@ done
 [ ! -e "$FIXTURE_TMUX_LOG" ]
 printf 'Fixture task.\n' | codex_role env TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 "$script/spawn.sh" --effort low from-claude-default
 jq -e '(.provider // "claude") == "claude" and .spawnerProvider == "codex" and .spawnerScope == "tools"' "$claims/workers/from-claude-default.json" >/dev/null
-codex_role "$script/role-message.sh" "DEPLOY: catalog fixture"
-jq -e '.peerMessage.text == "DEPLOY: catalog fixture"' "$root_claim" >/dev/null
+if codex_role "$script/role-message.sh" ' ' >/dev/null 2>&1; then exit 1; fi
+jq -e '.peerMessage == null' "$root_claim" >/dev/null
+if codex_role "$script/role-message.sh" 'RESULT: the catalog fixture shipped' > "$tmp/refused" 2>&1; then exit 1; fi
+grep -q 'completion report' "$tmp/refused"
+jq -e '.peerMessage == null' "$root_claim" >/dev/null
+if codex_role "$script/role-message.sh" 'DEPLOY:' > "$tmp/refused" 2>&1; then exit 1; fi
+grep -q 'nothing after it' "$tmp/refused"
+jq -e '.peerMessage == null' "$root_claim" >/dev/null
+codex_role "$script/role-message.sh" "Deploy the catalog fixture"
+jq -e '.peerMessage.text == "Deploy the catalog fixture"' "$root_claim" >/dev/null
 mkdir -p "$CLAUDE_CONFIG_DIR/projects/fixture"
 coordinator_transcript="$CLAUDE_CONFIG_DIR/projects/fixture/fixture-claude.jsonl"
 : > "$coordinator_transcript"
@@ -124,7 +132,7 @@ stop_input() {
 watch_status=0
 stop_input | claude_role env ANDERTON_WATCH_TICK=1 "$script/watch.sh" > "$tmp/wake" 2>&1 || watch_status=$?
 [ "$watch_status" = 2 ]
-grep -q 'DEPLOY: catalog fixture' "$tmp/wake"
+grep -q 'Deploy the catalog fixture' "$tmp/wake"
 peer_id=$(jq -er '.peerMessage | select(.attemptedAt > 0) | .id' "$root_claim")
 jq -nc --arg peer "$peer_id" '{type:"queue-operation",operation:"enqueue",
   sessionId:"fixture-claude",content:("Peer message " + $peer + " from Anderton fixture.")}' >> "$coordinator_transcript"
@@ -132,7 +140,7 @@ watch_status=0
 stop_input | claude_role env ANDERTON_WATCH_TICK=1 ANDERTON_WATCH_RENEW=0 "$script/watch.sh" > "$tmp/wake" 2>&1 || watch_status=$?
 [ "$watch_status" = 2 ]
 jq -e '.peerMessage == null' "$root_claim" >/dev/null
-if grep -q 'DEPLOY: catalog fixture' "$tmp/wake"; then exit 1; fi
+if grep -q 'Deploy the catalog fixture' "$tmp/wake"; then exit 1; fi
 
 rm -f "$claims/"*.json
 codex_role "$script/claim.sh"
@@ -541,7 +549,10 @@ jq -nc --arg dir "$clearable_dir" '
   send("wrong-socket";"3";"uds:/run/claude/985.sock";"RESULT: unrelated socket"),
   user("turn-three";"3";"Report the third milestone."),
   send("outbound-three";"3";"former-claude";"RESULT: example PR opened"),
-  reply("distinct-final";"RESULT: example CI passed")
+  reply("distinct-final";"RESULT: example CI passed"),
+  user("turn-four";"3";"Report the fourth milestone."),
+  send("outbound-four";"3";"former-claude";"RESULT: formatted milestone"),
+  reply("formatted-final";"---\nRESULT: formatted milestone")
 ' > "$legacy_transcript"
 TZ=UTC touch -t 203001030100 "$legacy_transcript"
 jq -nc --argjson pid "$replacement_pid" --arg dir "$clearable_dir" '
@@ -559,6 +570,14 @@ native_gate outbound-one former-claude 'RESULT: same milestone'
 native_gate outbound-two former-claude 'RESULT: same milestone'
 native_gate prior-socket 'uds:/run/claude/984.sock' 'RESULT: scoped socket milestone'
 native_gate outbound-three former-claude 'RESULT: example PR opened'
+native_gate outbound-four former-claude 'RESULT: formatted milestone'
+# A bare kind to the former Anderton is held, as any bare kind is: it is no report.
+bare_status=0
+jq -nc --arg dir "$clearable_dir" --arg file "$legacy_transcript" '{session_id:"legacy-native-report", cwd:$dir, transcript_path:$file,
+  tool_use_id:"bare-stale", hook_event_name:"PreToolUse", tool_input:{to:"former-claude", message:"RESULT:"}}' |
+  "$script/report-gate.sh" > "$tmp/native-gate" 2>&1 || bare_status=$?
+[ "$bare_status" -eq 2 ]
+grep -q 'nothing after it' "$tmp/native-gate"
 # An agy holder of the role holds the same native sends for its sweep.
 mkdir "$tmp/agybin"
 cat > "$tmp/agybin/herdr" <<'STUB'
@@ -581,6 +600,7 @@ PATH="$tmp/agybin:$PATH" native_gate outbound-one former-claude 'RESULT: same mi
 PATH="$tmp/agybin:$PATH" native_gate outbound-two former-claude 'RESULT: same milestone'
 PATH="$tmp/agybin:$PATH" native_gate prior-socket 'uds:/run/claude/984.sock' 'RESULT: scoped socket milestone'
 PATH="$tmp/agybin:$PATH" native_gate outbound-three former-claude 'RESULT: example PR opened'
+PATH="$tmp/agybin:$PATH" native_gate outbound-four former-claude 'RESULT: formatted milestone'
 diff -r "$tmp/codex-routes" "$claims/reports/routes"
 rm -rf "$tmp/codex-routes"
 mv "$tmp/codex-claim" "$root_claim"
@@ -601,6 +621,8 @@ if grep -Eq 'historical transport|old delivered echo|unrelated message|unrelated
 # A final reply with another milestone of the same kind as its turn's native send is a report of its own.
 grep -qx 'RESULT: example PR opened' "$tmp/native-output"
 grep -qx 'RESULT: example CI passed' "$tmp/native-output"
+# A final reply that restates its turn's native send under formatting is not a second report.
+[ "$(grep -c 'RESULT: formatted milestone' "$tmp/native-output")" = 1 ]
 as_agy_holder
 mkdir "$tmp/agy-native-state" "$tmp/agy-native-stage"
 agy_role env ANDERTON_PROBE_STATE="$tmp/agy-native-state" ANDERTON_PROBE_STAGE="$tmp/agy-native-stage" "$script/worker.sh" sweep \
@@ -613,6 +635,7 @@ grep -qx 'RESULT: old unread final' "$tmp/agy-native-output"
 if grep -Eq 'historical transport|old delivered echo|unrelated message|unrelated socket' "$tmp/agy-native-output"; then exit 1; fi
 grep -qx 'RESULT: example PR opened' "$tmp/agy-native-output"
 grep -qx 'RESULT: example CI passed' "$tmp/agy-native-output"
+[ "$(grep -c 'RESULT: formatted milestone' "$tmp/agy-native-output")" = 1 ]
 if codex_role "$script/worker.sh" message legacy-reporter 'Refuse legacy transcript-only identity.' > "$tmp/refused" 2>&1; then exit 1; fi
 mv "$tmp/native-stage/"*.json "$tmp/native-state/"
 codex_role env ANDERTON_PROBE_STATE="$tmp/native-state" ANDERTON_PROBE_STAGE="$tmp/native-stage" "$script/worker.sh" sweep > "$tmp/native-output"
