@@ -15,7 +15,7 @@ REPORT_KINDS = ("RESULT", "QUESTION", "BLOCKED", "ANSWER")
 NON_CLAUDE = ("codex", "agy")
 
 def report_text(text):
-    return text.strip().lstrip(" \t*_#>`-")
+    return text.strip().lstrip(" \t\r\n*_#>`-")
 
 
 def kind_of(text, kinds=REPORT_KINDS):

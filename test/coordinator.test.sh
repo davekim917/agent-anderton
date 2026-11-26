@@ -552,7 +552,9 @@ jq -nc --arg dir "$clearable_dir" '
   reply("distinct-final";"RESULT: example CI passed"),
   user("turn-four";"3";"Report the fourth milestone."),
   send("outbound-four";"3";"former-claude";"RESULT: formatted milestone"),
-  reply("formatted-final";"---\nRESULT: formatted milestone")
+  reply("formatted-final";"---\nRESULT: formatted milestone"),
+  user("turn-five";"3";"Report the fifth milestone."),
+  reply("lone-formatted-final";"---\nRESULT: formatted lone milestone")
 ' > "$legacy_transcript"
 TZ=UTC touch -t 203001030100 "$legacy_transcript"
 jq -nc --argjson pid "$replacement_pid" --arg dir "$clearable_dir" '
@@ -637,7 +639,9 @@ if grep -Eq 'historical transport|old delivered echo|unrelated message|unrelated
 # A final reply with another milestone of the same kind as its turn's native send is a report of its own.
 grep -qx 'RESULT: example PR opened' "$tmp/native-output"
 grep -qx 'RESULT: example CI passed' "$tmp/native-output"
-# A final reply that restates its turn's native send under formatting is not a second report.
+# A milestone only in a final reply, under formatting, is a report; one that restates its turn's native send is not a
+# second one.
+grep -qx 'RESULT: formatted lone milestone' "$tmp/native-output"
 [ "$(grep -c 'RESULT: formatted milestone' "$tmp/native-output")" = 1 ]
 as_agy_holder
 mkdir "$tmp/agy-native-state" "$tmp/agy-native-stage"
@@ -651,6 +655,7 @@ grep -qx 'RESULT: old unread final' "$tmp/agy-native-output"
 if grep -Eq 'historical transport|old delivered echo|unrelated message|unrelated socket' "$tmp/agy-native-output"; then exit 1; fi
 grep -qx 'RESULT: example PR opened' "$tmp/agy-native-output"
 grep -qx 'RESULT: example CI passed' "$tmp/agy-native-output"
+grep -qx 'RESULT: formatted lone milestone' "$tmp/agy-native-output"
 [ "$(grep -c 'RESULT: formatted milestone' "$tmp/agy-native-output")" = 1 ]
 # The agy holder's watch runs beside agy, not under it, as claim.sh starts it: from there it still finds the role's
 # workers, sweeps their reports and types them into the holder's pane.
