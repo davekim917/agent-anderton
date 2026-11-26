@@ -1122,6 +1122,13 @@ PATH="$work/nopy-gate" gate "$ev_sid" "$work/wt-ev-worker" lead-session '"RESULT
 check "with no python3, the host hears it once" eval 'wait_events 4 && sleep 0.5 && [ "$(grep -c . "$events")" -eq 4 ] &&
   [ "$(event 4 | jq -c .)" = "{\"claimId\":\"$ev_claim\",\"scope\":\"workgroup:acme/ci\",\"kind\":\"warning\",\"status\":\"python3-missing\",\"worker\":\"ev-worker\"}" ]'
 head -n 3 "$events" > "$events.tmp" && mv "$events.tmp" "$events"
+# The once-per-session marker outlives the repeat check's cleanup of old report state.
+find "$CLAUDE_CONFIG_DIR/anderton" -name "no-python3.$ev_sid" -exec touch -t 202001010000 {} +
+unset ANDERTON_EVENT_COMMAND
+send "$ev_sid" "$work/wt-ev-worker" lead-session '"QUESTION: does the cleanup keep the marker? I recommend yes."'
+export ANDERTON_EVENT_COMMAND="cat >> '$events'"
+PATH="$work/nopy-gate" gate "$ev_sid" "$work/wt-ev-worker" lead-session '"RESULT: https://github.com/acme-org/web/pull/16"'
+check "and still once after the repeat check's cleanup" eval 'sleep 0.5; [ "$(grep -c "\"kind\":\"warning\"" "$events")" -eq 0 ]'
 
 turn() { # turn <session id> <cwd>: what UserPromptSubmit runs; sets $out
   out=$(printf '{"session_id":"%s","cwd":"%s","hook_event_name":"UserPromptSubmit"}' "$1" "$2" |

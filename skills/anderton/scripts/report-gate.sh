@@ -176,7 +176,7 @@ warn_no_parser() {
   local line="anderton: python3 is missing, so this report was not recorded as a milestone. Install python3."
   echo "$line" >&2
   jq -nc --arg line "$line" '{hookSpecificOutput: {hookEventName: "PreToolUse", additionalContext: $line}}'
-  if [ -n "${wrec:-}" ] && mkdir -p "$holders/reports" 2>/dev/null && (set -C; : > "$holders/reports/no-python3.$sid") 2>/dev/null; then
+  if [ -n "${wrec:-}" ] && mkdir -p "$holders/warned" 2>/dev/null && (set -C; : > "$holders/warned/no-python3.$sid") 2>/dev/null; then
     emit_event "$(jq -r '.spawnerClaimId // empty' "$wrec")" "$(jq -r '.spawnerScope // empty' "$wrec")" warning \
       status=python3-missing "worker=$(jq -r '.name // empty' "$wrec")"
   fi
