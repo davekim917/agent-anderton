@@ -1586,6 +1586,8 @@ check "unchanged" [ -z "$out" ]
 gate eeh-1 "$epsilon" eps-worker '"Got it, thanks."'
 check "leaves the repository's holder's message to a worker alone" [ "$status" -eq 0 ]
 check "unchanged" [ -z "$out" ]
+gate eeh-1 "$epsilon" eps-worker '"RESULT: upstream deploy completed"'
+check "a RESULT: from the repository's holder to a worker included" eval '[ "$status" -eq 0 ] && [ -z "$out" ]'
 gate eea-1 "$epsilon" eps-worker '"DIRECTION: fix the dashboard next."'
 check "leaves a project's holder's message to its worker alone" [ "$status" -eq 0 ]
 check "unchanged" [ -z "$out" ]

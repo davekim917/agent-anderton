@@ -62,7 +62,7 @@ EOF
   root=$(project_root "$cwd")
   project=$(holder_record "$root")
   if [ -n "$project" ] && names_sender "$project"; then
-    refuse_peer_result
+    if to_role_holder "$root" "$project"; then refuse_peer_result; fi
     exit 0
   fi
   while IFS= read -r r; do
@@ -149,6 +149,22 @@ EOF
   fi
   [ -z "$id" ] || printf '%s\n%s\n%s\n' "$state" "$hash" "$milestone" >| "$pending/$id" 2>/dev/null
   exit 0
+}
+
+# True when $to addresses the live holder of a role in repository $1 other than holder record $2.
+to_role_holder() {
+  local r p
+  while IFS= read -r r; do
+    if [ -z "$r" ] || [ "$r" = "$2" ]; then continue; fi
+    p=$(jq -r '.pid // empty' "$r" 2>/dev/null)
+    if [ -n "$p" ] && is_holder "$sessions/$p.json" "$r" &&
+      addresses "$p" "$(jq -r '.name // empty' "$sessions/$p.json" 2>/dev/null)"; then
+      return 0
+    fi
+  done <<EOF
+$(project_holders "$1")
+EOF
+  return 1
 }
 
 # RESULT: is a worker's completion report, the one a retirement hold waits for: one Anderton never sends it to another.
