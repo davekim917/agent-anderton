@@ -88,12 +88,6 @@ def legacy_worker_transcript(worker, home, cutoff):
     return matches[0] if len(matches) == 1 else None
 
 
-def peer_send(peer_sends, tool_id):
-    """True when report-gate.sh recorded this SendMessage as sent by a session holding an Anderton role."""
-    return (peer_sends is not None and isinstance(tool_id, str) and re.fullmatch(r"[a-zA-Z0-9_-]+", tool_id) is not None
-            and (peer_sends / tool_id).exists())
-
-
 def route_path(routes, session, tool_id):
     if not all(isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9_-]+", value) for value in (session, tool_id)):
         raise ValueError("Invalid native route identity")
@@ -185,7 +179,6 @@ def sweep(worker, claim, routes):
 
 
 def sweep_transcript(worker, claim, routes):
-    peers = routes.parent / "peer-sends" if routes else None
     identity = worker.get("claudeSession") or {}
     if "id" not in identity:
         return
@@ -206,7 +199,7 @@ def sweep_transcript(worker, claim, routes):
             passed_checkpoint = True
         if timestamp and instant(timestamp) < started:
             continue
-        if not eligible or (sent and peer_send(peers, event_id.rsplit(":", 1)[-1])):
+        if not eligible:
             continue
         text = report_text(text)
         duplicate = text in native
@@ -360,10 +353,10 @@ def delivered(event, block):
     return bool(re.search(r'\\*"success\\*"\s*:\s*true', content))
 
 
-def scan_inbound(events, anderton, launch, final_replies_report, held, seen, peer_sends=None):
+def scan_inbound(events, anderton, launch, final_replies_report, held, seen):
     """Walks one transcript in order, keeping in held the messages that arrived since the worker's last report: a message
     it delivered to its Anderton, or under a Codex Anderton, which reads its final replies, a reply, either one opening
-    with a kind. A send report-gate.sh recorded as a peer's is never a report.
+    with a kind.
     An entry, or a tool call, Claude Code appends again (a resumed or forked session) counts once, where it first
     appeared."""
     sends = {}
@@ -384,7 +377,7 @@ def scan_inbound(events, anderton, launch, final_replies_report, held, seen, pee
                     seen["tools"].add(block.get("id"))
                     args = block.get("input") or {}
                     if isinstance(args.get("message"), str) and REPORT.match(report_text(args["message"])) and \
-                            anderton.addressed(args.get("to")) and not peer_send(peer_sends, block.get("id")):
+                            anderton.addressed(args.get("to")):
                         sends[block.get("id")] = True
             if final_replies_report and message.get("stop_reason") == "end_turn" and \
                     REPORT.match(report_text(entry_text(message.get("content")))):
@@ -489,7 +482,7 @@ def inbound_since_report(worker, home, through):
     latest = None
     for identity in worker_identities(worker, home):
         latest = scan_inbound(transcript_events({**worker, "claudeSession": identity}, strict=True), anderton, launch,
-                              final_replies_report, held, seen, home / "anderton" / "reports" / "peer-sends") or latest
+                              final_replies_report, held, seen) or latest
     return unreviewed(held, through, latest)
 
 def main():

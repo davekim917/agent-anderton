@@ -59,19 +59,15 @@ EOF
   [ -n "$cwd" ] || exit 0
 
   # Who the sender is comes first: the repository's Anderton is never held.
-  local holds_repo=""
   root=$(project_root "$cwd")
   project=$(holder_record "$root")
-  if [ -n "$project" ] && names_sender "$project"; then holds_repo=1; fi
+  if [ -n "$project" ] && names_sender "$project"; then exit 0; fi
   while IFS= read -r r; do
     if [ -n "$r" ] && [ "$r" != "$project" ] && names_sender "$r"; then scope=1; fi
   done <<EOF
 $(project_holders "$root")
 EOF
   wrec=$(worker_record "$name" "$cwd" "$sid" "$pid" "$(jq -r '.startedAt // empty | floor' "$reg" 2>/dev/null)")
-  # A session holding a role is no worker reporting, even when a worker record still names it.
-  if [ -n "$wrec" ] && { [ -n "$holds_repo" ] || [ -n "$scope" ]; }; then record_peer_send; fi
-  [ -z "$holds_repo" ] || exit 0
   if [ -n "$wrec" ]; then
     worker=1
     gate_stale_worker_report "$wrec" "$root"
@@ -130,7 +126,7 @@ EOF
   case $window in '' | *[!0-9]*) exit 0 ;; esac
   [ $((window / 60 + 1)) -le "$keep" ] || keep=$((window / 60 + 1))
   mkdir -p "$pending" 2>/dev/null || exit 0
-  find "$holders/reports" \( -name routes -o -name peer-sends \) -type d -prune -o -type f -mmin +"$keep" -exec rm -f {} + 2>/dev/null
+  find "$holders/reports" -name routes -type d -prune -o -type f -mmin +"$keep" -exec rm -f {} + 2>/dev/null
   hash=$(printf '%s' "$input" | jq -j '.tool_input.message' 2>/dev/null | cksum | tr -s ' ' '-')
   state="$holders/reports/$(printf '%s\n%s' "$sid" "$rkey" | cksum | cut -d' ' -f1)"
   if [ -f "$state" ] && read -r at sum 2>/dev/null < "$state" && [ "$sum" = "$hash" ] && [ $(($(date +%s) - at)) -lt "$window" ]; then
@@ -148,16 +144,6 @@ EOF
   fi
   [ -z "$id" ] || printf '%s\n%s\n%s\n' "$state" "$hash" "$milestone" >| "$pending/$id" 2>/dev/null
   exit 0
-}
-
-# Records this send, by its tool use id, as a peer's: claude-worker.py never counts it as a worker's report, so it can
-# neither clear a retirement hold nor reach a Codex or agy Anderton as a milestone, whatever its kind. Held when it
-# cannot be recorded.
-record_peer_send() {
-  local dir="$holders/reports/peer-sends"
-  if [ -n "$id" ] && mkdir -p "$dir" 2>/dev/null && : >| "$dir/$id" 2>/dev/null; then return 0; fi
-  echo "Not sent: this session holds an Anderton role but a worker record still names it, and this send could not be recorded as a peer's, so it could count as that worker's report. Send it again." >&2
-  exit 10
 }
 
 # A worker's RESULT:, QUESTION: or BLOCKED: that was sent, to the host as a milestone: its kind and the GitHub links in

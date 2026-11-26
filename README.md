@@ -528,10 +528,7 @@ cannot read or compare with its base is kept too. Gitignored files don't count a
 Before it closes anything, `retire.sh` reads the worker's conversation since its last report to its
 Anderton: a delivered `SendMessage` report, or for a Codex Anderton reading a Claude worker's transcript, a
 final reply that is one; for a Codex worker, a completed turn whose final message is one. A report opens with a
-kind, so any other send to the Anderton never clears a hold. Nor does a send from a session holding an Anderton role
-that a worker record still names, whatever its kind: `report-gate.sh` records it by its tool use id under
-`~/.claude/anderton/reports/peer-sends/`, and neither the retirement scan nor a Codex or agy Anderton's sweep reads it
-as a report. A message after it
+kind, so any other send to the Anderton never clears a hold. A message after it
 from anyone but that Anderton (typed in the worker's tab, a voice relay, another session, a Codex TUI turn)
 holds the retirement: it exits 4, lists each message's time and first line, and writes `<name>.held` beside the
 record, which `waiting.sh` (and so the watch) lists until the worker is retired. The Anderton's own messages are
