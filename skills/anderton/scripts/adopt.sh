@@ -44,8 +44,7 @@ if [ "$provider" = codex ]; then
   cwd=$(printf '%s' "$data" | jq -r .dir)
   [ "$(project_root "$cwd")" = "$root" ] || refuse "$target is in another repository."
   while IFS= read -r r; do
-    if [ -n "$r" ] && jq -e --arg id "$target" --arg home "$codex_home" '
-      .provider == "codex" and .sessionId == $id and .codexHome == $home' "$r" >/dev/null 2>&1; then
+    if [ -n "$r" ] && jq -e --arg id "$target" '.provider == "codex" and .sessionId == $id' "$r" >/dev/null 2>&1; then
       refuse "$target holds an Anderton role of its own; it answers to the user."
     fi
   done <<EOF
@@ -82,8 +81,7 @@ done <<EOF
 $records
 EOF
 
-owned=$(worker_record "$name" "$cwd" "$(jq -r '.sessionId // empty' "$found")" "$(jq -r '.pid // empty' "$found")" \
-  "$(jq -r '.startedAt // empty | floor' "$found" 2>/dev/null)")
+owned=$(managed_invoker "$root" claude "$(jq -r '.sessionId // empty' "$found")" "$(jq -r '.pid // empty' "$found")")
 [ -z "$owned" ] || refuse "$name already reports to $(jq -r '.spawner // "another Anderton"' "$owned" 2>/dev/null)."
 
 if ! (set -C && : > "$record") 2>/dev/null; then

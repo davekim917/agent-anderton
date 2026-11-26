@@ -88,7 +88,14 @@ if [ -n "$scope" ]; then role="$role, project $scope"; fi
 state=$(holder_path "$root" "$scope")
 mkdir -p "$holders"
 take_repository_lock "$root"
-worker=$(managed_invoker "$root" "$provider" "$sid" "${codex_home:-$pid}" "$codex_dir")
+if [ "$provider" = agy ]; then
+  # A worker record names an agy session by the agy instance herdr shows in its pane.
+  agy_instance=$(HERDR_SOCKET_PATH="$agy_socket" herdr agent get "$agy_pane" 2>/dev/null |
+    jq -r '.result.agent | select(.agent == "agy") | .agent_session.value // empty' 2>/dev/null) || agy_instance=""
+  worker=$(managed_invoker "$root" agy "$agy_instance" "$agy_pane")
+else
+  worker=$(managed_invoker "$root" "$provider" "$sid" "${codex_home:-$pid}" "$codex_dir")
+fi
 if [ -n "$worker" ]; then
   echo "This session is managed as worker '$(jq -r .name "$worker")'. Its Anderton must release it before it can claim a role."
   exit 3

@@ -329,24 +329,15 @@ uses_claude_transcript() {
     ($owner != "claude" or .reportTransport == "transcript" or (.spawnerProvider // "claude") != "claude")' "$1" >/dev/null 2>&1
 }
 
-# Call under the repository lock. Only a conclusive mismatch clears a candidate pending launch.
+# Call under the repository lock. The worker record naming Codex thread $2, from home $1 in checkout $3, other than $4.
 codex_worker_record() {
-  local codex=$1 thread=$2 dir=$3 exclude=${4:-} r kind status
+  local r
   for r in "$holders"/workers/*.json; do
-    if [ ! -f "$r" ] || [ "$r" = "$exclude" ]; then continue; fi
-    kind=$(jq -r --arg home "$codex" --arg id "$thread" --arg dir "$dir" '
-      select(.provider == "codex" and .codexHome == $home)
-      | if .id == $id then "registered"
-        elif .id == "" and .dir == $dir and (.codexLaunchToken // "") != "" then "pending"
-        else empty end' "$r" 2>/dev/null) || continue
-    case $kind in
-      registered) printf '%s\n' "$r"; return ;;
-      pending)
-        status=0
-        "$anderton_scripts/codex-worker.py" launch-matches "$r" "$thread" >/dev/null 2>&1 || status=$?
-        if [ "$status" -ne 3 ]; then printf '%s\n' "$r"; return; fi
-        ;;
-    esac
+    if [ ! -f "$r" ] || [ "$r" = "${4:-}" ]; then continue; fi
+    if session_is_worker "$r" codex "$2" "$1" "$3"; then
+      printf '%s\n' "$r"
+      return
+    fi
   done
   return 0
 }
@@ -375,40 +366,66 @@ bind_codex_worker() {
   return 1
 }
 
+# The worker record naming the calling session, for claim.sh and adopt.sh: $2 is its provider, $3 its session id (for
+# agy, the agy instance herdr shows in its pane), $4 its pid (a Codex home for Codex), $5 a Codex thread's checkout.
 managed_invoker() {
-  local root=$1 provider=$2 sid=$3 identity=$4 dir=$5 r p reg name cwd started file
-  if [ "$provider" = codex ]; then codex_worker_record "$identity" "$sid" "$dir"; return; fi
-  # An agy session is an Anderton only through agy-anderton.sh, which no worker runs under.
-  [ "$provider" != agy ] || return 0
-  p=$identity
-  reg="$sessions/$p.json"
+  local r
+  for r in "$holders"/workers/*.json; do
+    [ -f "$r" ] || continue
+    if session_is_worker "$r" "$2" "$3" "$4" "${5:-}" "$1"; then
+      printf '%s\n' "$r"
+      return
+    fi
+  done
+}
+
+# session_is_worker <record> <provider> <session id> <pid or Codex home> [Codex checkout] [repository]: true when that
+# session is the worker the record names, by any identity the sweeps and the retirement scan read for it. Claude: its
+# launch, its current or any earlier session (claudePreviousSessions), its process, or, for a record from before
+# launch ids, its checkout with its name, its launch brief, or its recorded pane. Codex: its thread, on any account's
+# home, or a pending launch on that home that the thread may be. agy: only the agy instance the record names, so a
+# record with none names no session.
+session_is_worker() {
+  local r=$1 provider=$2 sid=$3 identity=$4 dir=${5:-} root=${6:-} status reg name cwd started file
+  [ "$(record_provider "$r")" = "$provider" ] || return 1
+  case $provider in
+    codex)
+      case $(jq -r --arg home "$identity" --arg id "$sid" --arg dir "$dir" '
+        if .id == $id and $id != "" then "registered"
+        elif .codexHome == $home and .id == "" and .dir == $dir and (.codexLaunchToken // "") != "" then "pending"
+        else empty end' "$r" 2>/dev/null) in
+        registered) return 0 ;;
+        pending)
+          status=0
+          "$anderton_scripts/codex-worker.py" launch-matches "$r" "$sid" >/dev/null 2>&1 || status=$?
+          [ "$status" -ne 3 ]
+          return
+          ;;
+      esac
+      return 1
+      ;;
+    agy)
+      [ -n "$sid" ] && jq -e --arg instance "$sid" '(.agyInstance // "") == $instance' "$r" >/dev/null 2>&1
+      return
+      ;;
+  esac
+  reg="$sessions/$identity.json"
   name=$(jq -r '.name // empty' "$reg" 2>/dev/null || true)
   cwd=$(jq -r '.cwd // empty' "$reg" 2>/dev/null || true)
   started=$(jq -r '.startedAt // empty | floor' "$reg" 2>/dev/null || true)
-  for r in "$holders"/workers/*.json; do
-    [ -f "$r" ] || continue
-    [ "$(record_provider "$r")" = claude ] || continue
-    if claude_worker_identity_matches "$r" "$sid" "$p" "$started"; then
-      printf '%s\n' "$r"
-      return
-    fi
-    # A launch predating session UUIDs cannot be identified by name after a rename.
-    # Its dedicated checkout remains managed until it is retired.
-    dir=$(jq -r --arg root "$root" 'select(.root == $root and .adopted != true and
-      .claudeLaunchId == null and .claudeSession == null) | .dir // empty' "$r")
-    [ -n "$dir" ] && [[ $cwd == "$dir" || $cwd == "$dir/"* ]] || continue
-    if jq -e --arg name "$name" '.worktree == true or .name == $name' "$r" >/dev/null; then
-      printf '%s\n' "$r"
-      return
-    fi
-    case $sid in '' | *[!a-zA-Z0-9-]*) continue ;; esac
-    for file in "$home"/projects/*/"$sid.jsonl"; do
-      if [ -f "$file" ] && "$anderton_scripts/claude-worker.py" legacy-launch-matches "$r" "$file" >/dev/null 2>&1; then
-        printf '%s\n' "$r"
-        return
-      fi
-    done
+  if claude_worker_identity_matches "$r" "$sid" "$identity" "$started"; then return 0; fi
+  if [ -n "$sid" ] && jq -e --arg sid "$sid" 'any(.claudePreviousSessions[]?; .id == $sid)' "$r" >/dev/null 2>&1; then return 0; fi
+  # A launch predating session UUIDs cannot be identified by name after a rename, nor by its brief after /clear.
+  # Its dedicated checkout, and the pane it was opened in, remain managed until it is retired.
+  dir=$(jq -r --arg root "$root" 'select(.root == $root and .adopted != true and
+    .claudeLaunchId == null and .claudeSession == null) | .dir // empty' "$r")
+  [ -n "$dir" ] && [[ $cwd == "$dir" || $cwd == "$dir/"* ]] || return 1
+  if jq -e --arg name "$name" '.worktree == true or .name == $name' "$r" >/dev/null; then return 0; fi
+  case $sid in '' | *[!a-zA-Z0-9-]*) return 1 ;; esac
+  for file in "$home"/projects/*/"$sid.jsonl"; do
+    if [ -f "$file" ] && "$anderton_scripts/claude-worker.py" legacy-launch-matches "$r" "$file" >/dev/null 2>&1; then return 0; fi
   done
+  claude_in_worker_pane "$r" "$sid" "$identity"
 }
 
 # What a Claude worker reads as direction $1 (an id) from its Anderton, with text $2; claude-worker.py acknowledged

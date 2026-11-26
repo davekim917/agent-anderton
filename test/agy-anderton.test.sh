@@ -182,6 +182,27 @@ check "and retires once it has read the pane" eval '[ "$status" -eq 4 ] && conta
 as "${lead[@]}" -- "$scripts/retire.sh" lead-agy --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 check "then retires" eval '[ "$status" -eq 0 ] && [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/lead-agy.json" ]'
 
+# A worker record names an agy session only by the agy instance herdr shows in its pane.
+named="$CLAUDE_CONFIG_DIR/anderton/workers/agy-named.json"
+jq -nc --arg dir "$repo" --arg socket "$tmp/herdr.sock" '{name: "agy-named", provider: "agy", launcher: "herdr", root: $dir,
+  dir: $dir, socket: $socket, pane: "w9:p81", agyInstance: "conv-w9:p81", worktree: false, spawner: "agy-lead"}' > "$named"
+agent_in w9:p81 agy
+as "${lead[@]}" -- "$scripts/claim.sh"
+check "a live holder no worker record names passes the holder check" eval '[ "$status" -eq 0 ] && contains "claimed by agy session agy-lead-1"'
+named_claim=(ANDERTON_AGY_SESSION=agy-named-1 ANDERTON_AGY_NAME=agy-named-anderton "ANDERTON_AGY_DIR=$repo" "ANDERTON_AGY_PID=$$" "${herdr_env[@]}" HERDR_PANE_ID=w9:p81)
+as "${named_claim[@]}" -- "$scripts/claim.sh" --project named
+check "the agy instance a worker record names cannot claim a role" eval '[ "$status" -eq 3 ] && contains "managed as worker"'
+jq 'del(.agyInstance)' "$named" > "$named.tmp" && mv "$named.tmp" "$named"
+as "${named_claim[@]}" -- "$scripts/claim.sh" --project named
+check "a record without an agy instance names no session, so an agy Anderton in its pane claims" eval '[ "$status" -eq 0 ] && contains "project named claimed"'
+as "${lead[@]}" -- "$scripts/retire.sh" agy-named --reviewed-through "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+check "and retire.sh does not close that pane on the record's word" eval '[ "$status" -eq 1 ] && contains "recorded without its agy instance" &&
+  grep -qx w9:p81 "$FAKE/panes" && [ -f "$named" ]'
+rm -f "$named"
+for f in "$CLAUDE_CONFIG_DIR"/anderton/*.json; do
+  if [ "$(jq -r '.scope // empty' "$f")" = named ]; then rm -f "$f"; fi
+done
+
 # A named project's Anderton on agy is the same claim, scoped.
 agent_in w9:p78 agy
 as ANDERTON_AGY_SESSION=agy-proj-1 ANDERTON_AGY_NAME=agy-proj "ANDERTON_AGY_DIR=$repo" "ANDERTON_AGY_PID=$$" "${herdr_env[@]}" HERDR_PANE_ID=w9:p78 -- "$scripts/claim.sh" --project example

@@ -68,7 +68,11 @@ case $1 in agents) echo '[]' ;; *) exit 2 ;; esac
 STUB
 cat > "$tmp/bin/tmux" <<'STUB'
 #!/usr/bin/env bash
-case $1 in new-window) printf '%s\n' "$@" > "$FIXTURE_TMUX_LOG"; echo '@21 %21' ;; *) exit 2 ;; esac
+case $1 in
+  new-window) printf '%s\n' "$@" > "$FIXTURE_TMUX_LOG"; echo '@21 %21' ;;
+  -S) if [ "$3" = list-panes ] && [ -n "${FIXTURE_TMUX_PANES:-}" ]; then printf '%s\n' "$FIXTURE_TMUX_PANES"; else exit 2; fi ;;
+  *) exit 2 ;;
+esac
 STUB
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/codex"
 chmod +x "$tmp/scripts/codex-worker.py" "$tmp/bin/"*
@@ -503,6 +507,51 @@ jq -nc --arg dir "$PWD" '
   {name:"another-name",root:$dir,dir:$dir,adopted:true,sessionId:"fixture-claude"}' > "$claims/workers/another-name.json"
 refused_claim claude_role "$script/claim.sh" --project worker-scope
 grep -q "managed as worker 'another-name'" "$tmp/refused"
+rm "$claims/workers/another-name.json"
+release_identity_check() {
+  local f
+  for f in "$claims"/*.json; do
+    if [ "$(jq -r '.scope // empty' "$f")" = identity-check ]; then rm "$f"; fi
+  done
+}
+# A live holder no worker record names passes the holder check, Claude and Codex, beside records naming other sessions.
+jq -nc --arg dir "$PWD" '{name:"prev-session",root:$dir,dir:$dir,claudeLaunchId:"launch-prev",
+  claudeSession:{id:"later-session",pid:1,procStart:"1"},claudePreviousSessions:[{id:"earlier-session",transcript:"/dev/null"}]}' \
+  > "$claims/workers/prev-session.json"
+jq -nc --arg dir "$PWD" --arg home "$tmp/other-home" '
+  {name:"other-home",root:$dir,dir:$dir,provider:"codex",codexHome:$home,id:"019a0000-2222-7222-8333-444455556666"}' \
+  > "$claims/workers/other-home.json"
+claude_role "$script/claim.sh" --project identity-check | grep -q "project identity-check claimed"
+release_identity_check
+codex_role "$script/claim.sh" | grep -q "claimed by Codex thread $FIXTURE_THREAD"
+# A session in any of a worker record's identities is that worker: an earlier session the record kept after /clear,
+jq '.claudePreviousSessions += [{id:"fixture-claude",transcript:"/dev/null"}]' "$claims/workers/prev-session.json" > "$tmp/updated-worker"
+mv "$tmp/updated-worker" "$claims/workers/prev-session.json"
+refused_claim claude_role "$script/claim.sh" --project identity-check
+grep -q "managed as worker 'prev-session'" "$tmp/refused"
+rm "$claims/workers/prev-session.json"
+# the pane a record from before launch ids was opened in, whatever the session there is now named,
+jq -nc --arg dir "$PWD" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+  {name:"pane-legacy",root:$dir,dir:$dir,worktree:false,launcher:"tmux",socket:"/tmp/fixture-tmux",pane:"%42",server:"4242",
+   spawner:"fixture-codex",startedAt:$at}' > "$claims/workers/pane-legacy.json"
+refused_claim claude_role env FIXTURE_TMUX_PANES="4242 %42 $claimer" "$script/claim.sh" --project identity-check
+grep -q "managed as worker 'pane-legacy'" "$tmp/refused"
+claude_role env FIXTURE_TMUX_PANES="4242 %42 1" "$script/claim.sh" --project identity-check | grep -q "project identity-check claimed"
+release_identity_check
+rm "$claims/workers/pane-legacy.json"
+# and a Codex thread recorded as a worker on another account's home, which shares the conversation store.
+jq --arg id "$FIXTURE_THREAD" '.id = $id' "$claims/workers/other-home.json" > "$tmp/updated-worker"
+mv "$tmp/updated-worker" "$claims/workers/other-home.json"
+refused_claim codex_role "$script/claim.sh"
+grep -q "managed as worker 'other-home'" "$tmp/refused"
+rm "$claims/workers/other-home.json"
+# A thread holding a role on another account's home is not adopted either.
+jq -nc --arg dir "$PWD" --arg home "$tmp/other-home" '
+  {root:$dir,scope:"other-home-role",provider:"codex",sessionId:"019a0000-3333-7222-8333-444455556666",codexHome:$home,
+   claimedAt:"2030-01-01T00:00:00Z"}' > "$claims/other-home-role.json"
+if codex_role "$script/adopt.sh" --provider codex adopt-other 019a0000-3333-7222-8333-444455556666 > "$tmp/refused" 2>&1; then exit 1; fi
+grep -q 'holds an Anderton role of its own' "$tmp/refused"
+rm "$claims/other-home-role.json"
 
 cutoff=2030-01-02T00:00:00Z
 jq --arg cutoff "$cutoff" '.claudeReportSince = $cutoff |

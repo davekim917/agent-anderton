@@ -233,6 +233,10 @@ elif [ "$provider" = agy ]; then
   agy_check "$record"
   case $agy_state in
     running)
+      if ! jq -e '(.agyInstance // "") != ""' "$record" >/dev/null; then
+        echo "agy worker '$name' was recorded without its agy instance, so herdr cannot show that pane $pane still runs it rather than another agy. Close the pane yourself once nothing in it needs keeping, then rerun." >&2
+        exit 1
+      fi
       case $agy_status in
         idle | done) ;;
         *) echo "agy worker '$name' is not idle (herdr says: ${agy_status:-nothing}). Retire it once it is." >&2; exit 1 ;;

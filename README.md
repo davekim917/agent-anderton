@@ -434,6 +434,14 @@ unknown and blocks an ordinary takeover.
 An Anderton must release an adopted worker before that session can claim a role.
 A worker launched by Anderton must be retired before it can be replaced by a coordinator session.
 Changing the worker's Claude display name leaves that claim restriction in place.
+One check, `session_is_worker` (`session-lib.sh`), decides that a session is the worker a record names, for
+`claim.sh` (every provider, `--rebind` and `--take-over` included) and `adopt.sh`. It covers every identity the
+sweeps and the retirement scan read for the record:
+- Claude: its launch, its current or any earlier session (`claudePreviousSessions`), or its process.
+- A record from before launch ids: its checkout with its name, its launch brief, or the pane it was opened in.
+- Codex: its thread, on any account's home.
+- agy: only the agy instance the record names. A record with none names no session, and `retire.sh` won't close a
+  pane on its word.
 
 **`waiting.sh`** lists the live sessions in the caller's repository (`--all`: every repository) that
 wait on a person, leaving out every Anderton in the caller's repository, the repository's and each
