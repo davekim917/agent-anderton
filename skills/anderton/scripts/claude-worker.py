@@ -18,10 +18,15 @@ def report_text(text):
     return text.strip().lstrip(" \t*_#>`-")
 
 
-def report_kind(text, kinds=REPORT_KINDS):
-    """The kind a message opens with, when text follows it, else None. report-gate.sh parses kinds with this too."""
-    match = re.match(rf"({'|'.join(kinds)}):\s*\S", report_text(text))
+def kind_of(text, kinds=REPORT_KINDS):
+    """The kind report_text's output opens with, when text follows it (formatting alone is none), else None."""
+    match = re.match(rf"({'|'.join(kinds)}):[\s*_#>`~-]*[^\s*_#>`~-]", text)
     return match.group(1) if match else None
+
+
+def report_kind(text, kinds=REPORT_KINDS):
+    """The kind a message opens with, normalized once: the parser report-gate.sh, the sweep and the scans share."""
+    return kind_of(report_text(text), kinds)
 
 
 def transcript_events(worker, strict=False):
@@ -209,14 +214,14 @@ def sweep_transcript(worker, claim, routes):
             continue
         text = report_text(text)
         duplicate = text in native
-        if sent and report_kind(text):
+        if sent and kind_of(text):
             native.add(text)
         if event_id == checkpoint:
             continue
         if not passed_checkpoint:
             continue
         latest = event_id
-        if report_kind(text) and not duplicate:
+        if kind_of(text) and not duplicate:
             print(f"{worker['name']} (Claude {identity['id']}) report:\n{text[:2000]}")
     if not passed_checkpoint:
         raise ValueError("Claude transcript no longer contains its report bookmark")
@@ -382,11 +387,11 @@ def scan_inbound(events, anderton, launch, final_replies_report, held, seen):
                         continue
                     seen["tools"].add(block.get("id"))
                     args = block.get("input") or {}
-                    if isinstance(args.get("message"), str) and report_kind(report_text(args["message"])) == "RESULT" and \
+                    if isinstance(args.get("message"), str) and report_kind(args["message"]) == "RESULT" and \
                             anderton.addressed(args.get("to")):
                         sends[block.get("id")] = True
             if final_replies_report and message.get("stop_reason") == "end_turn" and \
-                    report_kind(report_text(entry_text(message.get("content")))) == "RESULT":
+                    report_kind(entry_text(message.get("content"))) == "RESULT":
                 held.clear()
             continue
         if kind == "attachment":
@@ -523,10 +528,13 @@ def main():
         kinds = args.kinds.split("|")
         if not all(re.fullmatch(r"[A-Z]+", name) for name in kinds):
             raise ValueError("kinds are upper-case words joined by |")
-        found = report_kind(sys.stdin.read(), tuple(kinds))
+        text = report_text(sys.stdin.read())
+        found = kind_of(text, tuple(kinds))
         if found:
             print(found)
-        return 0 if found else 3
+            return 0
+        # 4: a kind with nothing after it, which is no report.
+        return 4 if re.match(rf"({'|'.join(kinds)}):", text) else 3
     if args.command == "reviewed-time":
         reviewed_instant(args.value)
         return 0

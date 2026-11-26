@@ -61,7 +61,10 @@ EOF
   # Who the sender is comes first: the repository's Anderton is never held.
   root=$(project_root "$cwd")
   project=$(holder_record "$root")
-  if [ -n "$project" ] && names_sender "$project"; then exit 0; fi
+  if [ -n "$project" ] && names_sender "$project"; then
+    refuse_peer_result
+    exit 0
+  fi
   while IFS= read -r r; do
     if [ -n "$r" ] && [ "$r" != "$project" ] && names_sender "$r"; then scope=1; fi
   done <<EOF
@@ -106,7 +109,8 @@ EOF
     kinds="RESULT|QUESTION|BLOCKED|ANSWER|DIRECTION"
   fi
   kind=$(printf '%s' "$input" | jq -j '.tool_input.message // ""' 2>/dev/null | "$anderton_scripts/claude-worker.py" report-kind "$kinds") ||
-    [ $? -eq 3 ] || exit 0
+    case $? in 3 | 4) ;; *) exit 0 ;; esac
+  if [ -n "$scope" ] && [ -z "$report" ]; then refuse_peer_result; fi
   if [ -n "$required" ] && [ -z "$kind" ]; then
     {
       echo "Not sent. Message \"$recipient\" only when it changes what they do, with the kind as the first word:"
@@ -145,6 +149,14 @@ EOF
   fi
   [ -z "$id" ] || printf '%s\n%s\n%s\n' "$state" "$hash" "$milestone" >| "$pending/$id" 2>/dev/null
   exit 0
+}
+
+# RESULT: is a worker's completion report, the one a retirement hold waits for: one Anderton never sends it to another.
+refuse_peer_result() {
+  printf '%s' "$input" | jq -j '.tool_input.message // ""' 2>/dev/null |
+    "$anderton_scripts/claude-worker.py" report-kind RESULT >/dev/null 2>&1 || return 0
+  echo "Not sent: RESULT: is a worker's completion report. Between Andertons, say what you need: a deploy to run, a lookup, a question or an answer." >&2
+  exit 10
 }
 
 # A worker's RESULT:, QUESTION: or BLOCKED: that was sent, to the host as a milestone: its kind and the GitHub links in
@@ -196,7 +208,16 @@ gate_stale_worker_report() {
   fi
   # A listing reference can deliberately address somebody else who now uses the old display name.
   case $to in "$old ["*) exit 0 ;; esac
-  printf '%s' "$input" | jq -j '.tool_input.message // ""' 2>/dev/null | "$anderton_scripts/claude-worker.py" report-kind >/dev/null || exit 0
+  local label=0
+  printf '%s' "$input" | jq -j '.tool_input.message // ""' 2>/dev/null | "$anderton_scripts/claude-worker.py" report-kind >/dev/null || label=$?
+  case $label in
+    0) ;;
+    4)
+      echo "Not sent: a kind with nothing after it is no report. Say after it what is done, decided or in the way." >&2
+      exit 10
+      ;;
+    *) exit 0 ;;
+  esac
 
   if [ "$owner_provider" = codex ] || [ "$owner_provider" = agy ]; then
     if ! claude_worker_identity_matches "$wrec" "$sid" "$pid" "$(jq -r '.startedAt // empty | floor' "$reg")"; then

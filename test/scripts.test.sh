@@ -589,6 +589,8 @@ check "and tells the worker the four kinds" contains "RESULT: a milestone done"
 check "a worker is not offered DIRECTION" eval '! contains "DIRECTION:"'
 gate "$worker_sid" "$work/wt-fix-login" lead-session '"RESULT:"'
 check "and a bare kind with nothing after it, which the retirement scan would not count as a report" [ "$status" -eq 2 ]
+gate "$worker_sid" "$work/wt-fix-login" lead-session '"**RESULT:**"'
+check "or with only formatting after it" [ "$status" -eq 2 ]
 gate "$worker_sid" "$work/wt-fix-login/src" lead-session '"Still holding for the merge."'
 check "from a subdirectory of the worker's worktree too" [ "$status" -eq 2 ]
 gate "$worker_sid" "$work/wt-fix-login" "lead-session [a1b2c3]" '"FYI: tests are running."'
@@ -1545,6 +1547,10 @@ send eea-1 "$epsilon" "uds:/run/user/1000/cc-socks/$p_eh.sock" '"DEPLOY: ship th
 check "but holds the same deploy sent again" [ "$status" -eq 2 ]
 send eea-1 "$epsilon" epsilon-host '"ANSWER: yes, the backfill can wait."'
 check "and lets it answer the project's holder" [ "$status" -eq 0 ]
+gate eea-1 "$epsilon" epsilon-host '"RESULT: export fixed, PR https://example.invalid/pr/6"'
+check "but never a RESULT:, which is a worker's completion report" eval '[ "$status" -eq 2 ] && contains "completion report"'
+gate eeh-1 "$epsilon" epsilon-fleet-a '"RESULT: the export moved to Thursday."'
+check "nor the other way, from the repository's holder to a project's holder" eval '[ "$status" -eq 2 ] && contains "completion report"'
 send eea-1 "$epsilon" epsilon-host '"ANSWER: yes, the backfill can wait."'
 check "an answer is never a repeat" [ "$status" -eq 0 ]
 send eeb-1 "$epsilon" epsilon-host '"DEPLOY: ship the export fix, merged as https://example.invalid/pr/7"'
