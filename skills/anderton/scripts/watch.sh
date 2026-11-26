@@ -162,12 +162,18 @@ elif [ "${1:-}" = --agy ]; then
   runtime=agy
   record=$2
   [ -f "$record" ] && [ "$(record_provider "$record")" = agy ] || exit 0
-  sid=$(jq -r '.sessionId // empty' "$record") || exit 0
-  cwd=$(jq -r '.dir // empty' "$record") || exit 0
+  # The claim this watch serves, read once, so its pane, socket and claim id are one claim's: a take-over writes another
+  # claim id, process, pane or socket into the record.
+  snapshot=$(jq -c '{claimId, agyPid, agyStart, pane, socket, sessionId, dir}' "$record") || exit 0
+  agy_claim_identity=$(printf '%s' "$snapshot" | jq -c '[.claimId, .agyPid, .agyStart, .pane, .socket]') || exit 0
+  sid=$(printf '%s' "$snapshot" | jq -r '.sessionId // empty')
+  cwd=$(printf '%s' "$snapshot" | jq -r '.dir // empty')
   ANDERTON_AGY_SESSION=$sid
-  HERDR_PANE_ID=$(jq -r '.pane // empty' "$record") || exit 0
-  HERDR_SOCKET_PATH=$(jq -r '.socket // empty' "$record") || exit 0
-  export ANDERTON_AGY_SESSION HERDR_PANE_ID HERDR_SOCKET_PATH
+  HERDR_PANE_ID=$(printf '%s' "$snapshot" | jq -r '.pane // empty')
+  HERDR_SOCKET_PATH=$(printf '%s' "$snapshot" | jq -r '.socket // empty')
+  ANDERTON_AGY_WATCH_CLAIM=$record
+  ANDERTON_AGY_WATCH_CLAIM_ID=$(printf '%s' "$snapshot" | jq -r '.claimId // empty')
+  export ANDERTON_AGY_SESSION HERDR_PANE_ID HERDR_SOCKET_PATH ANDERTON_AGY_WATCH_CLAIM ANDERTON_AGY_WATCH_CLAIM_ID
   unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
   pid=$sid
   reg=""
@@ -221,7 +227,11 @@ EOF
   fi
 fi
 still_holds_role() {
-  if [ "$runtime" != claude ]; then caller_matches_claim "$record"; else is_holder "$reg" "$record"; fi
+  case $runtime in
+    agy) [ "$(jq -c '[.claimId, .agyPid, .agyStart, .pane, .socket]' "$record" 2>/dev/null)" = "$agy_claim_identity" ] ;;
+    codex) caller_matches_claim "$record" ;;
+    *) is_holder "$reg" "$record" ;;
+  esac
 }
 # agy_deliver <text>: prompts the agy holder's pane with <text>, only while herdr shows that agy there, idle.
 agy_deliver() {
@@ -250,7 +260,7 @@ started=$(date +%s)
 last_liveness_check=0
 mkdir -p "$holders" 2>/dev/null || exit 0
 [ -w "$holders" ] || exit 0
-take_watch() { (set -C; printf '%s %s %s\n' "$$" "$pid" "$parent_pid" > "$watcher") 2>/dev/null; }
+take_watch() { (set -C; printf '%s %s %s %s\n' "$$" "$pid" "$parent_pid" "$(proc_start $$)" > "$watcher") 2>/dev/null; }
 watch_owner() { local p=""; { read -r p _ < "$watcher"; } 2>/dev/null; printf '%s' "$p"; }
 # Claude Code hears a hook's exit through the process that started it, so a watch that lost that process wakes no one.
 orphaned() { # orphaned <pid> <the parent it started under>
@@ -267,14 +277,17 @@ same_script() { # same_script <command line>: true when it runs this watch.sh, f
 until take_watch; do
   still_holds_role || exit 0
   other=""; owner=""; parent=""
-  { read -r other owner parent < "$watcher"; } 2>/dev/null
+  other_start=""
+  { read -r other owner parent other_start < "$watcher"; } 2>/dev/null
   # -ww: ps cuts its output at COLUMNS even into a pipe, and a cut path makes a live watch look dead.
   command=$(ps -ww -o command= -p "${other:-0}" 2>/dev/null)
   case $command in
     *watch.sh*)
       if orphaned "$other" "${parent:-0}"; then
         rm -f "$watcher"
-      elif ! same_script "$command"; then
+      # An agy watch an earlier version of this script started records no start time, so what it runs cannot read as
+      # its claim: it is replaced too.
+      elif ! same_script "$command" || { [ "$runtime" = agy ] && [ -z "$other_start" ]; }; then
         # A watch from another install of the plugin, one an update or a reload left running, would keep the job
         # forever and never run this version. It is replaced: TERM runs its EXIT trap, which ends its probe's group.
         kill -TERM "$other" 2>/dev/null
@@ -616,7 +629,7 @@ while still_holds_role; do
     last=$(probe_last "$probe_dir")
     # The interval holds across watches, so a busy source wakes the holder at most once per interval.
     if [ "$(( $(date +%s) - last ))" -ge "${every:-60}" ] && { [ "$source" != codex ] || select_worker_probe; }; then
-      run_probe "$probe"
+      if [ "$source" = codex ]; then run_probe "$probe"; else ANDERTON_AGY_WATCH_CLAIM="" run_probe "$probe"; fi
       # A run can take minutes: what it found is this holder's to hear only if the role and the watch are still its.
       if ! still_holds_role || [ "$(watch_owner)" != "$$" ] || orphaned "$$" "$parent_pid"; then
         rm -rf "$probe_run"
@@ -641,11 +654,11 @@ while still_holds_role; do
         deliver_pending
       fi
     elif [ "$runtime" = agy ]; then
-      if agy_deliver "$(message)"; then
-        if [ -n "$peer" ]; then (take_repository_lock "$(project_root "$cwd")"; still_holds_role && clear_peer "$peer"); fi
-        rm -f "$blocked_backlog"
-        commit_blocked
-        commit_probe
+      # Delivered only to the claim this watch serves, into the pane it read with that claim, checked and prompted under
+      # the repository lock; the block and probe bookmarks advance under the same lock, once the prompt has gone.
+      if (take_repository_lock "$(project_root "$cwd")" 75 && still_holds_role && agy_deliver "$(message)" &&
+        { [ -z "$peer" ] || clear_peer "$peer" || true; } && rm -f "$blocked_backlog" && commit_blocked && commit_probe); then
+        probe_run=""
       else
         # A busy or unreadable pane takes nothing: the blocks wait in the backlog, and the probe runs again later.
         { cat "$blocked_backlog" 2>/dev/null; printf '%s\n' "$new"; } | grep . | sort -u > "$blocked_backlog.tmp" &&

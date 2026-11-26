@@ -16,6 +16,8 @@ case $action in
   sweep) [ "$#" -eq 1 ] || usage ;;
   *) usage ;;
 esac
+# The role's watch runs the sweep, failover moves included, as its claim (agy_watch_bound in session-lib.sh).
+if [ "$action" = sweep ]; then anderton_watch_reads=1; fi
 continue_text="Your last turn stopped at the Codex usage limit of the account it ran on, and this conversation now runs on another account. Continue the task from where it stopped. Check the current state before repeating any command, edit or message that may already have completed."
 
 # Codex worker record $1's pane as "<launcher> <socket> <pane> <server>" fields for codex_pane.
@@ -125,13 +127,32 @@ note_failover() {
   fi
 }
 
-# Reports once per (worker, text): a retry that changes nothing wakes no one.
+# Reports once per (worker, text): a retry that changes nothing wakes no one. Run by a watch's probe, it counts as
+# said only once the watch has told it: it is staged as a bookmark, which the watch keeps only after its delivery, so a
+# busy pane hears it on a later sweep.
 once() {
-  local record=$1 text=$2 updated
+  local record=$1 text=$2 updated key
+  if [ -n "${ANDERTON_PROBE_STAGE:-}" ] && [ -n "${ANDERTON_PROBE_STATE:-}" ]; then
+    key="codex-failover-$(basename "$record" .json)"
+    [ "$(cat "$ANDERTON_PROBE_STATE/$key" 2>/dev/null || true)" != "$text" ] || return 0
+    printf '%s' "$text" > "$ANDERTON_PROBE_STAGE/$key" 2>/dev/null || true
+    printf '%s\n' "$text"
+    return 0
+  fi
   [ "$(jq -r '.codexFailoverSaid // ""' "$record")" != "$text" ] || return 0
   updated=$(mktemp "$record.XXXXXX") || return 0
   if jq --arg text "$text" '.codexFailoverSaid = $text' "$record" >"$updated"; then mv -f "$updated" "$record"; else rm -f "$updated"; fi
   printf '%s\n' "$text"
+}
+
+# True once text $2 about worker record $1 has been told: by the watch, which keeps a probe's stage only after its
+# delivery, or, outside a watch, once printed.
+told() {
+  if [ -n "${ANDERTON_PROBE_STAGE:-}" ] && [ -n "${ANDERTON_PROBE_STATE:-}" ]; then
+    [ "$(cat "$ANDERTON_PROBE_STATE/codex-failover-$(basename "$1" .json)" 2>/dev/null || true)" = "$2" ]
+  else
+    [ "$(jq -r '.codexFailoverSaid // ""' "$1")" = "$2" ]
+  fi
 }
 
 # Takes the locks a change to worker record $1, still on thread $2, needs: the repository lock, then the worker lock
@@ -192,6 +213,19 @@ $(jq -r '[.id, .name, .codexHome, (.codexFailover.from // ""), (.codexFailover.t
 EOF
   }
   failover_fields
+  # The steps have run and only their closing notice is owed: told again until the watch has delivered it.
+  said=$(jq -r '.codexFailover.notice // empty' "$record")
+  if [ -n "$said" ] && [ "$reopen" != true ] && [ "$cont" != true ]; then
+    if told "$record" "$said"; then
+      lock_owned_worker "$record" "$id" || return 0
+      release_repository_lock
+      set_failover "$record" notice null || true
+    else
+      once "$record" "$said"
+    fi
+    return 0
+  fi
+  said=""
   [ "$reopen" = true ] || [ "$cont" = true ] || return 0
   lock_owned_worker "$record" "$id" || return 0
   release_repository_lock
@@ -232,11 +266,9 @@ EOF
     fi
     set_failover "$record" continue false || true
   fi
-  if [ -n "$said" ]; then
-    once "$record" "$said"
-  else
-    once "$record" "$name (Codex $id) runs on $home. $note"
-  fi
+  said=${said:-"$name (Codex $id) runs on $home. $note"}
+  set_failover "$record" notice "$(jq -nc --arg said "$said" '$said')" || true
+  once "$record" "$said"
   return 10
 }
 

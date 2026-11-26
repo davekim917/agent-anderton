@@ -3,13 +3,16 @@
 # Claude Code runs that checkout's guard hooks, and checks the registration before spawn.sh starts an agy worker.
 #
 # usage: agy-hooks.sh register --guard <bootstrap checkout> [--replace]
-#        agy-hooks.sh check [--workspace <dir>]
+#        agy-hooks.sh check [--workspace <dir>]...
+#        agy-hooks.sh skill [--remove]
 #
 # register keeps herdr's antigravity-cli entry as it is, refuses any other hook unless --replace drops it, and leaves
 # the file read-only (0444): it writes a new file and renames it over the old one, so a read-only file is no obstacle.
 # check passes only for exactly the guard's entry, plus herdr's when it is there, in a read-only regular file, with the
-# guard and bun in place. With --workspace it also refuses a workspace hooks.json in <dir> that names either entry,
+# guard and bun in place. With --workspace (repeatable) it also refuses a workspace hooks.json in <dir> that names either entry,
 # since agy would let it override the global one.
+# skill registers this checkout's Anderton skill as /anderton: a short skill in ~/.gemini/config/skills/anderton that
+# points agy at this checkout, whose scripts run in place, since the guard refuses any command under ~/.gemini.
 # Portable to macOS's bash 3.2 and BSD userland.
 set -euo pipefail
 
@@ -107,11 +110,11 @@ register() {
 }
 
 check() {
-  local workspace="" hooks command guard root path content
+  local workspaces=() workspace hooks command guard root path content
   while [ $# -gt 0 ]; do
     case $1 in
-      --workspace) [ $# -ge 2 ] || die "--workspace needs a directory."; workspace=$2; shift 2 ;;
-      *) die "usage: agy-hooks.sh check [--workspace <dir>]" ;;
+      --workspace) [ $# -ge 2 ] || die "--workspace needs a directory."; workspaces+=("$2"); shift 2 ;;
+      *) die "usage: agy-hooks.sh check [--workspace <dir>]..." ;;
     esac
   done
   [ -f "$file" ] || die "$file is missing: register the guard with agy-hooks.sh register --guard <bootstrap checkout>."
@@ -141,20 +144,100 @@ check() {
     content=$(tr -d '[:space:]' < "$path") || die "could not read $path."
     case $content in '' | '{}') ;; *) die "$path defines hooks; only $file may." ;; esac
   done
-  if [ -n "$workspace" ]; then
+  for workspace in ${workspaces[@]+"${workspaces[@]}"}; do
+    # A directory this user cannot search hides whether agy would find hooks in it, so it is not read as empty.
+    [ -d "$workspace" ] && [ -x "$workspace" ] || die "cannot read $workspace, where agy would look for workspace hooks."
     for root in .agents .agent _agents _agent; do
+      if [ -e "$workspace/$root" ] && ! { [ -r "$workspace/$root" ] && [ -x "$workspace/$root" ]; }; then
+        die "cannot read $workspace/$root, where agy would look for workspace hooks."
+      fi
       path="$workspace/$root/hooks.json"
       [ -e "$path" ] || [ -L "$path" ] || continue
       if [ -L "$path" ] || ! jq -e --arg key "$key" 'type == "object" and (has($key) or has("herdr")) | not' "$path" >/dev/null 2>&1; then
         die "$path could override the guard's registration (a link, unreadable, or naming $key or herdr)."
       fi
     done
-  fi
+  done
   echo "The agy guard is registered in $file: $guard/plugins/workflow-agents/hooks/agy-guard.sh."
+}
+
+# The /anderton skill agy loads: a short one written here, since agy shows the model a skill's text but not where it
+# lives, that names this checkout's SKILL.md and scripts by absolute path. Its marker line names the checkout that wrote
+# it, which alone may replace or remove it.
+skill_marker() { printf '<!-- written by agent-anderton agy-hooks.sh skill for %s -->' "$1"; }
+skill_text() { # skill_text <this checkout's skill folder>
+  printf -- '---\nname: anderton\ndescription: %s\n---\n\n%s\n\nRead %s/SKILL.md in full and follow it. Its scripts are in %s/scripts: run each one by that absolute path.\n' \
+    '"Make this agy session the Anderton, the operator that owns the line to production and coordinates its workers. Use only when the user types /anderton."' \
+    "$(skill_marker "$1")" "$1" "$1"
+}
+
+# One registration or removal at a time: the ownership check and the write it allows happen under one lock, a
+# directory (so no flock is needed) naming the process that holds it.
+skill_lock() {
+  local lock="$config/skills/.anderton-skill.lock" owner tries=0
+  until mkdir "$lock" 2>/dev/null; do
+    [ -d "$lock" ] || die "could not make $lock."
+    owner=$(cat "$lock/pid" 2>/dev/null || true)
+    if [ -n "$owner" ] && ! ps -p "$owner" >/dev/null 2>&1; then
+      rm -rf "$lock"
+      continue
+    fi
+    tries=$((tries + 1))
+    [ "$tries" -lt 100 ] || die "another agy-hooks.sh skill holds $lock; rerun once it ends."
+    sleep 0.1
+  done
+  echo $$ > "$lock/pid"
+  # shellcheck disable=SC2064 # the lock's path is fixed now
+  trap "rm -rf '$lock'" EXIT
+}
+
+skill() {
+  local remove="" skill_dir dir="$config/skills/anderton" file_path existing owner tmp entry
+  case ${1:-} in
+    --remove) remove=1 ;;
+    "") ;;
+    *) die "usage: agy-hooks.sh skill [--remove]" ;;
+  esac
+  [ "$(id -u)" != 0 ] || die "run it as the user agy runs as, not root."
+  skill_dir=$(cd "$(dirname "$0")/.." && pwd -P) || die "could not find this checkout's skill."
+  [ -f "$skill_dir/SKILL.md" ] || die "$skill_dir/SKILL.md is missing."
+  case $skill_dir/ in "$HOME/.gemini/"*) die "$skill_dir is under ~/.gemini, where the guard refuses every command, so the skill's scripts could not run: register it from a checkout elsewhere." ;; esac
+  [ -d "$config" ] && [ -f "$config/.migrated" ] ||
+    die "agy has not set up $config yet (no .migrated there), and its first start would replace a registration written now: run agy once and sign in, then rerun."
+  for entry in "$config" "$config/skills" "$dir" "$dir/SKILL.md"; do
+    [ ! -L "$entry" ] || die "$entry is a symbolic link; agy-hooks will not write through it."
+  done
+  mkdir -p "$config/skills" || die "could not make $config/skills."
+  skill_lock
+  file_path="$dir/SKILL.md"
+  owner=""
+  if [ -e "$dir" ]; then
+    existing=$(cat "$file_path" 2>/dev/null) || existing=""
+    owner=$(printf '%s\n' "$existing" | sed -n 's/^<!-- written by agent-anderton agy-hooks.sh skill for \(.*\) -->$/\1/p' | head -n 1)
+    [ -n "$owner" ] || die "$dir holds an anderton skill agy-hooks.sh did not write; review it, and remove it yourself if it should go."
+  fi
+  if [ -n "$remove" ]; then
+    if [ -z "$owner" ]; then echo "agy loads no /anderton skill from $dir; nothing to remove."; return 0; fi
+    [ "$owner" = "$skill_dir" ] || die "$dir names another checkout ($owner); remove it with that checkout's agy-hooks.sh skill --remove."
+    rm -f "$file_path"
+    rmdir "$dir" 2>/dev/null || true
+    echo "Removed the /anderton skill ($skill_dir) from $dir."
+    return 0
+  fi
+  [ -z "$owner" ] || [ "$owner" = "$skill_dir" ] ||
+    die "$dir already names another checkout ($owner); remove it with that checkout's agy-hooks.sh skill --remove first, so agy loads one."
+  mkdir -p "$dir" || die "could not make $dir."
+  tmp=$(mktemp "$dir/.SKILL.md.XXXXXX") || die "could not write in $dir."
+  skill_text "$skill_dir" > "$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$file_path"
+  echo "Registered the /anderton skill ($skill_dir) in $file_path. agy sessions started from now on list it."
+  case $skill_dir in */plugins/cache/*) echo "$skill_dir is a versioned copy that a plugin update replaces: register it from a clone you keep, such as ~/.claude/plugins/marketplaces/agent-anderton." ;; esac
 }
 
 case ${1:-} in
   register) shift; register "$@" ;;
   check) shift; check "$@" ;;
-  *) echo "usage: agy-hooks.sh register --guard <bootstrap checkout> [--replace] | check [--workspace <dir>]" >&2; exit 2 ;;
+  skill) shift; skill "$@" ;;
+  *) echo "usage: agy-hooks.sh register --guard <bootstrap checkout> [--replace] | check [--workspace <dir>]... | skill [--remove]" >&2; exit 2 ;;
 esac

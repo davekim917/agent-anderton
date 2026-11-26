@@ -35,6 +35,7 @@ records=$(project_holders "$root")
 # The role the caller holds, if any. Each Anderton answers only for the workers it started, and the repository's also
 # for a project's workers once that project's Anderton is gone. A session nobody started is a tab the user opened and
 # reads, so no Anderton answers for it.
+anderton_watch_reads=1
 mine=$(caller_claim "$root")
 answering_role() {
   local worker
@@ -116,7 +117,17 @@ done
 while IFS= read -r r; do
   [ -n "$r" ] && [ "$(record_provider "$r")" = agy ] && [ -f "${r%.json}.agy-config" ] || continue
   [ -z "$mine" ] || [ "$r" = "$mine" ] || continue
-  now=$(agy_config_state "$(jq -r '.dir // empty' "$r")")
+  # A watch an earlier version started records no start time, and these scripts cannot tell its children from anyone's.
+  if [ -s "${r%.json}.watch" ] && [ "$(wc -w < "${r%.json}.watch" | tr -d ' ')" -lt 4 ]; then
+    printf '=== Anderton %s (its watch started before these scripts were updated, so it hears no worker reports: run claim.sh again, which restarts it)\n' \
+      "$(claim_name "$r")"
+  fi
+  # From the home and the workspace directories the claim recorded agy loading, as claim.sh fingerprinted them.
+  dirs=()
+  while IFS= read -r d; do [ -z "$d" ] || dirs+=("$d"); done <<EOF
+$(jq -r '(.agyWorkspaces // [.dir])[]' "$r" 2>/dev/null)
+EOF
+  now=$(HOME=$(jq -r --arg home "$HOME" '.agyHome // $home' "$r") agy_config_state ${dirs[@]+"${dirs[@]}"})
   changed=$(printf '%s\n' "$now" | grep -vxF -f "${r%.json}.agy-config" | cut -f1 | tr '\n' ' ' || true)
   if [ -n "$changed" ]; then
     printf '=== Anderton %s (agy hook or agent configuration changed since it claimed the role, so its guard may be off: %sstate %s. Inspect them; nothing was undone)\n' \

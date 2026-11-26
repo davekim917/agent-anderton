@@ -75,7 +75,8 @@ holders="$home/anderton"
 legacy_holder="$home/anderton.json"
 anderton_scripts="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# agy-anderton.sh gives an agy Anderton's tool shells ANDERTON_AGY_SESSION, and clears the other two runtimes' variables.
+# An agy session's tool shells get ANDERTON_AGY_SESSION from agy-anderton.sh, or else from agy_session_env below, and
+# then carry neither of the other two runtimes' variables.
 invoking_provider() {
   if [ -n "${ANDERTON_AGY_SESSION:-}" ]; then printf 'agy\n'
   elif [ -n "${CLAUDE_CODE_SESSION_ID:-}${CLAUDE_PID:-}" ]; then printf 'claude\n'
@@ -235,9 +236,16 @@ caller_matches_claim() {
   local p codex
   [ -f "$1" ] && [ "$(record_provider "$1")" = "$(invoking_provider)" ] || return 1
   if [ "$(invoking_provider)" = agy ]; then
-    # The claim names the launch and the herdr pane it runs in.
-    jq -e --arg sid "${ANDERTON_AGY_SESSION:-}" --arg pane "${HERDR_PANE_ID:-}" '
-      $sid != "" and .sessionId == $sid and .pane == $pane' "$1" >/dev/null 2>&1
+    # The role's watch reads and sweeps for it, and only where a script says it may (anderton_watch_reads).
+    if [ -n "${anderton_watch_reads:-}" ] && agy_watch_bound "$1"; then return 0; fi
+    # The agy process this shell runs under, verified by agy_session_env, in the claim's herdr socket and pane.
+    [ -n "${ANDERTON_AGY_PID:-}" ] && [ -n "${HERDR_SOCKET_PATH:-}" ] && descends_from "$ANDERTON_AGY_PID" || return 1
+    [ "$(resolve_path "$(jq -r '.socket // empty' "$1" 2>/dev/null)")" = "$(resolve_path "$HERDR_SOCKET_PATH")" ] || return 1
+    jq -e --argjson pid "$ANDERTON_AGY_PID" --arg start "$(proc_start "$ANDERTON_AGY_PID")" --arg pane "${HERDR_PANE_ID:-}" '
+      $start != "" and .agyPid == $pid and .agyStart == $start and .pane == $pane' "$1" >/dev/null 2>&1 || return 1
+    # And herdr has not since shown that process gone from its pane; an answer it cannot read keeps the role.
+    agy_check "$1"
+    case $agy_state in gone | elsewhere) return 1 ;; esac
   elif [ "$(invoking_provider)" = codex ]; then
     # The claim names the conversation and the home it runs on: the same thread opened on another account's home does
     # not hold it until codex-anderton.sh --move hands the claim over.
@@ -248,6 +256,105 @@ caller_matches_claim() {
     p=$(invoking_pid)
     [ -n "$p" ] && is_holder "$sessions/$p.json" "$1"
   fi
+}
+
+# True when this shell runs under the watch of agy claim $1, which claim.sh starts beside agy and not under it, and
+# which names the claim in ANDERTON_AGY_WATCH_CLAIM, and its claim id in ANDERTON_AGY_WATCH_CLAIM_ID, for what it
+# runs: the pid and start time in the claim's .watch file.
+agy_watch_bound() {
+  local wpid wstart
+  [ -n "${ANDERTON_AGY_WATCH_CLAIM:-}" ] && [ "$ANDERTON_AGY_WATCH_CLAIM" = "$1" ] || return 1
+  { read -r wpid _ _ wstart < "${1%.json}.watch"; } 2>/dev/null || return 1
+  [ -n "${wstart:-}" ] && descends_from "$wpid" && process_start_matches "$wpid" "$wstart" || return 1
+  # Still the claim that watch serves, and not one herdr has since shown gone from its pane.
+  jq -e --arg id "${ANDERTON_AGY_WATCH_CLAIM_ID:-}" '$id != "" and .claimId == $id' "$1" >/dev/null 2>&1 || return 1
+  agy_check "$1"
+  case $agy_state in gone | elsewhere) return 1 ;; esac
+}
+
+# True when this shell runs under process $1.
+descends_from() {
+  local p=$$
+  case ${1:-} in '' | *[!0-9]*) return 1 ;; esac
+  while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+    [ "$p" != "$1" ] || return 0
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ') || return 1
+  done
+  return 1
+}
+
+# The skill folder agy's /anderton runs, from what agy-hooks.sh skill wrote in $HOME/.gemini/config/skills/anderton:
+# nothing when nothing is there, and "!" when something is there that it did not write or that cannot be read.
+agy_registered_skill() {
+  local skills="$HOME/.gemini/config/skills" file owner count
+  file="$skills/anderton/SKILL.md"
+  if [ -e "$skills" ] && ! { [ -r "$skills" ] && [ -x "$skills" ]; }; then echo '!'; return 0; fi
+  [ -e "$skills/anderton" ] || [ -L "$skills/anderton" ] || return 0
+  [ -f "$file" ] && [ -r "$file" ] || { echo '!'; return 0; }
+  count=$(grep -c '^<!-- written by agent-anderton agy-hooks.sh skill for ' "$file" 2>/dev/null || true)
+  owner=$(sed -n 's/^<!-- written by agent-anderton agy-hooks.sh skill for \(.*\) -->$/\1/p' "$file" 2>/dev/null | head -n 1 || true)
+  if [ "$count" != 1 ] || [ -z "$owner" ] ||
+    ! grep -qxF "Read $owner/SKILL.md in full and follow it. Its scripts are in $owner/scripts: run each one by that absolute path." "$file"; then
+    echo '!'
+    return 0
+  fi
+  printf '%s\n' "$owner"
+}
+
+# Path $1 with every link resolved, its last component's included; as given when its folder cannot be entered.
+resolve_path() {
+  local f=$1 t
+  while [ -L "$f" ]; do
+    t=$(readlink "$f") || break
+    case $t in /*) f=$t ;; *) f=$(dirname "$f")/$t ;; esac
+  done
+  (cd "$(dirname "$f")" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$(basename "$f")") || printf '%s\n' "$1"
+}
+
+# Exits, naming the registered copy, unless the script running and the scripts it reads are the copy agy's /anderton
+# is registered from.
+require_registered_agy_copy() {
+  local registered here
+  registered=$(agy_registered_skill)
+  [ -n "$registered" ] || return 0
+  if [ "$registered" = '!' ]; then
+    echo "agy's /anderton in $HOME/.gemini/config/skills/anderton is not one agy-hooks.sh skill wrote, or cannot be read: register it again with agy-hooks.sh skill from the checkout you use." >&2
+    exit 1
+  fi
+  for here in "$(dirname "$(dirname "$(resolve_path "$0")")")" "$(dirname "$(dirname "$(resolve_path "${BASH_SOURCE[0]}")")")"; do
+    if [ "$here" != "$registered" ]; then
+      echo "These scripts are a copy in $here, but agy's /anderton runs $registered: use $registered/scripts instead." >&2
+      exit 1
+    fi
+  done
+}
+
+# True only when process $1 is known to have ended: /proc, where it works for this shell, has no entry for it, or else
+# ps answers that it matched nothing (exit 1) while it does find this shell. A ps that fails otherwise proves nothing.
+process_gone() {
+  local status=0
+  if [ -d "/proc/$$" ]; then
+    [ ! -e "/proc/$1" ]
+    return
+  fi
+  ps -p $$ >/dev/null 2>&1 || return 1
+  ps -p "$1" >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 1 ]
+}
+
+# The HOME process $1 runs with, from its environment, or nothing.
+proc_home() {
+  if [ -r "/proc/$1/environ" ]; then
+    tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | sed -n 's/^HOME=//p' | head -n 1 || true
+    return 0
+  fi
+  ps -wwE -p "$1" -o command= 2>/dev/null | tr ' ' '\n' | sed -n 's/^HOME=//p' | tail -n 1 || true
+}
+
+# The working directory of process $1, or nothing.
+proc_cwd() {
+  readlink "/proc/$1/cwd" 2>/dev/null && return 0
+  lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
 }
 
 caller_claim() {
@@ -378,8 +485,18 @@ bind_codex_worker() {
 managed_invoker() {
   local root=$1 provider=$2 sid=$3 identity=$4 dir=$5 r p reg name cwd started file
   if [ "$provider" = codex ]; then codex_worker_record "$identity" "$sid" "$dir"; return; fi
-  # An agy session is an Anderton only through agy-anderton.sh, which no worker runs under.
-  [ "$provider" != agy ] || return 0
+  # An agy worker is the one spawn.sh opened in its pane, an id herdr never reuses on its server.
+  if [ "$provider" = agy ]; then
+    for r in "$holders"/workers/*.json; do
+      [ -f "$r" ] && [ "$(record_provider "$r")" = agy ] || continue
+      if jq -e --arg pane "${HERDR_PANE_ID:-}" '$pane != "" and .pane == $pane' "$r" >/dev/null 2>&1 &&
+        [ "$(resolve_path "$(jq -r '.socket // empty' "$r")")" = "$(resolve_path "${HERDR_SOCKET_PATH:-}")" ]; then
+        printf '%s\n' "$r"
+        return
+      fi
+    done
+    return 0
+  fi
   p=$identity
   reg="$sessions/$p.json"
   name=$(jq -r '.name // empty' "$reg" 2>/dev/null || true)
@@ -733,7 +850,7 @@ place_state() {
 #   agy_agent, agy_cwd: what that snapshot shows in the pane, or nothing.
 # shellcheck disable=SC2034 # the scripts that source this file read what it sets
 agy_check() {
-  local socket pane dir instance apid astart out got_instance got_pane
+  local socket pane dir instance apid astart out got_instance got_pane bound=yes
   agy_state=unknown agy_status="" agy_agent="" agy_cwd=""
   socket=$(jq -r '.socket // empty' "$1") pane=$(jq -r '.pane // empty' "$1") dir=$(jq -r '.dir // empty' "$1")
   instance=$(jq -r '.agyInstance // empty' "$1") apid=$(jq -r '.agyPid // empty' "$1") astart=$(jq -r '.agyStart // empty' "$1")
@@ -754,12 +871,52 @@ agy_check() {
 $(printf '%s' "$out" | jq -r '(.result.agent // empty) | [.agent // "", .agent_status // "", .cwd // "", (.agent_session.value // "" | tostring), .pane_id // ""] | join("\u001f")' 2>/dev/null)
 EOF
   [ -n "$got_pane" ] || return 0
-  if [ "$got_pane" = "$pane" ] && [ "$agy_agent" = agy ] && { [ -z "$instance" ] || [ "$got_instance" = "$instance" ]; } &&
-    { [ "$agy_cwd" = "$dir" ] || case $agy_cwd in "$dir"/*) true ;; *) false ;; esac; } &&
-    { [ -z "$apid" ] || process_start_matches "$apid" "$astart"; }; then
+  # A recorded agy process holds the record only while herdr shows that process, as agy, in the recorded pane. Only
+  # positive evidence frees it: herdr saying the pane is gone or shows another agent, conversation, checkout or process,
+  # or the process itself ended or replaced. Anything incomplete or unreadable is unknown.
+  if [ -n "$apid" ]; then
+    out=$(HERDR_SOCKET_PATH="$socket" herdr pane process-info --pane "$pane" 2>&1) || true
+    bound=$(printf '%s' "$out" | jq -r --arg pid "$apid" '
+      def listed: (.pid | type) == "number";
+      if (.error.code // "") == "pane_not_found" then "gone"
+      else (.result.process_info.foreground_processes // null) as $list
+        | if ($list | type) != "array" or ($list | length) == 0 then "unknown"
+          elif any($list[]; listed and (.pid | tostring) == $pid) then
+            (if any($list[]; listed and (.pid | tostring) == $pid and .name == "agy") then "yes"
+             elif any($list[]; listed and (.pid | tostring) == $pid and (.name | type) == "string" and .name != "") then "no"
+             else "unknown" end)
+          elif all($list[]; listed) then "no"
+          else "unknown" end
+      end' 2>/dev/null) || bound=unknown
+    [ -n "$bound" ] || bound=unknown
+    if [ "$bound" != gone ]; then
+      if process_gone "$apid"; then
+        bound=gone
+      else
+        case $(proc_start "$apid") in
+          "") bound=unknown ;;
+          "$astart") ;;
+          *) bound=gone ;;
+        esac
+      fi
+    fi
+  fi
+  if [ "$bound" = gone ]; then
+    agy_state=gone
+  elif [ -n "$got_pane" ] && [ "$got_pane" != "$pane" ]; then
+    agy_state=unknown
+  elif [ -n "$agy_agent" ] && [ "$agy_agent" != agy ]; then
+    agy_state=elsewhere
+  elif [ -n "$instance" ] && [ -n "$got_instance" ] && [ "$got_instance" != "$instance" ]; then
+    agy_state=elsewhere
+  elif [ -n "$agy_cwd" ] && [ "$agy_cwd" != "$dir" ] && case $agy_cwd in "$dir"/*) false ;; *) true ;; esac; then
+    agy_state=elsewhere
+  elif [ "$bound" = no ]; then
+    agy_state=elsewhere
+  elif [ "$agy_agent" = agy ] && [ -n "$agy_cwd" ] && { [ -z "$instance" ] || [ -n "$got_instance" ]; } && [ "$bound" = yes ]; then
     agy_state=running
   else
-    agy_state=elsewhere
+    agy_state=unknown
   fi
 }
 
@@ -783,7 +940,7 @@ sha256_stdin() {
 }
 
 # The hook, plugin and agent configuration an agy session in worktree $1 loads: its global files and directories, and
-# the same names in each of the four workspace roots agy reads. agy reloads hooks mid-session, so any of these can turn
+# the same names in each of the four workspace roots agy reads, there and in each further directory named after it. agy reloads hooks mid-session, so any of these can turn
 # the guard off or start an unhooked subagent while the worker runs.
 agy_config_paths() {
   local g="$HOME/.gemini" root name
@@ -792,12 +949,14 @@ agy_config_paths() {
     antigravity-cli/agents.json antigravity-cli/secplugins; do
     printf '%s\n' "$g/$name"
   done
-  for root in .agents .agent _agents _agent; do
-    for name in hooks.json plugins plugins.json agents; do printf '%s\n' "$1/$root/$name"; done
+  for dir; do
+    for root in .agents .agent _agents _agent; do
+      for name in hooks.json plugins plugins.json agents; do printf '%s\n' "$dir/$root/$name"; done
+    done
   done
 }
 
-# One line per path agy_config_paths names for worktree $1: the path, a tab, and the digest of what is there now (every
+# One line per path agy_config_paths names for worktree $1 and the directories after it: the path, a tab, and the digest of what is there now (every
 # entry beneath a directory, a link's target, a file's bytes) or "absent". Of config/config.json, which also keeps agy's
 # other settings, only the plugins it enables.
 agy_config_state() {
@@ -824,7 +983,7 @@ agy_config_state() {
         else printf 'O %s\n' "$entry"; fi
       done | sha256_stdin)"
   done <<EOF
-$(agy_config_paths "$1")
+$(agy_config_paths "$@")
 EOF
 }
 
@@ -1034,3 +1193,53 @@ new_claim_id() {
   id=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null) || return 1
   printf '%s\n' "$id" | tr '[:upper:]' '[:lower:]'
 }
+
+# A tool shell of an agy session (agy sets ANTIGRAVITY_CONVERSATION_ID for them; agy-anderton.sh adds the role's name)
+# gets its identity from the agy process it runs under: that process is the session, so a relaunch is another one and
+# /clear keeps it, and its checkout is the top of agy's working directory. In agy's terminal sandbox
+# (its auto mode) the shell runs in a PID namespace whose init is agy, with herdr's socket hidden: no Anderton can run
+# there, and ANDERTON_AGY_SANDBOXED says so. A Claude Code or Codex process nearer than agy keeps the shell its own.
+agy_session_env() {
+  local p=$$ comm start cwd dir
+  if [ -n "${ANDERTON_AGY_WATCH_CLAIM:-}" ]; then
+    if agy_watch_bound "$ANDERTON_AGY_WATCH_CLAIM"; then
+      ANDERTON_AGY_SESSION=$(jq -r '.sessionId // empty' "$ANDERTON_AGY_WATCH_CLAIM")
+      ANDERTON_AGY_PID=$(jq -r '.agyPid // empty' "$ANDERTON_AGY_WATCH_CLAIM")
+      ANDERTON_AGY_DIR=$(jq -r '.dir // empty' "$ANDERTON_AGY_WATCH_CLAIM")
+      HERDR_PANE_ID=$(jq -r '.pane // empty' "$ANDERTON_AGY_WATCH_CLAIM")
+      HERDR_SOCKET_PATH=$(jq -r '.socket // empty' "$ANDERTON_AGY_WATCH_CLAIM")
+      export ANDERTON_AGY_SESSION ANDERTON_AGY_PID ANDERTON_AGY_DIR HERDR_PANE_ID HERDR_SOCKET_PATH
+      unset CLAUDE_CODE_SESSION_ID CLAUDE_PID CODEX_THREAD_ID
+      return 0
+    fi
+    unset ANDERTON_AGY_WATCH_CLAIM
+  fi
+  [ -n "${ANTIGRAVITY_CONVERSATION_ID:-}${ANDERTON_AGY_NAME:-}${ANDERTON_AGY_SESSION:-}" ] || return 0
+  # Only the agy process above this shell says who it is: a supplied session, pid or checkout counts for nothing.
+  unset ANDERTON_AGY_SESSION ANDERTON_AGY_PID ANDERTON_AGY_DIR ANDERTON_AGY_SANDBOXED
+  while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+    [ "$p" != "${CLAUDE_PID:-}" ] || return 0
+    comm=$(ps -o comm= -p "$p" 2>/dev/null) || return 0
+    comm=${comm##*/}
+    case $comm in
+      agy) break ;;
+      claude | codex) return 0 ;;
+    esac
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ') || return 0
+  done
+  if [ "$p" = 1 ]; then
+    case $(readlink /proc/1/exe 2>/dev/null) in */agy) export ANDERTON_AGY_SANDBOXED=1 ;; esac
+    return 0
+  fi
+  [ -n "$p" ] || return 0
+  start=$(proc_start "$p")
+  [ -n "$start" ] || return 0
+  cwd=$(proc_cwd "$p")
+  [ -n "$cwd" ] || return 0
+  dir=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) || dir=$(cd "$cwd" 2>/dev/null && pwd -P) || return 0
+  ANDERTON_AGY_SESSION="agy-$p-$(printf '%s' "$start" | sha256_stdin | cut -c1-12)"
+  ANDERTON_AGY_PID=$p ANDERTON_AGY_DIR=$dir
+  export ANDERTON_AGY_SESSION ANDERTON_AGY_PID ANDERTON_AGY_DIR
+  unset CLAUDE_CODE_SESSION_ID CLAUDE_PID CODEX_THREAD_ID
+}
+agy_session_env

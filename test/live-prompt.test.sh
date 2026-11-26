@@ -210,6 +210,7 @@ check "a sub-agent's tall dialog reads in full" eval '[ "$status" -eq 0 ] && con
 check_old_answers live-sub sub-marker-01
 
 # A real herdr tab, when this runs inside herdr.
+# shellcheck disable=SC2031 # session-lib.sh sets it only for an agy watch's children, never in this shell
 if [ -n "${HERDR_SOCKET_PATH:-}" ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] && [ -z "${LIVE_TMUX_ONLY:-}" ]; then
   created=$(herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$repo" --label live-h --no-focus)
   herdr_tabs=$(printf '%s' "$created" | jq -r '.result.tab.tab_id')
