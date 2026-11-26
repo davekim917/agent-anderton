@@ -37,7 +37,9 @@ cat > "$tmp/scripts/codex-worker.py" <<'STUB'
 #!/usr/bin/env bash
 case $1 in
   identity) jq -cn --arg id "$3" --arg dir "$FIXTURE_ROOT" '{id:$id, dir:$dir, name:"fixture-codex"}' ;;
-  claim-state) if [ -n "${NOT_REACHABLE:-}" ]; then exit 1; fi; echo "${CLAIM_STATE:-live}" ;;
+  claim-state)
+    while [ -n "${FIXTURE_STATE_GATE:-}" ] && [ ! -e "$FIXTURE_STATE_GATE" ]; do sleep 0.1; done
+    if [ -n "${NOT_REACHABLE:-}" ]; then exit 1; fi; echo "${CLAIM_STATE:-live}" ;;
   start-watch) echo "${CODEX_THREAD_ID:-} ${CODEX_HOME:-} $3" >> "$FIXTURE_ROOT/../watch-starts" ;;
   loaded)
     while [ -n "${FIXTURE_LOADED_GATE:-}" ] && [ ! -e "$FIXTURE_LOADED_GATE" ]; do sleep 0.1; done
@@ -243,6 +245,12 @@ rm -f "$tmp/locate"
 jq --arg home "$CODEX_HOME" '.codexHome = $home' "$root_claim" > "$root_claim.tmp" && mv "$root_claim.tmp" "$root_claim"
 codex_role env CODEX_HOME="$moved_home" ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" "$script/claim.sh"
 jq -e --arg home "$moved_home" '.codexHome == $home' "$root_claim" > /dev/null
+# The same thread taking its claim over from a home the helper cannot place it on is no take-over from another session.
+jq --arg home "$CODEX_HOME" '.codexHome = $home' "$root_claim" > "$root_claim.tmp" && mv "$root_claim.tmp" "$root_claim"
+echo "$tmp/unplaced-home" > "$tmp/locate"
+codex_role env CODEX_HOME="$moved_home" ANDERTON_CODEX_ACCOUNTS="$tmp/accounts" "$script/claim.sh" --take-over > "$tmp/same-thread" 2>&1
+rm -f "$tmp/locate"
+if grep -q 'Took it over' "$tmp/same-thread" || [ -s "$claims/takeovers.log" ]; then exit 1; fi
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/codex"
 jq --arg home "$CODEX_HOME" '.codexHome = $home' "$root_claim" > "$root_claim.tmp" && mv "$root_claim.tmp" "$root_claim"
 refused_claim claude_role "$script/claim.sh"
@@ -453,7 +461,15 @@ if codex_role "$script/worker.sh" message clearable 'Refuse before the resumed S
 grep -q 'has not registered its Anderton Stop hook' "$tmp/refused"
 # A worker a Claude Anderton started ends its turns under that Anderton, so its Stop watcher ends at once. The holder
 # that takes the role over wakes it in its herdr pane, only while herdr shows that worker's session there, idle.
-claude_role "$script/claim.sh" --take-over
+# The take-over does not wait on the old holder's daemon.
+claude_role env FIXTURE_STATE_GATE="$tmp/state-gate" "$script/claim.sh" --take-over > /dev/null &
+taking=$!
+for _ in $(seq 1 100); do kill -0 "$taking" 2> /dev/null || break; sleep 0.1; done
+waited=""
+if kill -0 "$taking" 2> /dev/null; then waited=1; fi
+: > "$tmp/state-gate"
+wait "$taking"
+[ -z "$waited" ]
 inherited_plain="$claims/workers/inherited-plain.json"
 jq --arg socket "$tmp/herdr.sock" '.name = "inherited-plain" | .spawnerProvider = "claude" | .claudeLaunchId = "inherited-plain-id"
   | .launcher = "herdr" | .pane = "w9:p90" | .socket = $socket | del(.claudeSession, .reportTransport, .claudeDirection)

@@ -2013,7 +2013,11 @@ mv "$holder_file.gone" "$holder_file"
 export ANDERTON_WATCH_TICK=2
 watch_start wh-2
 export ANDERTON_WATCH_TICK=0.05
-(cd "$watched" && env CLAUDE_PID="$p_wa" CLAUDE_CODE_SESSION_ID=wa-1 "$scripts/claim.sh" --take-over >/dev/null)
+out=$(cd "$watched" && env CLAUDE_PID="$p_wa" CLAUDE_CODE_SESSION_ID=wa-1 "$scripts/claim.sh" --take-over 2>&1)
+check "a take-over of another holder says whom it took the role from and how to hand it back" \
+  eval 'contains "Took it over from claude session wh-2" && contains "that session runs $(printf %q "$scripts/claim.sh") --take-over"'
+check "and logs it" eval 'contains "Logged it in" &&
+  jq -e "select(.from.sessionId == \"wh-2\" and .to.sessionId == \"wa-1\")" "$CLAUDE_CONFIG_DIR/anderton/takeovers.log" >/dev/null'
 spawn; p_tw=$pid; session "$p_tw" tw-1 "$watched" taker-worker "$(date +%s)000"
 transcript tw-1 "$recent" asking "Before the question."
 jq -nc --arg d "$watched" '{name: "taker-worker", dir: $d, spawner: "other"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/taker-worker.json"
@@ -2025,6 +2029,52 @@ check "and reports to the new holder" contains "=== taker-worker (worker)"
 registry "$p_tw" idle
 (cd "$watched" && env CLAUDE_PID="$p_wh" CLAUDE_CODE_SESSION_ID=wh-2 "$scripts/claim.sh" --take-over >/dev/null)
 unset ANDERTON_WATCH_TICK
+# The log names the holder the claim recorded, though the registry has since given its pid to another session. A
+# project named with a space is handed back as one argument, and a take-over the log cannot record is made all the same.
+qa="$work/qa"
+mkdir -p "$qa"
+git -C "$qa" init -q
+spawn; p_qa1=$pid; session "$p_qa1" qa-1 "$qa" qa-one "$(date +%s)000"
+spawn; p_qa2=$pid; session "$p_qa2" qa-2 "$qa" qa-two "$(date +%s)000"
+spawn; p_qa3=$pid; session "$p_qa3" qa-3 "$qa" qa-three "$(date +%s)000"
+(cd "$qa" && env CLAUDE_PID="$p_qa1" CLAUDE_CODE_SESSION_ID=qa-1 "$scripts/claim.sh" --project 'Release QA' >/dev/null)
+session "$p_qa1" qa-later "$qa" qa-later "$(date +%s)000"
+out=$(cd "$qa" && env CLAUDE_PID="$p_qa2" CLAUDE_CODE_SESSION_ID=qa-2 "$scripts/claim.sh" --project 'Release QA' --take-over 2>&1)
+check "a take-over logs the holder the claim names, not the session now at its pid" eval 'contains "from claude session qa-1" &&
+  jq -e --argjson pid "$p_qa1" "select(.from.sessionId == \"qa-1\" and .from.pid == \$pid and .to.sessionId == \"qa-2\")" \
+    "$CLAUDE_CONFIG_DIR/anderton/takeovers.log" >/dev/null'
+check "and the hand-back keeps a project name with a space as one argument" contains "claim.sh --project Release\\ QA --take-over"
+chmod a-w "$CLAUDE_CONFIG_DIR/anderton/takeovers.log"
+set +e
+out=$(cd "$qa" && env CLAUDE_PID="$p_qa3" CLAUDE_CODE_SESSION_ID=qa-3 "$scripts/claim.sh" --project 'Release QA' --take-over 2>&1)
+status=$?
+set -e
+chmod u+w "$CLAUDE_CONFIG_DIR/anderton/takeovers.log"
+check "a take-over the log cannot record is still made, with a warning and no word of logging it" \
+  eval '[ "$status" -eq 0 ] && contains "claimed by session qa-3" && contains "could not log the take-over" &&
+    ! printf "%s" "$out" | grep -qi "logged it"'
+qa_claim="$CLAUDE_CONFIG_DIR/anderton/$(jq -r 'select(.to.sessionId == "qa-2") | .key' "$CLAUDE_CONFIG_DIR/anderton/takeovers.log").json"
+printf '{' > "$qa_claim"
+set +e
+out=$(cd "$qa" && env CLAUDE_PID="$p_qa2" CLAUDE_CODE_SESSION_ID=qa-2 "$scripts/claim.sh" --project 'Release QA' --take-over 2>&1)
+status=$?
+set -e
+check "a take-over of a claim it cannot read is made, from an unknown holder" \
+  eval '[ "$status" -eq 0 ] && contains "claimed by session qa-2" && contains "Took it over from unknown session"'
+# From a checkout whose path has a space, the printed hand-back is escaped, and runs as printed.
+spaced="$work/plugin copy"
+mkdir -p "$spaced"
+cp -R "$scripts" "$spaced/scripts"
+out=$(cd "$qa" && env CLAUDE_PID="$p_qa3" CLAUDE_CODE_SESSION_ID=qa-3 "$spaced/scripts/claim.sh" --project 'Release QA' --take-over 2>&1)
+hand_back=$(printf '%s\n' "$out" | sed -n 's/.*To hand it back, that session runs \(.*\) once the user says so\.$/\1/p')
+check "from a checkout path with a space, the hand-back names claim.sh escaped" \
+  eval '[ "$hand_back" = "$(printf %q "$spaced/scripts/claim.sh") --project Release\\ QA --take-over" ]'
+set +e
+out=$(cd "$qa" && env CLAUDE_PID="$p_qa2" CLAUDE_CODE_SESSION_ID=qa-2 bash -c "$hand_back" 2>&1)
+status=$?
+set -e
+check "and the displaced session takes the role back by running it as printed" \
+  eval '[ "$status" -eq 0 ] && contains "claimed by session qa-2" && contains "Took it over from claude session qa-3"'
 
 # A holder from an earlier version has its record in the machine-wide file and may have no anderton directory.
 export ANDERTON_WATCH_TICK=0.05

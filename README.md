@@ -470,8 +470,11 @@ it is the session's directory. A project is a name within a repository, with its
 **`claim.sh`** records the claiming session as the repository's Anderton in
 `~/.claude/anderton/<key>.json`. The key is `git hash-object` of the repository root, which the
 record also holds. It exits 3 while another live session holds that role; `--take-over`
-replaces it. `--project <name>` claims a named project within the repository instead, with its own
-Anderton and a key hashed from the root and the name (`--scope`, its earlier name, still works).
+replaces it. A take-over from another session appends a line to `~/.claude/anderton/takeovers.log`
+(when, which role, the holder the claim named and the taker, each with its claim) and prints how the
+displaced session hands the role back: the same `--take-over`, run by it once the user says so. A line
+it cannot write is a warning; the take-over stands. `--project <name>` claims a
+named project within the repository instead, with its own Anderton and a key hashed from the root and the name (`--scope`, its earlier name, still works).
 One session holds one role per repository: a session holding the repository's role or another
 project's is refused (exit 3), `--take-over` included. The record names a Claude Code process (its
 pid plus its registry start time) and the session it runs, and the watch keeps both current, so the
