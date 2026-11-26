@@ -97,7 +97,8 @@ Anderton, not you. It answers what it can, brings you the decisions that are you
 PR, and deploys what passes.
 
 **Requirements:** Claude Code with `claude agents`, built and
-tested on 2.1.312, and support for `--session-id`; `git`, `jq`, `gh`, and `uuidgen` or Python 3;
+tested on 2.1.312, and support for `--session-id`; `git`, `jq`, `gh`, and Python 3 (`python3`, which reads reports for the
+send hook, the sweeps and retirement; `claim.sh`, `spawn.sh` and the launchers refuse to start without it);
 and herdr or tmux. It runs on Linux and on macOS,
 including macOS's stock bash 3.2.
 
@@ -406,6 +407,10 @@ own workers, and hears when they block. Only one per repository deploys, though:
 their deploys to it, since two sessions that both ship is the problem this exists to stop. One
 session holds one role.
 
+Andertons message each other only for shared or host-level work: a deploy to run, a host fix or
+lookup only the other can do, a fact only it can read, or an answer to its question. They never
+relay their workers' progress to each other; each project's results stay in its own tab.
+
 <details>
 <summary><b>How it works</b></summary>
 
@@ -540,9 +545,10 @@ worktree when the worktree has uncommitted changes, or commits since it started 
 branch has. Untracked files count whatever `status.showUntrackedFiles` says, and a worktree git
 cannot read or compare with its base is kept too. Gitignored files don't count as changes.
 
-Before it closes anything, `retire.sh` reads the worker's conversation since its last report to its
-Anderton: a delivered `SendMessage` report, or for a Codex Anderton reading a Claude worker's transcript, a
-final reply that is one; for a Codex worker, a completed turn whose final message is one. A message after it
+Before it closes anything, `retire.sh` reads the worker's conversation since its last completion report (`RESULT:`) to
+its Anderton: a delivered `SendMessage` one, or for a Codex Anderton reading a Claude worker's transcript, a
+final reply that is one; for a Codex worker, a completed turn whose final message is one. A question, a block, an
+answer or any other send never clears a hold, from anyone: a worker that just asked is not done. A message after it
 from anyone but that Anderton (typed in the worker's tab, a voice relay, another session, a Codex TUI turn)
 holds the retirement: it exits 4, lists each message's time and first line, and writes `<name>.held` beside the
 record, which `waiting.sh` (and so the watch) lists until the worker is retired. The Anderton's own messages are
@@ -631,6 +637,8 @@ Only a role claimed with `--project workgroup:<id>[/<project>]` emits, and its e
 - `milestone`, after a worker's `RESULT:`, `QUESTION:` or `BLOCKED:` was sent: its kind and up to ten GitHub
   URLs from the message, never the message itself;
 - `done`, from `retire.sh`, with `worker`.
+- `warning` with `status` `python3-missing` and `worker`, once per session, when a worker's send hook finds no `python3` (a
+  `/reload-plugins` can load the hook without the preflight). The send passes, and Claude is told in the call's context.
 
 Each claim has a `claimId`, kept by the same session through a re-claim, rebind or resume and new for any other
 session, so whatever trusts one claim does not trust the next holder of the same scope. A worker's record names
@@ -645,20 +653,19 @@ record the new holder's claim on a worker the old holder started, so that worker
 **`report-gate.sh`** is a hook on `SendMessage`, run before and after each send. It judges two kinds of
 message: a worker's to the session `spawn.sh` started it from, and any session's to its repository's Anderton,
 named in the claim file, checked to be the live process the record names, and addressed by name, by name
-with a listing ref, or by socket. It holds a message whose first line doesn't open with `RESULT:`,
-`QUESTION:`, `BLOCKED:` or `ANSWER:` (any session other than a worker also has `DIRECTION:`, for passing
-on a person's instruction, and a named project's Anderton has only `DEPLOY:`, `LOOKUP:` and `ANSWER:`), and one that repeats, word for word, the sender's last message to that
-recipient within 30 minutes (`ANDERTON_REPEAT_WINDOW`, in seconds); an `ANSWER:` is never a repeat,
-since two questions can have the same short answer. A message counts as sent only once the
-send succeeds, so a failed or denied send can be retried. A named project's Anderton answers to the user in its own tab, so it
-messages the repository's Anderton only to ship something, to ask a fact about the host that only it
-can read, or to answer it. The other way, the repository's Anderton writes to a named project's Anderton
-only with `DIRECTION:`, `QUESTION:` or `ANSWER:`, and the hook appends to each such message (as the
-call's `updatedInput`) a footer telling the project's Anderton to report results and the user's calls in
-its own tab and to reply only with a fact. Its other messages, messages to anyone else, and sessions in
-other repositories pass untouched, and the repository is the one the session started in. It blocks or
-appends that footer: it prints no decision, so it can't approve a call, and it allows whenever it can't
-tell, a crash included.
+with a listing ref, or by socket. A worker's message, and one from a session that holds no role, is held unless
+it opens with `RESULT:`, `QUESTION:`, `BLOCKED:` or `ANSWER:` followed by text (a session that holds no role also has
+`DIRECTION:`, for passing on a person's instruction). A worker's kind is what the milestone event and a Codex or
+agy Anderton's transcript sweep read; a session that holds no role learns the kinds only from the hold, since
+nothing else from the plugin reaches it. One Anderton writing to another, the repository's or a named
+project's, needs no kind: whether it should write at all is the skill's rule (shared or host-level work only,
+never a worker's progress), not a label's. Any of these is also held when it repeats, word for word, the
+sender's last message to that recipient within 30 minutes (`ANDERTON_REPEAT_WINDOW`, in seconds); an
+`ANSWER:` is never a repeat, since two questions can have the same short answer. A message counts as sent
+only once the send succeeds, so a failed or denied send can be retried. The repository's Anderton's own
+messages, messages to anyone else, and sessions in other repositories pass untouched, and the repository is
+the one the session started in. It only blocks: it prints no decision, so it can't approve a call, and it
+allows whenever it can't tell, a crash included.
 
 **`prompt.sh <name>`** reads a Claude Code permission prompt from the session's herdr tab or tmux pane.
 Approve or deny the request directly in that pane. A dialog taller than its screen has lost its top,

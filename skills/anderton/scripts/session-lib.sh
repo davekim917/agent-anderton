@@ -56,7 +56,7 @@ registered_alive() {
 # so any claim would succeed.
 require_tools() {
   local tool missing=""
-  for tool in jq git; do
+  for tool in jq git python3; do
     command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
   done
   if [ -n "$missing" ]; then

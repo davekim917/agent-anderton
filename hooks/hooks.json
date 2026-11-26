@@ -1,5 +1,5 @@
 {
-  "description": "In a session holding an Anderton role, the repository's or a project's, wakes it when a session it answers for blocks on a person, or when the role's probe prints something new. Holds a message to an Anderton, from its workers or another session in the repository, that names no kind or repeats the last one sent, and holds the repository's Anderton to DIRECTION:, QUESTION: and ANSWER: toward a project's Anderton, appending to each a footer that keeps the project's results and the user's calls in that project's tab; records a message once it is sent. Tells the command a host may set in ANDERTON_EVENT_COMMAND when a workgroup role's or its workers' turns start and end. No hook can approve anything.",
+  "description": "In a session holding an Anderton role, the repository's or a project's, wakes it when a session it answers for blocks on a person, or when the role's probe prints something new. Holds a message to an Anderton from its workers, or from a session in the repository that holds no role, that names no kind, and any message to an Anderton that repeats the last one sent; records a message once it is sent. Tells the command a host may set in ANDERTON_EVENT_COMMAND when a workgroup role's or its workers' turns start and end. No hook can approve anything.",
   "hooks": {
     "SessionStart": [
       {

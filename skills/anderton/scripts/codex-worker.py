@@ -517,8 +517,8 @@ def record_sent_direction(worker, client_id):
 
 
 def inbound_since_report(client, worker, through_ms=None):
-    """The user messages in the worker's thread since its last report that its Anderton did not send, oldest first:
-    a completed turn whose final message is a report ends the scan. The Anderton's are its launch brief and the
+    """The user messages in the worker's thread since its last RESULT: that its Anderton did not send, oldest first:
+    a completed turn whose final message is a RESULT: ends the scan; a question, a block or an answer does not. The Anderton's are its launch brief and the
     directions worker.sh recorded sending, known by their client ids. Only on a record from before that ledger, whose
     finished directions left no id behind, does the text worker.sh adds mark a direction."""
     if not worker.get("id"):
@@ -534,7 +534,7 @@ def inbound_since_report(client, worker, through_ms=None):
     first = first[0]["id"] if first else None
     held = []
     for turn in client.pages("thread/turns/list", threadId=thread, sortDirection="desc", limit=20, itemsView="notLoaded"):
-        if turn["status"] == "completed" and final_report(client, thread, turn["id"]):
+        if turn["status"] == "completed" and (final_report(client, thread, turn["id"]) or "").startswith("RESULT:"):
             break
         # An item without a time of its own may have arrived any time until its turn ended.
         turn_end = (turn.get("completedAt") or 0) * 1000 or int(time.time() * 1000)
