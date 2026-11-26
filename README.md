@@ -607,6 +607,8 @@ Only a role claimed with `--project workgroup:<id>[/<project>]` emits, and its e
 - `milestone`, after a worker's `RESULT:`, `QUESTION:` or `BLOCKED:` was sent: its kind and up to ten GitHub
   URLs from the message, never the message itself;
 - `done`, from `retire.sh`, with `worker`.
+- `warning` with `status` `python3-missing` and `worker`, once per session, when a worker's send hook finds no `python3` (a
+  `/reload-plugins` can load the hook without the preflight). The send passes, and Claude is told in the call's context.
 
 Each claim has a `claimId`, kept by the same session through a re-claim, rebind or resume and new for any other
 session, so whatever trusts one claim does not trust the next holder of the same scope. A worker's record names

@@ -109,6 +109,7 @@ EOF
     required=1
     kinds="RESULT|QUESTION|BLOCKED|ANSWER|DIRECTION"
   fi
+  warn_no_parser
   kind=$(printf '%s' "$input" | jq -j '.tool_input.message // ""' 2>/dev/null | "$anderton_scripts/claude-worker.py" report-kind "$kinds") ||
     case $? in 3 | 4) ;; *) exit 0 ;; esac
   if [ -n "$required" ] && [ -z "$kind" ]; then
@@ -167,10 +168,26 @@ EOF
   return 1
 }
 
+# After /reload-plugins a running session can load this hook without claim.sh's preflight. With no python3 the parser
+# cannot run: the send passes, Claude is told in the call's context (it never sees a passing hook's stderr), and a
+# workgroup worker's host hears it once per session.
+warn_no_parser() {
+  command -v python3 >/dev/null 2>&1 && return 0
+  local line="anderton: python3 is missing, so this report was not recorded as a milestone. Install python3."
+  echo "$line" >&2
+  jq -nc --arg line "$line" '{hookSpecificOutput: {hookEventName: "PreToolUse", additionalContext: $line}}'
+  if [ -n "${wrec:-}" ] && mkdir -p "$holders/reports" 2>/dev/null && (set -C; : > "$holders/reports/no-python3.$sid") 2>/dev/null; then
+    emit_event "$(jq -r '.spawnerClaimId // empty' "$wrec")" "$(jq -r '.spawnerScope // empty' "$wrec")" warning \
+      status=python3-missing "worker=$(jq -r '.name // empty' "$wrec")"
+  fi
+  exit 0
+}
+
 # One Anderton writing to another: never a RESULT:, a worker's completion report and the one a retirement hold waits
 # for, and never a kind with nothing after it. Anything else, or a parser that cannot answer, passes.
 peer_gate() {
   local kind status=0
+  warn_no_parser
   kind=$(printf '%s' "$input" | jq -j '.tool_input.message // ""' 2>/dev/null |
     "$anderton_scripts/claude-worker.py" report-kind "RESULT|QUESTION|BLOCKED|ANSWER|DIRECTION|DEPLOY|LOOKUP" 2>/dev/null) || status=$?
   if [ "$status" = 0 ] && [ "$kind" = RESULT ]; then
@@ -233,6 +250,7 @@ gate_stale_worker_report() {
   # A listing reference can deliberately address somebody else who now uses the old display name.
   case $to in "$old ["*) exit 0 ;; esac
   local label=0
+  warn_no_parser
   printf '%s' "$input" | jq -j '.tool_input.message // ""' 2>/dev/null | "$anderton_scripts/claude-worker.py" report-kind >/dev/null || label=$?
   case $label in
     0) ;;

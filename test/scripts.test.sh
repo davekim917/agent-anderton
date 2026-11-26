@@ -641,6 +641,13 @@ check "a send reported as delivered is recorded, so its repeat is held" [ "$stat
 send "$worker_sid" "$work/wt-fix-login" lead-session '"ANSWER: yes"'
 send "$worker_sid" "$work/wt-fix-login" lead-session '"ANSWER: yes"'
 check "lets the same short answer through twice: answers to two questions can match" [ "$status" -eq 0 ]
+mkdir -p "$work/nopy-gate"
+for t in bash env jq ps sed cksum date find mkdir cut tr cat dirname basename rm grep head tail sort awk git sleep; do
+  ln -s "$(command -v "$t")" "$work/nopy-gate/$t"
+done
+PATH="$work/nopy-gate" gate "$worker_sid" "$work/wt-fix-login" lead-session '"RESULT: PR ready https://example.invalid/pr/1"'
+check "with no python3, a report passes and Claude is told it was not recorded" \
+  eval '[ "$status" -eq 0 ] && contains "python3 is missing, so this report was not recorded" && contains "\"additionalContext\""'
 mkdir -p "$work/noparser"
 printf '#!/bin/sh\nexit 1\n' > "$work/noparser/python3"
 chmod +x "$work/noparser/python3"
@@ -1110,6 +1117,11 @@ export ANDERTON_EVENT_COMMAND="cat >> '$events'"
 gate "$ev_sid" "$work/wt-ev-worker" lead-session '"Got it, starting now."'
 GATE_RESPONSE='{"success":false}' send "$ev_sid" "$work/wt-ev-worker" lead-session '"BLOCKED: no access."'
 check "a held message, or a send that failed, emits nothing" eval 'sleep 0.5; [ "$(grep -c . "$events")" -eq 3 ]'
+PATH="$work/nopy-gate" gate "$ev_sid" "$work/wt-ev-worker" lead-session '"RESULT: https://github.com/acme-org/web/pull/14"'
+PATH="$work/nopy-gate" gate "$ev_sid" "$work/wt-ev-worker" lead-session '"RESULT: https://github.com/acme-org/web/pull/15"'
+check "with no python3, the host hears it once" eval 'wait_events 4 && sleep 0.5 && [ "$(grep -c . "$events")" -eq 4 ] &&
+  [ "$(event 4 | jq -c .)" = "{\"claimId\":\"$ev_claim\",\"scope\":\"workgroup:acme/ci\",\"kind\":\"warning\",\"status\":\"python3-missing\",\"worker\":\"ev-worker\"}" ]'
+head -n 3 "$events" > "$events.tmp" && mv "$events.tmp" "$events"
 
 turn() { # turn <session id> <cwd>: what UserPromptSubmit runs; sets $out
   out=$(printf '{"session_id":"%s","cwd":"%s","hook_event_name":"UserPromptSubmit"}' "$1" "$2" |
