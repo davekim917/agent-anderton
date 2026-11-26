@@ -284,6 +284,16 @@ other_agy=$agy_pid other_jobs=$agy_jobs
 other=(ANTIGRAVITY_CONVERSATION_ID=conv-other ANDERTON_AGY_NAME=agy-other "${herdr_env[@]}" HERDR_PANE_ID=w9:p79)
 in_agy "$other_jobs" "${other[@]}" -- "$scripts/claim.sh"
 check "another agy session claims a role whose holder's pane is gone" eval '[ "$status" -eq 0 ] && contains "claimed by agy session agy-$other_agy-"'
+# A take-over of a live agy holder tells it, in its pane, who took the role and how to hand it back.
+session_agy w9:p82
+taker_agy=$agy_pid taker_jobs=$agy_jobs
+: > "$FAKE/prompts"
+in_agy "$taker_jobs" ANTIGRAVITY_CONVERSATION_ID=conv-taker ANDERTON_AGY_NAME=agy-taker "${herdr_env[@]}" HERDR_PANE_ID=w9:p82 -- "$scripts/claim.sh" --take-over
+check "an agy take-over of a live holder says how to hand it back" eval '[ "$status" -eq 0 ] && contains "Took it over from agy session agy-$other_agy-" &&
+  contains "claim.sh --take-over"'
+check "and the displaced holder's watch tells it in its pane" eventually grep -qE "^w9:p79 Anderton watch: agy session agy-$taker_agy-[0-9a-f]+ \(agy-taker\) took over your role" "$FAKE/prompts"
+in_agy "$other_jobs" "${other[@]}" -- "$scripts/claim.sh" --take-over
+check "and it takes the role back the way it was told" eval '[ "$status" -eq 0 ] && contains "Took it over from agy session agy-$taker_agy-"'
 
 # Opened below the top of a linked worktree, agy runs at the top of that checkout, guarded and trusted for it.
 git -C "$repo" worktree add -q "$tmp/linked"

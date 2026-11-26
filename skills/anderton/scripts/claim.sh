@@ -203,6 +203,20 @@ if [ -n "$record" ] && [ -z "$force" ] && ! caller_matches_claim "$record"; then
   fi
 fi
 
+# A take-over of a role another session may still hold is told to that session and logged, so a mistaken one is seen
+# and handed back.
+displaced="" dprovider="" dsid="" dname="" dclaim=""
+if [ -n "$record" ] && [ -n "$force" ] && ! caller_matches_claim "$record" && [ "$(claim_state "$record")" != gone ]; then
+  displaced=1
+  dprovider=$(record_provider "$record")
+  if [ "$dprovider" = claude ]; then
+    dsid=$(jq -r '.sessionId // empty' "$sessions/$(jq -r '.pid // empty' "$record").json" 2>/dev/null || true)
+  fi
+  dsid=${dsid:-$(jq -r '.sessionId // empty' "$record")}
+  dname=$(claim_name "$record")
+  dclaim=$(jq -r '.claimId // empty' "$record")
+fi
+
 # The probe belongs to the role, not the session: a rebind, a take-over and a plain re-claim keep it.
 old_probe=$(jq -r '.probe.command // empty' "${record:-/dev/null}" 2>/dev/null || true)
 if [ -n "$probe_set" ]; then
@@ -261,6 +275,23 @@ jq -nc --arg root "$root" --arg scope "$scope" --arg pid "$pid" --arg started "$
    + (if $probe == null then {} else {probe: $probe} end)
    + (if $peer == null then {} else {peerMessage: $peer} end)' > "$state.tmp"
 mv "$state.tmp" "$state"
+if [ -n "$displaced" ]; then
+  taker_name=$name
+  if [ "$provider" = claude ]; then taker_name=$(jq -r '.name // empty' "$sessions/$pid.json" 2>/dev/null || true); fi
+  taker="$provider session $sid${taker_name:+ ($taker_name)}"
+  hand_back="claim.sh${scope:+ --project $scope} --take-over"
+  at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  printf '%s\t%s\tfrom %s session %s%s claim %s\tto %s claim %s\n' "$at" "$role" "$dprovider" "$dsid" "${dname:+ ($dname)}" \
+    "${dclaim:-none}" "$taker" "$claim_id" >> "$holders/takeovers.log"
+  case $dsid in
+    '' | *[!a-zA-Z0-9-]*) ;;
+    *)
+      mkdir -p "$holders/displaced"
+      printf 'Anderton watch: %s took over your role, %s, at %s. Nothing was approved. To hand it back once the user says so, run %s from this session.\n' \
+        "$taker" "$role" "$at" "$hand_back" > "$holders/displaced/$dprovider-$dsid"
+      ;;
+  esac
+fi
 # The machine-wide file now speaks for no project, so nothing reads a stale holder from it.
 if [ "$record" = "$legacy_holder" ]; then mv "$legacy_holder" "$legacy_holder.migrated"; fi
 # A rebind runs on every turn's end; only a claim starts the role's thread on the host.
@@ -280,6 +311,9 @@ elif [ "$provider" = agy ]; then
   fi
 else
   echo "$role claimed by session $sid (pid $pid)."
+fi
+if [ -n "$displaced" ]; then
+  echo "Took it over from $dprovider session $dsid${dname:+ ($dname)}, which is told, and logged it in $holders/takeovers.log. To hand it back, that session runs $hand_back once the user says so."
 fi
 if [ -n "$probe_set" ] && [ -n "$probe" ]; then
   echo "Probe set: the watch runs it every ${every:-60} seconds and wakes you when it prints."

@@ -2013,7 +2013,14 @@ mv "$holder_file.gone" "$holder_file"
 export ANDERTON_WATCH_TICK=2
 watch_start wh-2
 export ANDERTON_WATCH_TICK=0.05
-(cd "$watched" && env CLAUDE_PID="$p_wa" CLAUDE_CODE_SESSION_ID=wa-1 "$scripts/claim.sh" --take-over >/dev/null)
+out=$(cd "$watched" && env CLAUDE_PID="$p_wa" CLAUDE_CODE_SESSION_ID=wa-1 "$scripts/claim.sh" --take-over 2>&1)
+check "a take-over of a live holder says whom it took the role from and how to hand it back" \
+  eval 'contains "Took it over from claude session wh-2" && contains "To hand it back, that session runs claim.sh --take-over"'
+check "and logs it" grep -qE "from claude session wh-2 .*to claude session wa-1" "$CLAUDE_CONFIG_DIR/anderton/takeovers.log"
+set +e; wait "$watcher_pid"; status=$?; set -e
+check "the displaced holder's watch wakes it, naming who took the role" \
+  eval '[ "$status" -eq 2 ] && grep -qF "claude session wa-1" "$work/watch.out" && grep -qF "took over your role" "$work/watch.out"'
+check "once" [ ! -e "$CLAUDE_CONFIG_DIR/anderton/displaced/claude-wh-2" ]
 spawn; p_tw=$pid; session "$p_tw" tw-1 "$watched" taker-worker "$(date +%s)000"
 transcript tw-1 "$recent" asking "Before the question."
 jq -nc --arg d "$watched" '{name: "taker-worker", dir: $d, spawner: "other"}' > "$CLAUDE_CONFIG_DIR/anderton/workers/taker-worker.json"
@@ -2024,6 +2031,9 @@ check "a new holder's watch replaces the old holder's" [ "$status" -eq 2 ]
 check "and reports to the new holder" contains "=== taker-worker (worker)"
 registry "$p_tw" idle
 (cd "$watched" && env CLAUDE_PID="$p_wh" CLAUDE_CODE_SESSION_ID=wh-2 "$scripts/claim.sh" --take-over >/dev/null)
+watch_run wa-1
+check "a displaced holder whose watch was not running hears it at its next turn end" \
+  eval '[ "$status" -eq 2 ] && contains "claude session wh-2" && contains "took over your role"'
 unset ANDERTON_WATCH_TICK
 
 # A holder from an earlier version has its record in the machine-wide file and may have no anderton directory.

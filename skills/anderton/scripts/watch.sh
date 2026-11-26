@@ -143,6 +143,44 @@ watch_claude_worker() {
   return 0
 }
 
+# tell_displaced: the one-line notice claim.sh --take-over left for this session, told once: to Claude as this hook's
+# wake, to Codex queued on its thread, to agy prompted into its pane once it is idle.
+tell_displaced() {
+  local notice="$holders/displaced/$runtime-$sid" claim staged status
+  [ -f "$notice" ] || return 0
+  case $runtime in
+    claude)
+      cat "$notice" >&2
+      rm -f "$notice"
+      exit 2
+      ;;
+    agy)
+      claim=$(mktemp "$holders/.displaced.XXXXXX") || return 0
+      printf '%s' "$claim_json" > "$claim"
+      record=$claim
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if agy_deliver "$(cat "$notice")"; then
+          rm -f "$notice"
+          break
+        fi
+        sleep "${tick:-30}"
+      done
+      rm -f "$claim"
+      ;;
+    codex)
+      claim=$(mktemp "$holders/.displaced.XXXXXX") || return 0
+      staged=$(mktemp -d "$holders/.displaced.XXXXXX") || { rm -f "$claim"; return 0; }
+      printf '%s' "$claim_json" > "$claim"
+      cp "$notice" "$staged/message"
+      status=0
+      "$anderton_scripts/codex-worker.py" notice "$claim" "$staged" >/dev/null 2>&1 || status=$?
+      # A notice is queued on the thread on its first try (3); confirming it would need this watch to stay.
+      if [ "$status" = 0 ] || [ "$status" = 3 ]; then rm -f "$notice"; fi
+      rm -rf "$claim" "$staged"
+      ;;
+  esac
+}
+
 runtime=claude
 if [ "${1:-}" = --codex ]; then
   runtime=codex
@@ -222,6 +260,7 @@ EOF
   fi
   emit_turn idle "$sid" "$cwd" >/dev/null 2>&1
   if [ -z "$record" ]; then
+    tell_displaced
     watch_claude_worker
     exit $?
   fi
@@ -232,6 +271,12 @@ still_holds_role() {
     codex) caller_matches_claim "$record" ;;
     *) is_holder "$reg" "$record" ;;
   esac
+}
+claim_json=$(cat "$record" 2>/dev/null)
+# The role was lost: a take-over's notice, if claim.sh left one for this session, is told once.
+lost_role() {
+  tell_displaced
+  exit 0
 }
 # agy_deliver <text>: prompts the agy holder's pane with <text>, only while herdr shows that agy there, idle.
 agy_deliver() {
@@ -275,7 +320,7 @@ same_script() { # same_script <command line>: true when it runs this watch.sh, f
   return 1
 }
 until take_watch; do
-  still_holds_role || exit 0
+  still_holds_role || lost_role
   other=""; owner=""; parent=""
   other_start=""
   { read -r other owner parent other_start < "$watcher"; } 2>/dev/null
@@ -633,6 +678,7 @@ while still_holds_role; do
       # A run can take minutes: what it found is this holder's to hear only if the role and the watch are still its.
       if ! still_holds_role || [ "$(watch_owner)" != "$$" ] || orphaned "$$" "$parent_pid"; then
         rm -rf "$probe_run"
+        still_holds_role || lost_role
         exit 0
       fi
       # And only if it is still the role's probe: a run of the one just replaced or removed tells nothing.
@@ -688,4 +734,4 @@ while still_holds_role; do
   fi
   sleep "$tick"
 done
-exit 0
+lost_role
