@@ -1551,6 +1551,12 @@ gate eea-1 "$epsilon" epsilon-host '"RESULT: export fixed, PR https://example.in
 check "but never a RESULT:, which is a worker's completion report" eval '[ "$status" -eq 2 ] && contains "completion report"'
 gate eeh-1 "$epsilon" epsilon-fleet-a '"RESULT: the export moved to Thursday."'
 check "nor the other way, from the repository's holder to a project's holder" eval '[ "$status" -eq 2 ] && contains "completion report"'
+gate eea-1 "$epsilon" epsilon-fleet-b '"RESULT: the export moved to Thursday."'
+check "nor between two projects' holders" eval '[ "$status" -eq 2 ] && contains "completion report"'
+gate eea-1 "$epsilon" epsilon-host '"DEPLOY:"'
+check "and no Anderton sends another a kind with nothing after it" eval '[ "$status" -eq 2 ] && contains "nothing after it"'
+gate eeh-1 "$epsilon" epsilon-fleet-a '"QUESTION:"'
+check "the repository's holder included" eval '[ "$status" -eq 2 ] && contains "nothing after it"'
 send eea-1 "$epsilon" epsilon-host '"ANSWER: yes, the backfill can wait."'
 check "an answer is never a repeat" [ "$status" -eq 0 ]
 send eeb-1 "$epsilon" epsilon-host '"DEPLOY: ship the export fix, merged as https://example.invalid/pr/7"'

@@ -16,8 +16,15 @@ fi
 [ "$#" -eq 1 ] || usage
 body=$1
 case $body in *[![:space:]]*) ;; *) usage ;; esac
-if printf '%s' "$body" | "$anderton_scripts/claude-worker.py" report-kind RESULT >/dev/null 2>&1; then
+status=0
+kind=$(printf '%s' "$body" | "$anderton_scripts/claude-worker.py" report-kind "RESULT|QUESTION|BLOCKED|ANSWER|DIRECTION|DEPLOY|LOOKUP" 2>/dev/null) ||
+  status=$?
+if [ "$status" = 0 ] && [ "$kind" = RESULT ]; then
   echo "RESULT: is a worker's completion report. Andertons send each other a deploy to run, a lookup, a question or an answer." >&2
+  exit 2
+fi
+if [ "$status" = 4 ]; then
+  echo "A kind with nothing after it says nothing. Say after it what you need." >&2
   exit 2
 fi
 root=$(invoking_root)

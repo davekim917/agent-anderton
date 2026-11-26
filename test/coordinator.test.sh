@@ -117,6 +117,9 @@ jq -e '.peerMessage == null' "$root_claim" >/dev/null
 if codex_role "$script/role-message.sh" 'RESULT: the catalog fixture shipped' > "$tmp/refused" 2>&1; then exit 1; fi
 grep -q 'completion report' "$tmp/refused"
 jq -e '.peerMessage == null' "$root_claim" >/dev/null
+if codex_role "$script/role-message.sh" 'DEPLOY:' > "$tmp/refused" 2>&1; then exit 1; fi
+grep -q 'nothing after it' "$tmp/refused"
+jq -e '.peerMessage == null' "$root_claim" >/dev/null
 codex_role "$script/role-message.sh" "Deploy the catalog fixture"
 jq -e '.peerMessage.text == "Deploy the catalog fixture"' "$root_claim" >/dev/null
 mkdir -p "$CLAUDE_CONFIG_DIR/projects/fixture"

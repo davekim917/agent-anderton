@@ -58,18 +58,19 @@ EOF
   [ -z "$home_dir" ] || cwd=$home_dir
   [ -n "$cwd" ] || exit 0
 
-  # Who the sender is comes first: the repository's Anderton is never held.
+  # Who the sender is comes first. A role holder writing to another role holder passes peer_gate; the repository's
+  # Anderton is held nowhere else.
+  local own=""
   root=$(project_root "$cwd")
   project=$(holder_record "$root")
-  if [ -n "$project" ] && names_sender "$project"; then
-    if to_role_holder "$root" "$project"; then refuse_peer_result; fi
-    exit 0
-  fi
+  if [ -n "$project" ] && names_sender "$project"; then own=$project; fi
   while IFS= read -r r; do
-    if [ -n "$r" ] && [ "$r" != "$project" ] && names_sender "$r"; then scope=1; fi
+    if [ -n "$r" ] && [ "$r" != "$project" ] && names_sender "$r"; then scope=1 own=$r; fi
   done <<EOF
 $(project_holders "$root")
 EOF
+  if [ -n "$own" ] && to_role_holder "$root" "$own"; then peer_gate; fi
+  if [ -n "$own" ] && [ "$own" = "$project" ]; then exit 0; fi
   wrec=$(worker_record "$name" "$cwd" "$sid" "$pid" "$(jq -r '.startedAt // empty | floor' "$reg" 2>/dev/null)")
   if [ -n "$wrec" ]; then
     worker=1
@@ -110,7 +111,6 @@ EOF
   fi
   kind=$(printf '%s' "$input" | jq -j '.tool_input.message // ""' 2>/dev/null | "$anderton_scripts/claude-worker.py" report-kind "$kinds") ||
     case $? in 3 | 4) ;; *) exit 0 ;; esac
-  if [ -n "$scope" ] && [ -z "$report" ]; then refuse_peer_result; fi
   if [ -n "$required" ] && [ -z "$kind" ]; then
     {
       echo "Not sent. Message \"$recipient\" only when it changes what they do, with the kind as the first word:"
@@ -167,12 +167,20 @@ EOF
   return 1
 }
 
-# RESULT: is a worker's completion report, the one a retirement hold waits for: one Anderton never sends it to another.
-refuse_peer_result() {
-  printf '%s' "$input" | jq -j '.tool_input.message // ""' 2>/dev/null |
-    "$anderton_scripts/claude-worker.py" report-kind RESULT >/dev/null 2>&1 || return 0
-  echo "Not sent: RESULT: is a worker's completion report. Between Andertons, say what you need: a deploy to run, a lookup, a question or an answer." >&2
-  exit 10
+# One Anderton writing to another: never a RESULT:, a worker's completion report and the one a retirement hold waits
+# for, and never a kind with nothing after it. Anything else, or a parser that cannot answer, passes.
+peer_gate() {
+  local kind status=0
+  kind=$(printf '%s' "$input" | jq -j '.tool_input.message // ""' 2>/dev/null |
+    "$anderton_scripts/claude-worker.py" report-kind "RESULT|QUESTION|BLOCKED|ANSWER|DIRECTION|DEPLOY|LOOKUP" 2>/dev/null) || status=$?
+  if [ "$status" = 0 ] && [ "$kind" = RESULT ]; then
+    echo "Not sent: RESULT: is a worker's completion report. Between Andertons, say what you need: a deploy to run, a lookup, a question or an answer." >&2
+    exit 10
+  fi
+  if [ "$status" = 4 ]; then
+    echo "Not sent: a kind with nothing after it says nothing. Say after it what you need." >&2
+    exit 10
+  fi
 }
 
 # A worker's RESULT:, QUESTION: or BLOCKED: that was sent, to the host as a milestone: its kind and the GitHub links in
