@@ -621,7 +621,7 @@ record the new holder's claim on a worker the old holder started, so that worker
 message: a worker's to the session `spawn.sh` started it from, and any session's to its repository's Anderton,
 named in the claim file, checked to be the live process the record names, and addressed by name, by name
 with a listing ref, or by socket. A worker's message, and one from a session that holds no role, is held unless
-its first line opens with `RESULT:`, `QUESTION:`, `BLOCKED:` or `ANSWER:` (a session that holds no role also has
+it opens with `RESULT:`, `QUESTION:`, `BLOCKED:` or `ANSWER:` followed by text (a session that holds no role also has
 `DIRECTION:`, for passing on a person's instruction). A worker's kind is what the milestone event and a Codex or
 agy Anderton's transcript sweep read; a session that holds no role learns the kinds only from the hold, since
 nothing else from the plugin reaches it. One Anderton writing to another, the repository's or a named

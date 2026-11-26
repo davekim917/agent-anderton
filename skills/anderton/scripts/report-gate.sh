@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # The plugin's hook on SendMessage. Before a send (PreToolUse) it holds a message to an Anderton from its worker or
-# from a session holding no role unless the message's first line opens with a kind, and holds any message to an
-# Anderton that repeats, word for word, what the sender last sent that Anderton within $ANDERTON_REPEAT_WINDOW seconds
-# (default 1800). Each message wakes that session and re-reads its whole context, so an acknowledgement or a "still
-# waiting" costs as much as a result. After a send succeeds (PostToolUse) it records the message, so a send that failed
-# or was denied is never counted as sent.
+# from a session holding no role unless the message opens with a kind and text after it (claude-worker.py report-kind,
+# the parser the retirement scan uses), and holds any message to an Anderton that repeats, word for word, what the
+# sender last sent that Anderton within $ANDERTON_REPEAT_WINDOW seconds (default 1800). Each message wakes that session
+# and re-reads its whole context, so an acknowledgement or a "still waiting" costs as much as a result. After a send
+# succeeds (PostToolUse) it records the message, so a send that failed or was denied is never counted as sent.
 # It judges a message from a worker spawn.sh started to the session that started it, and a message from any session
 # in a repository to that repository's live Anderton. A worker's report needs its kind because the milestone event and
 # a Codex or agy Anderton's transcript sweep read it. One Anderton writing to another needs none: whether it should
@@ -105,7 +105,8 @@ EOF
     required=1
     kinds="RESULT|QUESTION|BLOCKED|ANSWER|DIRECTION"
   fi
-  kind=$(printf '%s' "$first" | sed -nE -e 's/^[[:space:]*_#>`-]*//' -e "s/^($kinds):.*/\\1/p") || exit 0
+  kind=$(printf '%s' "$input" | jq -j '.tool_input.message // ""' 2>/dev/null | "$anderton_scripts/claude-worker.py" report-kind "$kinds") ||
+    [ $? -eq 3 ] || exit 0
   if [ -n "$required" ] && [ -z "$kind" ]; then
     {
       echo "Not sent. Message \"$recipient\" only when it changes what they do, with the kind as the first word:"
@@ -195,7 +196,7 @@ gate_stale_worker_report() {
   fi
   # A listing reference can deliberately address somebody else who now uses the old display name.
   case $to in "$old ["*) exit 0 ;; esac
-  printf '%s\n' "$first" | sed -nE -e 's/^[[:space:]*_#>`-]*//' -e 's/^(RESULT|QUESTION|BLOCKED|ANSWER):.*/x/p' | grep -qx x || exit 0
+  printf '%s' "$input" | jq -j '.tool_input.message // ""' 2>/dev/null | "$anderton_scripts/claude-worker.py" report-kind >/dev/null || exit 0
 
   if [ "$owner_provider" = codex ] || [ "$owner_provider" = agy ]; then
     if ! claude_worker_identity_matches "$wrec" "$sid" "$pid" "$(jq -r '.startedAt // empty | floor' "$reg")"; then

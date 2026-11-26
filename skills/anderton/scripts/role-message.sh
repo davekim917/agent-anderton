@@ -15,6 +15,7 @@ if [ "${1:-}" = --project ]; then
 fi
 [ "$#" -eq 1 ] || usage
 body=$1
+case $body in *[![:space:]]*) ;; *) usage ;; esac
 root=$(invoking_root)
 take_repository_lock "$root"
 source=$(caller_claim "$root")

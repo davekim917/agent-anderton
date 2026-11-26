@@ -587,6 +587,8 @@ gate "$worker_sid" "$work/wt-fix-login" lead-session '"Got it, starting now."'
 check "report-gate blocks an acknowledgement to the lead" [ "$status" -eq 2 ]
 check "and tells the worker the four kinds" contains "RESULT: a milestone done"
 check "a worker is not offered DIRECTION" eval '! contains "DIRECTION:"'
+gate "$worker_sid" "$work/wt-fix-login" lead-session '"RESULT:"'
+check "and a bare kind with nothing after it, which the retirement scan would not count as a report" [ "$status" -eq 2 ]
 gate "$worker_sid" "$work/wt-fix-login/src" lead-session '"Still holding for the merge."'
 check "from a subdirectory of the worker's worktree too" [ "$status" -eq 2 ]
 gate "$worker_sid" "$work/wt-fix-login" "lead-session [a1b2c3]" '"FYI: tests are running."'
@@ -629,10 +631,10 @@ check "a send reported as delivered is recorded, so its repeat is held" [ "$stat
 send "$worker_sid" "$work/wt-fix-login" lead-session '"ANSWER: yes"'
 send "$worker_sid" "$work/wt-fix-login" lead-session '"ANSWER: yes"'
 check "lets the same short answer through twice: answers to two questions can match" [ "$status" -eq 0 ]
-mkdir -p "$work/nosed"
-printf '#!/bin/sh\nexit 1\n' > "$work/nosed/sed"
-chmod +x "$work/nosed/sed"
-PATH="$work/nosed:$PATH" gate "$worker_sid" "$work/wt-fix-login" lead-session '"Got it."'
+mkdir -p "$work/noparser"
+printf '#!/bin/sh\nexit 1\n' > "$work/noparser/python3"
+chmod +x "$work/noparser/python3"
+PATH="$work/noparser:$PATH" gate "$worker_sid" "$work/wt-fix-login" lead-session '"Got it."'
 check "allows a message when it cannot read its kind" [ "$status" -eq 0 ]
 send "$worker_sid" "$work/wt-fix-login" lead-session '"BLOCKED: the staging database is down; a restart would unblock it"'
 two_days_ago=$(date -r $((now_s - 172800)) +%Y%m%d%H%M 2>/dev/null || date -d "@$((now_s - 172800))" +%Y%m%d%H%M)

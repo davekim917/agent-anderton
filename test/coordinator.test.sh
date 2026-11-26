@@ -112,6 +112,8 @@ done
 [ ! -e "$FIXTURE_TMUX_LOG" ]
 printf 'Fixture task.\n' | codex_role env TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 "$script/spawn.sh" --effort low from-claude-default
 jq -e '(.provider // "claude") == "claude" and .spawnerProvider == "codex" and .spawnerScope == "tools"' "$claims/workers/from-claude-default.json" >/dev/null
+if codex_role "$script/role-message.sh" ' ' >/dev/null 2>&1; then exit 1; fi
+jq -e '.peerMessage == null' "$root_claim" >/dev/null
 codex_role "$script/role-message.sh" "Deploy the catalog fixture"
 jq -e '.peerMessage.text == "Deploy the catalog fixture"' "$root_claim" >/dev/null
 mkdir -p "$CLAUDE_CONFIG_DIR/projects/fixture"
