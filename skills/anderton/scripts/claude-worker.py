@@ -15,7 +15,9 @@ REPORT_KINDS = ("RESULT", "QUESTION", "BLOCKED", "ANSWER")
 NON_CLAUDE = ("codex", "agy")
 
 def report_text(text):
-    return text.strip().lstrip(" \t*_#>`-")
+    # A rule line opening the message is formatting; any other line break ends what the kind can open with, so a fenced
+    # block's first line is never one.
+    return re.sub(r"\A-{3,}[ \t]*\r?\n\s*", "", text.strip()).lstrip(" \t*_#>`-")
 
 
 def kind_of(text, kinds=REPORT_KINDS):
