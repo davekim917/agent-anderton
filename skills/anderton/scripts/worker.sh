@@ -13,6 +13,7 @@ name=${2:-}
 if [ "$action" = sweep ] && [ "$#" -eq 1 ]; then
   result=0
   root=$(invoking_root)
+  anderton_watch_reads=1
   role=$(caller_claim "$root")
   "$anderton_scripts/codex-workers.sh" sweep || result=1
   while IFS= read -r record; do
