@@ -554,7 +554,9 @@ jq -nc --arg dir "$clearable_dir" '
   send("outbound-four";"3";"former-claude";"RESULT: formatted milestone"),
   reply("formatted-final";"---\nRESULT: formatted milestone"),
   user("turn-five";"3";"Report the fifth milestone."),
-  reply("lone-formatted-final";"---\nRESULT: formatted lone milestone")
+  reply("lone-formatted-final";"---\nRESULT: formatted lone milestone"),
+  user("turn-six";"3";"Show the check output."),
+  reply("fenced-final";"```\nRESULT: fenced output example\n```")
 ' > "$legacy_transcript"
 TZ=UTC touch -t 203001030100 "$legacy_transcript"
 jq -nc --argjson pid "$replacement_pid" --arg dir "$clearable_dir" '
@@ -642,6 +644,8 @@ grep -qx 'RESULT: example CI passed' "$tmp/native-output"
 # A milestone only in a final reply, under formatting, is a report; one that restates its turn's native send is not a
 # second one.
 grep -qx 'RESULT: formatted lone milestone' "$tmp/native-output"
+# A fenced block whose first line reads like a report is output shown, not a report.
+if grep -q 'fenced output example' "$tmp/native-output"; then exit 1; fi
 [ "$(grep -c 'RESULT: formatted milestone' "$tmp/native-output")" = 1 ]
 as_agy_holder
 mkdir "$tmp/agy-native-state" "$tmp/agy-native-stage"
@@ -656,6 +660,7 @@ if grep -Eq 'historical transport|old delivered echo|unrelated message|unrelated
 grep -qx 'RESULT: example PR opened' "$tmp/agy-native-output"
 grep -qx 'RESULT: example CI passed' "$tmp/agy-native-output"
 grep -qx 'RESULT: formatted lone milestone' "$tmp/agy-native-output"
+if grep -q 'fenced output example' "$tmp/agy-native-output"; then exit 1; fi
 [ "$(grep -c 'RESULT: formatted milestone' "$tmp/agy-native-output")" = 1 ]
 # The agy holder's watch runs beside agy, not under it, as claim.sh starts it: from there it still finds the role's
 # workers, sweeps their reports and types them into the holder's pane.
