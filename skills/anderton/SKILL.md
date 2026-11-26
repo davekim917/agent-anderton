@@ -20,9 +20,17 @@ and they send their deploys to it.
 
 ## 1. Claim the role
 
-This role can run in Claude Code, Codex or agy. In agy, the session is one
-`scripts/agy-anderton.sh --name <name>` opened from a herdr pane; its tools carry
-the identity `claim.sh` reads. In Codex, use an interactive thread opened
+This role can run in Claude Code, Codex or agy. In agy, the session is one opened
+in a herdr pane with `agy --dangerously-skip-permissions` (or by
+`scripts/agy-anderton.sh --name <name>`); `claim.sh` reads its identity from the
+agy process its tools run under. Run the scripts by the absolute paths `/anderton`
+named; never search the disk for another copy, which can be another checkout's. If `claim.sh` cannot start (its file is missing, or a command
+outside agy's sandbox is denied) or refuses because agy runs in its sandbox, agy
+is in its auto mode, where no Anderton can run: tell the user to quit agy and
+reopen it in the pane with `agy --dangerously-skip-permissions --conversation=<id>`,
+where `<id>` is this conversation's (`$ANTIGRAVITY_CONVERSATION_ID`, which agy also
+prints as it quits), then run `/anderton` again. Never retry outside the sandbox, and never change agy's
+mode or settings yourself. If `claim.sh` says this agy prompts, pass that on once. In Codex, use an interactive thread opened
 from herdr or tmux with `scripts/codex-anderton.sh` so its tools receive the pane's
 multiplexer context. Its tools need access to the selected Codex daemon socket,
 the shared Anderton files, and the worker worktrees. Ask the operator to approve

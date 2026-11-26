@@ -149,6 +149,62 @@ refused "check refuses a workspace hooks.json that would override the guard" "co
 rm "$work/wt/.agent/hooks.json"
 hooks check --workspace "$work/wt"
 check "and accepts that workspace once it names neither entry" [ "$status" -eq 0 ]
+odd="$work/one
+two"
+mkdir -p "$odd/.agents"
+jq -nc --arg k "$key" '{($k): {enabled: false}}' > "$odd/.agents/hooks.json"
+refused "check reads a workspace whose path holds a newline as one path" "could override" --workspace "$work/wt" --workspace "$odd"
+mkdir -p "$work/closed/.agents"
+chmod 000 "$work/closed/.agents"
+refused "and refuses a workspace root it cannot read rather than read it as empty" "cannot read" --workspace "$work/closed"
+chmod 755 "$work/closed/.agents"
+
+# skill writes agy's /anderton: a short skill naming this checkout's SKILL.md and scripts by absolute path, since agy
+# shows the model a skill's text but not where it lives.
+skill_dir=$(cd "$scripts/.." && pwd -P)
+wrapper="$config/skills/anderton/SKILL.md"
+hooks skill
+check "skill writes agy's /anderton, naming this checkout's SKILL.md and scripts by absolute path" eval '[ "$status" -eq 0 ] &&
+  grep -qx "name: anderton" "$wrapper" &&
+  grep -qxF "Read $skill_dir/SKILL.md in full and follow it. Its scripts are in $skill_dir/scripts: run each one by that absolute path." "$wrapper"'
+before=$(cat "$wrapper")
+hooks skill
+check "once, however often it runs" eval '[ "$status" -eq 0 ] && [ "$(cat "$wrapper")" = "$before" ]'
+sed "s|$skill_dir|/other/skills/anderton|g" "$wrapper" > "$work/wrapper.tmp"
+mv "$work/wrapper.tmp" "$wrapper"
+other=$(cat "$wrapper")
+hooks skill
+check "it refuses to replace another checkout's registration, naming it" eval '[ "$status" -ne 0 ] &&
+  contains "names another checkout (/other/skills/anderton)" && [ "$(cat "$wrapper")" = "$other" ]'
+hooks skill --remove
+check "or to remove it" eval '[ "$status" -ne 0 ] && contains "names another checkout" && [ "$(cat "$wrapper")" = "$other" ]'
+printf -- '---\nname: anderton\ndescription: Example.\n---\n\nExample skill.\n' > "$wrapper"
+hooks skill
+check "and an anderton skill it did not write" eval '[ "$status" -ne 0 ] && contains "agy-hooks.sh did not write" && grep -qx "Example skill." "$wrapper"'
+rm -r "$config/skills/anderton"
+# Registration takes one lock: an installer that waits on it sees what the one holding it wrote.
+mkdir -p "$config/skills/.anderton-skill.lock"
+echo $$ > "$config/skills/.anderton-skill.lock/pid"
+( sleep 1
+  mkdir -p "$config/skills/anderton"
+  printf -- '---\nname: anderton\n---\n\n<!-- written by agent-anderton agy-hooks.sh skill for /racing/skills/anderton -->\n' > "$wrapper"
+  rm -rf "$config/skills/.anderton-skill.lock" ) &
+hooks skill
+wait
+check "an installer that waited on the lock sees the other's registration and leaves it" eval '[ "$status" -ne 0 ] &&
+  contains "names another checkout (/racing/skills/anderton)" && grep -q "/racing/skills/anderton" "$wrapper"'
+rm -r "$config/skills/anderton"
+hooks skill
+hooks skill --remove
+check "--remove takes out its own registration" eval '[ "$status" -eq 0 ] && [ ! -e "$config/skills/anderton" ]'
+mkdir -p "$home/.gemini/copy/skills"
+cp -R "$scripts/.." "$home/.gemini/copy/skills/anderton"
+set +e
+out=$(env HOME="$home" PATH="$work/bin:/usr/bin:/bin" "$home/.gemini/copy/skills/anderton/scripts/agy-hooks.sh" skill 2>&1)
+status=$?
+set -e
+check "skill refuses a copy under ~/.gemini, where the guard would refuse its scripts" eval '[ "$status" -ne 0 ] && contains "under ~/.gemini" &&
+  [ ! -e "$config/skills/anderton" ]'
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures agy-hooks check(s) failed"

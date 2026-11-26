@@ -18,6 +18,11 @@ set -euo pipefail
 
 require_tools claim.sh
 
+agy_relaunch="quit agy and reopen it in this pane with: agy --dangerously-skip-permissions --conversation=${ANTIGRAVITY_CONVERSATION_ID:-<the id agy prints as it quits>}, which keeps this conversation"
+if [ -n "${ANDERTON_AGY_SANDBOXED:-}" ]; then
+  echo "This agy session runs its commands in agy's terminal sandbox (its auto mode), which hides herdr and the agy process from them, so it cannot hold an Anderton role. To make it an Anderton, $agy_relaunch, then run /anderton again." >&2
+  exit 1
+fi
 sid=$(invoking_session)
 [ -n "$sid" ] || { echo "Run claim.sh from the designated Claude Code, Codex or agy session." >&2; exit 1; }
 usage="usage: claim.sh [--project <name>] [--take-over | --rebind] [--probe <command> [--probe-every <seconds>] | --no-probe]"
@@ -52,15 +57,16 @@ fi
 
 provider=$(invoking_provider)
 pid=$(invoking_pid)
-codex_home="" codex_dir="" name="" agy_pane="" agy_socket="" agy_dir="" agy_pid="" agy_start=""
+codex_home="" codex_dir="" name="" agy_pane="" agy_socket="" agy_dir="" agy_pid="" agy_start="" agy_home="" agy_dirs=()
 root=$(invoking_root)
 if [ "$provider" = agy ]; then
-  name=${ANDERTON_AGY_NAME:-}
-  agy_pane=${HERDR_PANE_ID:-} agy_socket=${HERDR_SOCKET_PATH:-} agy_dir=${ANDERTON_AGY_DIR:-}
-  if [ -z "$name" ] || [ -z "$agy_pane" ] || [ -z "$agy_socket" ] || [ -z "$agy_dir" ]; then
-    echo "An agy Anderton claims only from a session agy-anderton.sh started inside herdr." >&2
+  agy_pane=${HERDR_PANE_ID:-} agy_socket=${HERDR_SOCKET_PATH:+$(resolve_path "$HERDR_SOCKET_PATH")} agy_dir=${ANDERTON_AGY_DIR:-}
+  if [ -z "$agy_pane" ] || [ -z "$agy_socket" ] || [ -z "$agy_dir" ]; then
+    echo "An agy Anderton claims only from an agy session inside herdr." >&2
     exit 1
   fi
+  name=${ANDERTON_AGY_NAME:-agy-$(basename "$agy_dir")${scope:+-$scope}}
+  name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '-')
   if [ "$(project_root "$agy_dir")" != "$root" ]; then
     echo "agy session $sid runs in another repository: $agy_dir." >&2
     exit 1
@@ -68,9 +74,59 @@ if [ "$provider" = agy ]; then
   agy_pid=${ANDERTON_AGY_PID:-}
   case $agy_pid in '' | *[!0-9]*) agy_start="" ;; *) agy_start=$(proc_start "$agy_pid") ;; esac
   if [ -z "$agy_start" ]; then
-    echo "An agy Anderton claims only from a session agy-anderton.sh started inside herdr, while it runs." >&2
+    echo "An agy Anderton claims only from an agy session inside herdr, while it runs." >&2
     exit 1
   fi
+  if ! descends_from "$agy_pid"; then
+    echo "This shell does not run under agy process $agy_pid, so it cannot claim for that session." >&2
+    exit 1
+  fi
+  # What agy loads comes from its own home, whatever this shell's HOME says.
+  agy_home=$(proc_home "$agy_pid")
+  if [ -z "$agy_home" ] || [ ! -d "$agy_home" ]; then
+    echo "Could not read the home agy process $agy_pid runs with, so the configuration it loads could not be checked." >&2
+    exit 1
+  fi
+  HOME=$agy_home require_registered_agy_copy
+  # agy loads workspace hooks from each directory between its working directory and the top of the checkout.
+  agy_cwd=$(proc_cwd "$agy_pid")
+  case $agy_cwd in
+    "$agy_dir" | "$agy_dir"/*) ;;
+    *)
+      echo "Could not place agy process $agy_pid's working directory (${agy_cwd:-unreadable}) in $agy_dir, so the hooks it loads could not be checked." >&2
+      exit 1
+      ;;
+  esac
+  agy_dirs=("$agy_cwd")
+  while [ "$agy_cwd" != "$agy_dir" ]; do
+    agy_cwd=$(dirname "$agy_cwd")
+    agy_dirs+=("$agy_cwd")
+  done
+  workspaces=()
+  for d in "${agy_dirs[@]}"; do workspaces+=(--workspace "$d"); done
+  # The claim is live only while herdr shows this agy in this pane and checkout, so one it would read as gone is refused.
+  probe_record=$(mktemp "${TMPDIR:-/tmp}/anderton-agy.XXXXXX") || exit 1
+  jq -nc --arg socket "$agy_socket" --arg pane "$agy_pane" --arg dir "$agy_dir" --arg pid "$agy_pid" --arg start "$agy_start" \
+    '{socket: $socket, pane: $pane, dir: $dir, agyPid: ($pid | tonumber), agyStart: $start}' > "$probe_record"
+  agy_check "$probe_record"
+  rm -f "$probe_record"
+  if [ "$agy_state" = unknown ]; then
+    echo "herdr gave no readable answer about the process in pane $agy_pane (herdr pane process-info, which herdr 0.9.5 has), so whether this agy holds the role could never be told: update herdr, then claim again." >&2
+    exit 1
+  elif [ "$agy_state" != running ]; then
+    echo "herdr does not show this agy in pane $agy_pane, in $agy_dir (it shows ${agy_agent:-no agent}${agy_cwd:+ in $agy_cwd}), so the claim could not be held." >&2
+    exit 1
+  fi
+  if ! out=$(HOME=$agy_home "$anderton_scripts/agy-hooks.sh" check "${workspaces[@]}" 2>&1); then
+    echo "$out
+agy would run unguarded, so this session cannot hold an Anderton role." >&2
+    exit 1
+  fi
+  # How agy was started: without this flag it asks before commands it does not auto-approve.
+  case $(ps -o args= -p "$agy_pid" 2>/dev/null) in
+    *--dangerously-skip-permissions*) agy_prompts="" ;;
+    *) agy_prompts=1 ;;
+  esac
 elif [ "$provider" = codex ]; then
   codex_home=$(invoking_codex_home) || { echo "Could not resolve the Codex home." >&2; exit 1; }
   identity=$("$anderton_scripts/codex-worker.py" identity "$codex_home" "$sid") || exit 1
@@ -187,13 +243,18 @@ if [ "$provider" = codex ] || [ "$provider" = agy ]; then
   fi
   claude_report_since=${claude_report_since:-$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat())')}
 fi
-if [ -n "$record" ] && [ "$(jq -r '.sessionId // empty' "$record")" = "$sid" ] &&
-  { [ -n "$rebind" ] || caller_matches_claim "$record"; }; then
+# The same holder: its session id, or for agy the same agy process, whatever session id an earlier version recorded.
+same_holder=""
+if [ -n "$record" ] && { [ "$(jq -r '.sessionId // empty' "$record")" = "$sid" ] ||
+  { [ "$provider" = agy ] && [ "$(record_provider "$record")" = agy ] && caller_matches_claim "$record"; }; }; then
+  same_holder=1
+fi
+if [ -n "$same_holder" ] && { [ -n "$rebind" ] || caller_matches_claim "$record"; }; then
   peer=$(jq -c '.peerMessage // null' "$record")
 fi
-# The same session keeps its claim's id through a re-claim, a rebind and a resume; any other session gets a new one.
+# The same holder keeps its claim's id through a re-claim, a rebind and a resume; any other session gets a new one.
 claim_id=""
-if [ -n "$record" ] && [ "$(jq -r '.sessionId // empty' "$record")" = "$sid" ]; then
+if [ -n "$same_holder" ]; then
   claim_id=$(jq -r '.claimId // empty' "$record" 2>/dev/null || true)
 fi
 claim_id=${claim_id:-$(new_claim_id)} || { echo "Could not make a claim id." >&2; exit 1; }
@@ -201,12 +262,14 @@ jq -nc --arg root "$root" --arg scope "$scope" --arg pid "$pid" --arg started "$
   --arg provider "$provider" --arg codex_home "$codex_home" --arg codex_dir "$codex_dir" --arg name "$name" \
   --arg claude_report_since "$claude_report_since" --argjson previous_claude "$previous_claude" \
   --arg agy_pane "$agy_pane" --arg agy_socket "$agy_socket" --arg agy_dir "$agy_dir" --arg agy_pid "$agy_pid" --arg agy_start "$agy_start" \
+  --arg agy_home "$agy_home" --argjson agy_dirs "$(jq -nc '$ARGS.positional' --args ${agy_dirs[@]+"${agy_dirs[@]}"})" \
   --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson probe "${kept:-null}" --argjson peer "$peer" --arg claim_id "$claim_id" \
   '{root: $root, scope: (if $scope == "" then null else $scope end), provider: $provider,
     sessionId: $sid, claimId: $claim_id, claimedAt: $at}
    + (if $provider == "codex" then {codexHome: $codex_home, dir: $codex_dir, name: $name, claudeReportSince: $claude_report_since,
                                     claudeReportPreviousHolder: $previous_claude}
       elif $provider == "agy" then {dir: $agy_dir, name: $name, pane: $agy_pane, socket: $agy_socket, agyPid: ($agy_pid | tonumber), agyStart: $agy_start,
+                                    agyHome: $agy_home, agyWorkspaces: $agy_dirs,
                                     claudeReportSince: $claude_report_since, claudeReportPreviousHolder: $previous_claude}
       else {pid: ($pid | tonumber), startedAt: ($started | tonumber? // null)} end)
    + (if $probe == null then {} else {probe: $probe} end)
@@ -221,11 +284,14 @@ if [ "$provider" = codex ]; then
   echo "$role claimed by Codex thread $sid."
 elif [ "$provider" = agy ]; then
   # What agy loads hooks and agents from for this checkout, as the role is claimed: waiting.sh reports changes from it.
-  agy_config_state "$agy_dir" > "${state%.json}.agy-config"
+  HOME=$agy_home agy_config_state "${agy_dirs[@]}" > "${state%.json}.agy-config"
   # agy ends a tool's processes when its command returns, so the watch runs in a session of its own.
   python3 -c 'import subprocess, sys; subprocess.Popen(sys.argv[1:], start_new_session=True, stdin=subprocess.DEVNULL,
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' "$anderton_scripts/watch.sh" --agy "$state"
   echo "$role claimed by agy session $sid ($name, herdr pane $agy_pane)."
+  if [ -n "${agy_prompts:-}" ] && [ -z "$rebind" ]; then
+    echo "This agy was started without --dangerously-skip-permissions, so it stops for your approval on commands it does not auto-approve, and workers' reports and its watch's messages wait behind those prompts. To run as agy workers do, with the guard as the gate, $agy_relaunch."
+  fi
 else
   echo "$role claimed by session $sid (pid $pid)."
 fi

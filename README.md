@@ -153,25 +153,71 @@ session in that pane.
 
 ### Open an agy Anderton
 
-Prepare agy as for agy workers (below), then, from a herdr pane in the repository:
+Prepare agy as for agy workers (below), then register the skill with agy, from a checkout of this plugin that you keep,
+such as the clone Claude Code's marketplace keeps:
 
 ```sh
-skills/anderton/scripts/agy-anderton.sh --name <name>
+~/.claude/plugins/marketplaces/agent-anderton/skills/anderton/scripts/agy-hooks.sh skill
 ```
 
-It runs the `agy` on your PATH at the top of the checkout you open it in, a linked worktree included, since agy loads a
-workspace's hooks from each directory between its working directory and the checkout's top. It first runs the same
-`agy-hooks.sh check` an agy worker gets, against that checkout's workspace roots, and trusts the checkout for that
-session only, as `spawn.sh` trusts a worker's worktree (unless you pass `--settings` yourself). It runs with no permission prompts unless you pass `--mode`, and other options go to
-agy. Its tool
-shells get `ANDERTON_AGY_SESSION`, `ANDERTON_AGY_NAME`, `ANDERTON_AGY_DIR` (the checkout) and `ANDERTON_AGY_PID`, which
-these scripts read as the agy Anderton's identity,
-and none of a Claude Code or Codex session's variables. Unless you give `-i`, agy opens on a prompt that points it at
-this skill's `SKILL.md`. It claims with `claim.sh`, or `claim.sh --project <name>` for a named project, as any
-Anderton does. The claim records its herdr pane, its checkout, and the agy process the launcher became (its pid and
-start time). The role is live while herdr shows agy in that pane, in that checkout, and that process still runs, so it
-survives `/clear`, which starts a new conversation in the same process, as a Claude Anderton's role does. It is free
-once the pane is gone or shows anything else, or agy was quit and relaunched there.
+It writes `~/.gemini/config/skills/anderton/SKILL.md`, a short skill that names that checkout's `SKILL.md` and its
+scripts by absolute path, since agy shows the model a skill's text but not where it lives. agy sessions started
+afterwards list it as `/anderton`, and a pull in that checkout is the update. `agy plugin install` would copy the
+scripts under `~/.gemini`, where the guard refuses every command, so they could never run. `skill` refuses a checkout
+there and warns about a versioned copy such as Claude's plugin cache, which an update replaces. It refuses to replace
+an `anderton` skill it did not write or one another checkout registered, and `skill --remove` removes only its own;
+both run under one lock, so two installers cannot both take an empty slot. Once one is registered, `claim.sh` and
+`agy-anderton.sh` refuse to run from any other copy of the scripts on disk, judged by the script that actually runs
+(through any link) and the scripts it reads, and name the registered one. A registration that cannot be read, or that
+`skill` did not write, refuses every copy until you register again.
+
+Start agy in a herdr pane, in the repository, with no permission prompts, and type `/anderton`:
+
+```sh
+agy --dangerously-skip-permissions
+```
+
+An alias saves typing it, and `agy-yolo --conversation=<id>` then resumes a conversation the same way:
+
+```sh
+alias agy-yolo='agy --dangerously-skip-permissions'
+```
+
+Under this flag the guard is the gate, as for agy workers. Started plainly, agy runs in its auto mode, whose terminal sandbox runs each
+command in a PID namespace of its own and hides herdr's socket. An Anderton there cannot see its pane or the agy
+process it runs under, and the sandbox hides most of your home, this checkout included, so `claim.sh` either cannot
+start or refuses. Either way `/anderton` stops, claims nothing, and names the relaunch:
+`agy --dangerously-skip-permissions --conversation=<id>`, with the id of that conversation, which agy also prints as
+it quits. (`--continue` resumes the workspace's most recent conversation, which may be another one.) agy's default mode, the unlabelled one
+Shift+Tab reaches, runs commands outside the sandbox but asks before each one it does not auto-approve. There
+`/anderton` claims the role, and says once that workers' reports and the watch's messages will wait behind those
+prompts, naming the same relaunch. It reads that from the flags agy was started with, so it does not see a mode you
+switch to with Shift+Tab afterwards.
+
+Its tool shells carry agy's own variables, not an Anderton's, so the scripts take the identity from the agy process
+they run under, found by walking up from the shell: its pid and start time, the checkout at the top of its working
+directory, and the herdr pane and socket. Nothing a shell supplies counts: no `ANDERTON_AGY_*` value, nor a Claude Code
+or Codex session's variables that leaked in from where agy was started. A command acts as an agy claim's holder only when
+it runs under the agy process the claim records, in the claim's pane and socket, so one agy process holds one role. The
+role's watch runs beside agy rather than under it; the commands it runs to list and sweep the role's workers read as the
+claim, and nothing else it starts acts as the Anderton.
+
+`claim.sh` refuses unless herdr shows that same process, as agy, in that pane and checkout (`herdr pane process-info`,
+which herdr 0.9.5 has), and `agy-hooks.sh check` passes against agy's own home, read from the agy process's environment
+rather than the shell's `HOME`, and against the workspace roots of every directory from agy's working directory up to
+the checkout's top, all of which agy loads hooks from. A workspace root it cannot read refuses the claim. It also refuses
+an agy worker's session, by the pane `spawn.sh` recorded for it. The claim records that home and those directories, and
+the watch reports a change in any of them. The claim is named `agy-<checkout>`, plus `-<project>` for a named project.
+It claims with `claim.sh`, or `claim.sh --project <name>`, as any Anderton does. The role is live while herdr shows that
+agy process in that pane, in that checkout, so it survives `/clear`, which starts a new conversation in the same
+process, as a Claude Anderton's role does. It is free once herdr says the pane is gone or shows any other process there,
+or agy was quit and relaunched there. An answer from herdr that is incomplete or that it cannot read is no evidence either
+way: the role stays held and its watch keeps running. After an update of these scripts, an agy Anderton's running watch
+cannot list its workers: run `claim.sh` again, which replaces it, and `waiting.sh` says so until then.
+
+`skills/anderton/scripts/agy-anderton.sh --name <name>` still opens an agy Anderton the earlier way. It names the role,
+starts agy without prompts on a prompt that points it at `SKILL.md`, and leaves the identity to agy's process as
+above.
 
 agy has no Stop hook, so `claim.sh` starts the role's watch in the background. The watch runs as long as the role and
 tells the Anderton what Claude's watch would: blocked sessions, probe news, peer messages and worker reports, the same

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Opens agy as an Anderton in the current herdr pane: the agy on PATH, guarded as agy workers are, with the identity its
-# tool shells need to claim the role (claim.sh, with --project for a named project) and to run the other scripts.
+# Opens agy as an Anderton in the current herdr pane: the agy on PATH, guarded as agy workers are, under the role's name
+# (claim.sh, with --project for a named project, reads the rest of its identity from the agy process).
 # Without -i/--prompt-interactive it starts agy on a prompt that points it at the Anderton skill. Without --mode it runs
 # as agy workers do, with no permission prompts and the guard as the gate.
 # usage: agy-anderton.sh --name <name> [agy options]
@@ -18,6 +18,7 @@ if [ "${HERDR_ENV:-}" != 1 ] || [ -z "${HERDR_PANE_ID:-}" ] || [ -z "${HERDR_SOC
   echo "Open an agy Anderton from a herdr pane: its watch tells it what it hears by prompting that pane." >&2
   exit 2
 fi
+require_registered_agy_copy
 command -v agy >/dev/null 2>&1 || { echo "agy-anderton.sh needs the agy CLI on PATH." >&2; exit 1; }
 require_tools agy-anderton.sh
 # agy loads a workspace's hooks and agents from each directory between its working directory and the top of the
@@ -29,12 +30,10 @@ if ! out=$("$anderton_scripts/agy-hooks.sh" check --workspace "$dir" 2>&1); then
 agy would run unguarded, so the agy Anderton was not started." >&2
   exit 1
 fi
-ANDERTON_AGY_SESSION=$(python3 -c 'import uuid; print(uuid.uuid4())')
-# exec keeps this pid, so it names the agy process: a relaunch is another, /clear starts a conversation in the same one.
-ANDERTON_AGY_NAME=$name ANDERTON_AGY_DIR=$dir ANDERTON_AGY_PID=$$
-export ANDERTON_AGY_SESSION ANDERTON_AGY_NAME ANDERTON_AGY_DIR ANDERTON_AGY_PID
+# The scripts read the session from the agy process its tool shells run under; the launcher only names the role.
+export ANDERTON_AGY_NAME=$name
 # A launch from inside a Claude Code or Codex session would otherwise be read as that session.
-unset CLAUDE_CODE_SESSION_ID CLAUDE_PID CODEX_THREAD_ID
+unset CLAUDE_CODE_SESSION_ID CLAUDE_PID CODEX_THREAD_ID ANDERTON_AGY_SESSION ANDERTON_AGY_PID ANDERTON_AGY_DIR
 mode="" prompt="" settings=""
 for arg; do
   case $arg in

@@ -15,7 +15,8 @@ cleanup() {
 trap cleanup EXIT
 
 export CLAUDE_CONFIG_DIR="$work/claude"
-unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_SOCKET_PATH TMUX
+unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_SOCKET_PATH TMUX \
+  ANTIGRAVITY_CONVERSATION_ID ANDERTON_AGY_SESSION ANDERTON_AGY_SANDBOXED
 # No Codex account helper on this machine's PATH is reached: a test names its own.
 export ANDERTON_CODEX_ACCOUNTS="$work/no-codex-accounts"
 # A fake claude CLI, so no test reaches this machine's real sessions: `agents --json` prints $FAKE_AGENTS,
@@ -3445,6 +3446,22 @@ check "an owed reopen runs on the new home, and the owed direction to continue i
   '[ ! -e "$FAKE_LOG.move" ] && grep -q -- "-e CODEX_HOME=$cxnext codex resume $cx_thread" "$FAKE_LOG.respawns" &&
    contains "continues on $cxnext" && grep -q "Check the current state before repeating" "$FAKE_LOG.direction" &&
    [ "$(cx_record ".codexFailover | \"\\(.reopen) \\(.continue)\"")" = "false false" ]'
+cx_teardown
+
+# Run by a watch's probe, the closing notice stays owed until the watch has told it: a busy pane hears it on a later sweep.
+cx_owed false true
+rm -rf "$work/cx-state" "$work/cx-stage"
+mkdir -p "$work/cx-state" "$work/cx-stage"
+cx_sweep "ANDERTON_PROBE_STATE=$work/cx-state" "ANDERTON_PROBE_STAGE=$work/cx-stage"
+check "a watch's sweep continues the worker and stages its notice" eval 'contains "continues on $cxnext" &&
+  grep -q "Check the current state before repeating" "$FAKE_LOG.direction"'
+rm -f "$work/cx-stage/"* "$FAKE_LOG.direction"
+cx_sweep "ANDERTON_PROBE_STATE=$work/cx-state" "ANDERTON_PROBE_STAGE=$work/cx-stage"
+check "when the pane was busy, the next sweep tells it again, without repeating the step" eval 'contains "continues on $cxnext" &&
+  [ ! -e "$FAKE_LOG.direction" ]'
+mv "$work/cx-stage/"* "$work/cx-state/"
+cx_sweep "ANDERTON_PROBE_STATE=$work/cx-state" "ANDERTON_PROBE_STAGE=$work/cx-stage"
+check "and once the watch has told it, nothing more is owed" eval '! contains "continues on" && [ "$(cx_record .codexFailover.notice)" = null ]'
 cx_teardown
 
 cx_owed false true

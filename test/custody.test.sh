@@ -22,7 +22,7 @@ trap cleanup EXIT
 export CLAUDE_CONFIG_DIR="$work/claude"
 export CODEX_HOME="$work/codex"
 export PATH="$work/bin:$PATH"
-unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID TMUX HERDR_ENV
+unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID TMUX HERDR_ENV ANTIGRAVITY_CONVERSATION_ID ANDERTON_AGY_SESSION ANDERTON_AGY_SANDBOXED
 # shellcheck source=SCRIPTDIR/../skills/anderton/scripts/session-lib.sh
 . "$scripts/session-lib.sh"
 sessions="$CLAUDE_CONFIG_DIR/sessions"

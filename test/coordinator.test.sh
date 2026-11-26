@@ -21,7 +21,7 @@ export ANDERTON_WORKTREES="$tmp/worktrees" ANDERTON_START_WAIT=1
 export ANDERTON_CODEX_ACCOUNTS="$tmp/no-codex-accounts"
 export FIXTURE_TMUX_LOG="$tmp/tmux.log"
 export FIXTURE_NOTICE_HOME="$tmp/notices"
-unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID TMUX HERDR_ENV
+unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID TMUX HERDR_ENV ANTIGRAVITY_CONVERSATION_ID ANDERTON_AGY_SESSION ANDERTON_AGY_SANDBOXED
 export PATH="$tmp/bin:$PATH"
 mkdir -p "$HOME" "$tmp/bin" "$CLAUDE_CONFIG_DIR/sessions" "$CODEX_HOME/app-server-control" "$tmp/scripts" "$tmp/repo"
 cp "$repo"/skills/anderton/scripts/*.sh "$tmp/scripts/"
@@ -707,14 +707,30 @@ cat > "$tmp/agybin/herdr" <<'STUB'
 jq -nc --arg dir "$FIXTURE_ROOT" '{result:{agent:{agent:"agy",agent_status:"idle",pane_id:"w9:p77",cwd:$dir,agent_session:{value:"conv-fixture"}}}}'
 STUB
 chmod +x "$tmp/agybin/herdr"
+# The agy process the claim records is this shell, which the role's commands run under, as agy's tool shells do.
+agy_start=$(
+  # shellcheck source=SCRIPTDIR/../skills/anderton/scripts/session-lib.sh
+  . "$script/session-lib.sh"
+  proc_start $$
+)
 as_agy_holder() {
   cp "$root_claim" "$tmp/codex-claim"
-  jq --arg socket "$tmp/herdr.sock" --arg dir "$FIXTURE_ROOT" '.provider = "agy" | .sessionId = "agy-fixture" |
-    .name = "fixture-agy" | .dir = $dir | .pane = "w9:p77" | .socket = $socket | .agyInstance = "conv-fixture" | del(.codexHome)
+  jq --arg socket "$tmp/herdr.sock" --arg dir "$FIXTURE_ROOT" --argjson pid $$ --arg start "$agy_start" '.provider = "agy" |
+    .sessionId = "agy-fixture" | .name = "fixture-agy" | .dir = $dir | .pane = "w9:p77" | .socket = $socket |
+    .agyInstance = "conv-fixture" | .agyPid = $pid | .agyStart = $start | del(.codexHome)
     ' "$tmp/codex-claim" > "$root_claim"
 }
-agy_role() { env PATH="$tmp/agybin:$PATH" ANDERTON_AGY_SESSION=agy-fixture ANDERTON_AGY_NAME=fixture-agy HERDR_PANE_ID=w9:p77 \
-  HERDR_SOCKET_PATH="$tmp/herdr.sock" "$@"; }
+# The holder's tool shells run under its agy process, which a copy of bash named agy stands in for: each call names its
+# own stand-in in the claim, as a holder that just claimed would be named.
+cp "$(command -v bash)" "$tmp/agybin/agy"
+agy_role() {
+  # shellcheck disable=SC2016 # the stand-in's script expands its own arguments
+  env PATH="$tmp/agybin:$PATH" ANTIGRAVITY_CONVERSATION_ID=conv-fixture ANDERTON_AGY_NAME=fixture-agy HERDR_PANE_ID=w9:p77 \
+    HERDR_SOCKET_PATH="$tmp/herdr.sock" "$tmp/agybin/agy" -c 'lib=$1 claim=$2; shift 2
+      start=$(. "$lib/session-lib.sh" && proc_start $$)
+      jq --argjson pid $$ --arg start "$start" ".agyPid = \$pid | .agyStart = \$start" "$claim" > "$claim.agy" && mv "$claim.agy" "$claim"
+      "$@"; exit $?' agy "$script" "$root_claim" "$@"
+}
 as_agy_holder
 mv "$claims/reports/routes" "$tmp/codex-routes"
 PATH="$tmp/agybin:$PATH" native_gate outbound-one former-claude 'RESULT: same milestone'
@@ -757,6 +773,42 @@ if grep -Eq 'historical transport|old delivered echo|unrelated message|unrelated
 grep -qx 'RESULT: example PR opened' "$tmp/agy-native-output"
 grep -qx 'RESULT: example CI passed' "$tmp/agy-native-output"
 [ "$(grep -c 'RESULT: formatted milestone' "$tmp/agy-native-output")" = 1 ]
+# The agy holder's watch runs beside agy, not under it, as claim.sh starts it: from there it still finds the role's
+# workers, sweeps their reports and types them into the holder's pane.
+as_agy_holder
+cat > "$tmp/agybin/herdr" <<'STUB'
+#!/usr/bin/env bash
+case "$1 $2 $3" in
+  "agent get w9:p77")
+    jq -nc --arg dir "$FIXTURE_ROOT" '{result:{agent:{agent:"agy",agent_status:"idle",pane_id:"w9:p77",cwd:$dir,agent_session:{value:"conv-fixture"}}}}' ;;
+  "pane process-info --pane") [ "$4" = w9:p77 ] || exit 1
+    jq -nc --argjson pid "$FIXTURE_AGY_PID" '{result:{process_info:{foreground_processes:[{name:"agy",pid:$pid}]}}}' ;;
+  "agent prompt w9:p77") printf '%s\n' "$4" >> "$FIXTURE_AGY_PROMPTS" ;;
+  *) exit 1 ;;
+esac
+STUB
+"$tmp/agybin/agy" -c 'sleep 600; :' &
+agy_holder=$!
+agy_holder_start=$(
+  # shellcheck source=SCRIPTDIR/../skills/anderton/scripts/session-lib.sh
+  . "$script/session-lib.sh"
+  proc_start "$agy_holder"
+)
+jq --argjson pid "$agy_holder" --arg start "$agy_holder_start" '.agyPid = $pid | .agyStart = $start' "$root_claim" > "$tmp/updated-claim"
+mv "$tmp/updated-claim" "$root_claim"
+env PATH="$tmp/agybin:$PATH" FIXTURE_AGY_PID="$agy_holder" FIXTURE_AGY_PROMPTS="$tmp/agy-prompts" ANDERTON_WATCH_TICK=1 \
+  python3 -c 'import subprocess, sys; subprocess.Popen(sys.argv[1:], start_new_session=True, stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' "$script/watch.sh" --agy "$root_claim"
+for _ in $(seq 1 100); do
+  if grep -qx 'RESULT: example CI passed' "$tmp/agy-prompts" 2>/dev/null; then break; fi
+  sleep 0.2
+done
+agy_watch=$(cut -d' ' -f1 "${root_claim%.json}.watch" 2>/dev/null || true)
+[ -z "$agy_watch" ] || kill "$agy_watch" 2>/dev/null || true
+grep -qx 'RESULT: example CI passed' "$tmp/agy-prompts"
+grep -qx 'RESULT: scoped socket milestone' "$tmp/agy-prompts"
+kill "$agy_holder"
+mv "$tmp/codex-claim" "$root_claim"
 if codex_role "$script/worker.sh" message legacy-reporter 'Refuse legacy transcript-only identity.' > "$tmp/refused" 2>&1; then exit 1; fi
 mv "$tmp/native-stage/"*.json "$tmp/native-state/"
 codex_role env ANDERTON_PROBE_STATE="$tmp/native-state" ANDERTON_PROBE_STAGE="$tmp/native-stage" "$script/worker.sh" sweep > "$tmp/native-output"
