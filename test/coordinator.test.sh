@@ -259,7 +259,8 @@ refused_claim claude_role "$script/claim.sh"
 NOT_REACHABLE=1 refused_claim claude_role "$script/claim.sh"
 grep -q 'liveness: unknown' "$tmp/refused"
 claude_role "$script/claim.sh" --project tools
-# The repository's Anderton runs on Codex here. A Claude session holding no role still starts no worker where the repository's Anderton runs on Codex.
+# The repository's Anderton runs on Codex here. A Claude session holding no role still defaults to that Anderton's
+# provider, which it may not start, and starts a Claude worker only when it names one.
 sleep 600 &
 loose_pid=$!
 jq -nc --argjson pid "$loose_pid" --arg cwd "$PWD" '{pid:$pid, sessionId:"loose-claude", name:"loose-claude", cwd:$cwd}' \
@@ -271,6 +272,12 @@ printf 'Fixture task.\n' | env CLAUDE_PID="$loose_pid" CLAUDE_CODE_SESSION_ID=lo
 grep -q 'Only the Anderton holding this repository or project' "$tmp/refused"
 [ ! -e "$claims/workers/loose-default.json" ]
 [ ! -e "$ANDERTON_WORKTREES/wt-loose-default" ]
+printf 'Fixture task.\n' | env CLAUDE_PID="$loose_pid" CLAUDE_CODE_SESSION_ID=loose-claude TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 \
+  "$script/spawn.sh" --effort low --provider claude --mode default loose-claude-worker
+jq -e '(.provider // "claude") == "claude" and .spawner == "loose-claude" and (has("spawnerProvider") | not)' \
+  "$claims/workers/loose-claude-worker.json" >/dev/null
+rm "$claims/workers/loose-claude-worker.json"
+git worktree remove --force "$ANDERTON_WORKTREES/wt-loose-claude-worker"
 # A project's Claude Anderton starts Claude workers by default.
 printf 'Fixture task.\n' | claude_role env TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 \
   "$script/spawn.sh" --effort low --mode default claude-lead-default

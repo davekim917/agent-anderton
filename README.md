@@ -134,7 +134,8 @@ the operator to review.
 
 A worker defaults to the provider of the Anderton that starts it, the repository's or a project's.
 A Codex worker started that way runs on its Anderton's own daemon home. A session that holds no role starts only
-Claude workers, and only where the repository's Anderton, if it has one, runs on Claude.
+Claude workers. Its default still follows the repository's Anderton, so where that one runs on Codex or agy it passes
+`--provider claude`.
 Use `--provider claude`, `--provider codex` or `--provider agy` to choose explicitly.
 `worker.sh message <name> "<direction>"` appends directions to a Codex worker's
 queue in order. If `message` exits 4, run `worker.sh status <name>` and resend
