@@ -132,8 +132,11 @@ terminal turn on the claimed thread. A turn the operator interrupted still
 retains the notification in its history, so the watcher leaves it there for
 the operator to review.
 
-The repository Anderton sets the default worker provider for all of its projects.
-An inherited Codex default uses the daemon home of the repository Anderton.
+A worker defaults to the provider of the Anderton that starts it, the repository's or a project's. A Codex worker
+started that way starts from its Anderton's own home, which an account helper may replace with a fallback account, as
+for any new Codex session. Without a role, only a named Claude Code session can start a worker, and only a Claude one;
+a Codex or agy session needs a claim for any worker, Claude included. Its default still follows the repository's
+Anderton, so where that one runs on Codex or agy it passes `--provider claude`.
 Use `--provider claude`, `--provider codex` or `--provider agy` to choose explicitly.
 `worker.sh message <name> "<direction>"` appends directions to a Codex worker's
 queue in order. If `message` exits 4, run `worker.sh status <name>` and resend
@@ -225,7 +228,7 @@ ways a Codex Anderton hears them. It types each message into the Anderton's pane
 records what agy loads hooks, plugins and agents from for the repository, and the watch tells the Anderton once when any
 of it changes.
 
-Workers start from it with `spawn.sh` as from any Anderton. Its default provider is agy, as a repository Anderton's
+Workers start from it with `spawn.sh` as from any Anderton. Its default provider is agy, as every Anderton's own
 provider is the default for its workers. A Claude worker under it runs in Claude's default permission mode and reports
 in its final replies, as under a Codex Anderton. A Claude worker it inherits, which still reports with `SendMessage`, has
 that send held and read from its transcript, as a Codex Anderton reads one. Known limit: a final reply that restates

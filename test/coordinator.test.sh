@@ -7,9 +7,10 @@ claimer=""
 clearable_pid=""
 replacement_pid=""
 fixture_watch=""
+loose_pid=""
 cleanup() {
   local pid
-  for pid in "$claimer" "$clearable_pid" "$replacement_pid" "$fixture_watch"; do
+  for pid in "$claimer" "$clearable_pid" "$replacement_pid" "$fixture_watch" "$loose_pid"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$tmp"
@@ -112,8 +113,9 @@ done
 [ ! -e "$ANDERTON_WORKTREES" ]
 [ ! -e "$claims/workers" ]
 [ ! -e "$FIXTURE_TMUX_LOG" ]
-printf 'Fixture task.\n' | codex_role env TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 "$script/spawn.sh" --effort low from-claude-default
-jq -e '(.provider // "claude") == "claude" and .spawnerProvider == "codex" and .spawnerScope == "tools"' "$claims/workers/from-claude-default.json" >/dev/null
+# --provider overrides a Codex Anderton's own runtime, the default for its workers.
+printf 'Fixture task.\n' | codex_role env TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 "$script/spawn.sh" --effort low --provider claude codex-lead-claude
+jq -e '(.provider // "claude") == "claude" and .spawnerProvider == "codex" and .spawnerScope == "tools"' "$claims/workers/codex-lead-claude.json" >/dev/null
 if codex_role "$script/role-message.sh" ' ' >/dev/null 2>&1; then exit 1; fi
 jq -e '.peerMessage == null' "$root_claim" >/dev/null
 if codex_role "$script/role-message.sh" 'RESULT: the catalog fixture shipped' > "$tmp/refused" 2>&1; then exit 1; fi
@@ -257,11 +259,46 @@ refused_claim claude_role "$script/claim.sh"
 NOT_REACHABLE=1 refused_claim claude_role "$script/claim.sh"
 grep -q 'liveness: unknown' "$tmp/refused"
 claude_role "$script/claim.sh" --project tools
-printf 'Fixture task.\n' | claude_role env CODEX_HOME="$tmp/unrelated-home" TMUX=/tmp/fixture-tmux,10,0 "$script/spawn.sh" --effort low from-codex-default
+# The repository's Anderton runs on Codex here. A Claude session holding no role still defaults to that Anderton's
+# provider, which it may not start, and starts a Claude worker only when it names one.
+sleep 600 &
+loose_pid=$!
+jq -nc --argjson pid "$loose_pid" --arg cwd "$PWD" '{pid:$pid, sessionId:"loose-claude", name:"loose-claude", cwd:$cwd}' \
+  > "$CLAUDE_CONFIG_DIR/sessions/$loose_pid.json"
+status=0
+printf 'Fixture task.\n' | env CLAUDE_PID="$loose_pid" CLAUDE_CODE_SESSION_ID=loose-claude TMUX=/tmp/fixture-tmux,10,0 \
+  "$script/spawn.sh" --effort low loose-default > "$tmp/refused" 2>&1 || status=$?
+[ "$status" -eq 1 ]
+grep -q 'Only the Anderton holding this repository or project' "$tmp/refused"
+[ ! -e "$claims/workers/loose-default.json" ]
+[ ! -e "$ANDERTON_WORKTREES/wt-loose-default" ]
+printf 'Fixture task.\n' | env CLAUDE_PID="$loose_pid" CLAUDE_CODE_SESSION_ID=loose-claude TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 \
+  "$script/spawn.sh" --effort low --provider claude --mode default loose-claude-worker
+jq -e '(.provider // "claude") == "claude" and .spawner == "loose-claude" and (has("spawnerProvider") | not)' \
+  "$claims/workers/loose-claude-worker.json" >/dev/null
+rm "$claims/workers/loose-claude-worker.json"
+git worktree remove --force "$ANDERTON_WORKTREES/wt-loose-claude-worker"
+# A project's Claude Anderton starts Claude workers by default.
+printf 'Fixture task.\n' | claude_role env TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 \
+  "$script/spawn.sh" --effort low --mode default claude-lead-default
+jq -e '(.provider // "claude") == "claude" and .spawnerProvider == "claude" and .spawnerScope == "tools"' "$claims/workers/claude-lead-default.json" >/dev/null
+rm "$claims/workers/claude-lead-default.json"
+git worktree remove --force "$ANDERTON_WORKTREES/wt-claude-lead-default"
+# A project's Codex Anderton starts Codex workers by default, on its own home, not on the repository Anderton's.
+scoped_thread=019a0000-cccc-7222-8333-444455556666
+env CODEX_THREAD_ID="$scoped_thread" CODEX_HOME="$moved_home" "$script/claim.sh" --project codex-side
+printf 'Fixture task.\n' | env CODEX_THREAD_ID="$scoped_thread" CODEX_HOME="$moved_home" TMUX=/tmp/fixture-tmux,10,0 \
+  "$script/spawn.sh" --effort low codex-side-default
+jq -e --arg home "$moved_home" '
+  .provider == "codex" and .codexHome == $home and .spawnerProvider == "codex" and .spawnerScope == "codex-side"' \
+  "$claims/workers/codex-side-default.json" >/dev/null
+rm "$claims/workers/codex-side-default.json"
+git worktree remove --force "$ANDERTON_WORKTREES/wt-codex-side-default"
+printf 'Fixture task.\n' | claude_role env TMUX=/tmp/fixture-tmux,10,0 "$script/spawn.sh" --effort low --provider codex claude-lead-codex
 jq -e --arg id "$FIXTURE_WORKER" --arg home "$CODEX_HOME" '
-  .provider == "codex" and .id == $id and .codexHome == $home and .spawnerProvider == "claude" and .spawnerScope == "tools"' "$claims/workers/from-codex-default.json" >/dev/null
+  .provider == "codex" and .id == $id and .codexHome == $home and .spawnerProvider == "claude" and .spawnerScope == "tools"' "$claims/workers/claude-lead-codex.json" >/dev/null
 refused_claim env CODEX_THREAD_ID="$FIXTURE_WORKER" "$script/claim.sh" --project worker-scope
-grep -q "managed as worker 'from-codex-default'" "$tmp/refused"
+grep -q "managed as worker 'claude-lead-codex'" "$tmp/refused"
 pending=019a0000-bbbb-7222-8333-444455556666
 jq -nc --arg dir "$PWD" --arg home "$CODEX_HOME" '
   {name:"registering-codex",root:$dir,dir:$dir,provider:"codex",codexHome:$home,id:"",codexLaunchToken:"fixture"}' \
@@ -290,7 +327,7 @@ codex_role "$script/claim.sh"
 CLAIM_STATE=gone claude_role "$script/claim.sh"
 jq -e '.provider == "claude"' "$root_claim" >/dev/null
 
-inherited="$claims/workers/from-claude-default.json"
+inherited="$claims/workers/codex-lead-claude.json"
 inherited_transcript="$CLAUDE_CONFIG_DIR/projects/fixture/inherited.jsonl"
 jq -c --arg file "$inherited_transcript" '
   .claudeSession = {id:"inherited",transcript:$file} | .startedAt = "2030-01-02T00:00:00Z"

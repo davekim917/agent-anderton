@@ -177,18 +177,20 @@ from herdr or tmux. Each worker opens in a new tab or window
 the user can watch and type into. A project's Anderton
 labels the tab with its own name, as `<its name>/<worker>`.
 
-The default worker runtime follows the **repository's** Anderton, including for
-project Andertons on the other runtime. Pass `--provider claude` or
-`--provider codex` when picking a different runtime. By default, a Claude worker
+The default worker runtime is the one you run on, whether you hold the
+repository's role or a project's; a Codex worker starts on your own Codex home.
+Pass `--provider claude`, `--provider codex` or `--provider agy` when picking a
+different runtime. By default, a Claude worker
 under Claude Code inherits the Anderton's permission mode, and a Claude worker
 under Codex uses Claude's default permission mode. Claude workers under Codex
 report milestones in their final reply. A Codex worker runs
 with workspace writes and user approvals. It uses the configured Codex model
 unless the user names one, with the effort you pass. The local Codex daemon
 and Python 3 must be available. If startup stops before the worker gets a
-thread ID, inspect its tab. `--provider agy` starts an agy worker only when the
-user asks for one, inside herdr, with no permission prompts and the guard as the
-gate (`--mode` names an agy mode instead). Read its reports with
+thread ID, inspect its tab. An agy worker, the default under an agy Anderton and
+from any other only when the user asks for one, starts inside herdr, with no
+permission prompts and the guard as the gate (`--mode` names an agy mode
+instead). Read its reports with
 `worker.sh output` (a screen read), since nothing sweeps agy workers, and
 direct it with `worker.sh message`. Your watch tells you when what agy loads
 hooks or agents from changes under it. Once a Codex worker has received the launch brief, run
