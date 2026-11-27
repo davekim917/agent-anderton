@@ -536,6 +536,34 @@ check "an anderton skill agy-hooks.sh did not write refuses every copy's claim" 
   contains "not one agy-hooks.sh skill wrote"'
 rm -rf "$HOME/.gemini/config/skills/anderton"
 
+# In a repository whose own Anderton is Claude, a project's agy Anderton starts agy workers by default.
+mkdir -p "$tmp/mixed"
+cd "$tmp/mixed"
+git init -q
+git -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m seed
+mixed=$(pwd -P)
+sleep 600 &
+mixed_claude=$!
+agy_procs="$agy_procs $mixed_claude"
+jq -nc --argjson pid "$mixed_claude" --arg cwd "$mixed" '{pid:$pid, sessionId:"mixed-claude", name:"mixed-claude", cwd:$cwd}' \
+  > "$CLAUDE_CONFIG_DIR/sessions/$mixed_claude.json"
+as CLAUDE_PID="$mixed_claude" CLAUDE_CODE_SESSION_ID=mixed-claude -- "$scripts/claim.sh"
+check "a Claude session claims another repository's role" eval '[ "$status" -eq 0 ] &&
+  [ "$(jq -r "select(.root == \"$mixed\" and .scope == null) | .provider // \"claude\"" "$CLAUDE_CONFIG_DIR"/anderton/*.json)" = claude ]'
+session_agy w9:p60 "$mixed" "$mixed"
+mixed_jobs=$agy_jobs
+mixed_lead=(ANTIGRAVITY_CONVERSATION_ID=conv-mixed ANDERTON_AGY_NAME=agy-mixed "${herdr_env[@]}" HERDR_PANE_ID=w9:p60)
+in_agy "$mixed_jobs" "${mixed_lead[@]}" -- "$scripts/claim.sh" --project mixed
+check "where an agy session claims a project's role" eval '[ "$status" -eq 0 ] && contains "project mixed claimed by agy session agy-"'
+agent_in w9:p5 agy
+rm -f "$FAKE/start"
+in_agy "$mixed_jobs" --stdin "$tmp/brief.md" "${mixed_lead[@]}" -- "$scripts/spawn.sh" --effort low mixed-default
+check "and starts an agy worker when no provider is named" eval '[ "$status" -eq 0 ] && grep -qx -- agy "$FAKE/start" &&
+  [ "$(jq -r "\"\(.provider) \(.spawnerProvider) \(.spawnerScope)\"" "$CLAUDE_CONFIG_DIR/anderton/workers/mixed-default.json")" = "agy agy mixed" ]'
+rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/mixed-default.json" "$CLAUDE_CONFIG_DIR/anderton/workers/mixed-default.agy-config"
+[ ! -d "$ANDERTON_WORKTREES/wt-mixed-default" ] || git -C "$mixed" worktree remove --force "$ANDERTON_WORKTREES/wt-mixed-default"
+cd "$repo"
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures agy-anderton check(s) failed"
   exit 1

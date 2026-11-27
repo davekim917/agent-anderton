@@ -71,8 +71,12 @@ root=$(invoking_root)
 caller_provider=$(invoking_provider)
 role=$(caller_claim "$root")
 main=$(holder_record "$root")
+# An Anderton's workers run on its own runtime unless --provider names another. A Codex caller's claim names the
+# caller's own home (caller_matches_claim), which the Codex setup below resolves.
 if [ -z "$provider" ]; then
-  if [ -n "$main" ]; then
+  if [ -n "$role" ]; then
+    provider=$caller_provider
+  elif [ -n "$main" ]; then
     provider=$(record_provider "$main")
     if [ "$provider" = codex ]; then
       codex_home=$(jq -er '.codexHome | select(type == "string" and length > 0)' "$main") || {
