@@ -184,8 +184,9 @@ different runtime. By default, a Claude worker
 under Claude Code inherits the Anderton's permission mode, and a Claude worker
 under Codex or agy starts in the mode the user's Claude settings give a new
 session (`--mode auto`, `default`, `acceptEdits` or `plan` names one instead).
-It never runs with permissions bypassed: spawn.sh refuses `--mode
-bypassPermissions` and starts it with Claude's bypass mode disabled. Claude workers under Codex
+A worker spawn.sh starts there never runs with permissions bypassed: spawn.sh
+refuses `--mode bypassPermissions` and starts it with Claude's bypass mode
+disabled. A bypassed session you adopt or inherit keeps its mode. Claude workers under Codex
 report milestones in their final reply. A Codex worker runs
 with workspace writes and user approvals. It uses the configured Codex model
 unless the user names one, with the effort you pass. The local Codex daemon
