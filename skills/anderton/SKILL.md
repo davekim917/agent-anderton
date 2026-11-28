@@ -182,7 +182,9 @@ repository's role or a project's; a Codex worker starts on your own Codex home.
 Pass `--provider claude`, `--provider codex` or `--provider agy` when picking a
 different runtime. By default, a Claude worker
 under Claude Code inherits the Anderton's permission mode, and a Claude worker
-under Codex uses Claude's default permission mode. Claude workers under Codex
+under Codex or agy starts in the mode the user's Claude settings give a new
+session; if those default to bypassPermissions, spawn.sh refuses it unless
+`--mode` names a mode, and use `--mode bypassPermissions` only when the user asks. Claude workers under Codex
 report milestones in their final reply. A Codex worker runs
 with workspace writes and user approvals. It uses the configured Codex model
 unless the user names one, with the effort you pass. The local Codex daemon

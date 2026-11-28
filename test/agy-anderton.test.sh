@@ -33,7 +33,8 @@ eventually() { # eventually <command...>: true once it is, within five seconds
   return 1
 }
 
-export HOME="$tmp/home" CLAUDE_CONFIG_DIR="$tmp/claude" ANDERTON_WORKTREES="$tmp/worktrees" ANDERTON_WATCH_TICK=0.2
+export HOME="$tmp/home" CLAUDE_CONFIG_DIR="$tmp/claude" ANDERTON_WORKTREES="$tmp/worktrees" ANDERTON_WATCH_TICK=0.2 \
+  ANDERTON_CLAUDE_MANAGED_DIR="$tmp/managed"
 export FAKE="$tmp/fake"
 unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID TMUX ANDERTON_AGY_SESSION ANDERTON_AGY_NAME ANDERTON_AGY_DIR ANDERTON_AGY_PID \
   ANTIGRAVITY_CONVERSATION_ID ANDERTON_AGY_SANDBOXED
@@ -227,12 +228,37 @@ rm -f "$HOME/.gemini/hooks.json"
 # The workers it starts report to it the way they report to a Codex Anderton.
 printf 'Tidy the example module.\n' > "$tmp/brief.md"
 in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" -- "$scripts/spawn.sh" --provider claude --effort low lead-claude
-check "an agy Anderton starts a Claude worker in herdr" eval '[ "$status" -eq 0 ] && grep -qx -- default "$FAKE/start" &&
-  grep -qx -- --plugin-dir "$FAKE/start"'
+check "an agy Anderton starts a Claude worker in herdr, in the permission mode Claude's settings give it" eval '[ "$status" -eq 0 ] &&
+  ! grep -qx -- --permission-mode "$FAKE/start" && grep -qx -- --plugin-dir "$FAKE/start"'
 check "which reports in its final replies, to the agy Anderton" [ "$(jq -r '"\(.reportTransport) \(.spawnerProvider) \(.spawner)"' "$CLAUDE_CONFIG_DIR/anderton/workers/lead-claude.json")" = "transcript agy agy-lead" ]
 check "and the brief says so" grep -qF "w9:p5 Tidy the example module." "$FAKE/prompts"
 mv "$CLAUDE_CONFIG_DIR/anderton/workers/lead-claude.json" "$tmp/lead-claude.json"
 git -C "$repo" worktree remove --force "$ANDERTON_WORKTREES/wt-lead-claude"
+# Only --mode starts a Claude worker with permissions bypassed, whichever settings file would default to it.
+no_worker() { [ ! -e "$FAKE/start" ] && [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/$1.json" ] && [ ! -e "$ANDERTON_WORKTREES/wt-$1" ]; }
+mode_arg() { [ "$(grep -A1 -x -- --permission-mode "$FAKE/start" | tail -n 1)" = "$1" ]; }
+drop_worker() {
+  rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/$1.json"
+  git -C "$repo" worktree remove --force "$ANDERTON_WORKTREES/wt-$1"
+}
+printf '{"permissions":{"defaultMode":"bypassPermissions"}}\n' > "$CLAUDE_CONFIG_DIR/settings.json"
+rm -f "$FAKE/start"
+in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" -- "$scripts/spawn.sh" --provider claude --effort low bypass-claude
+check "a user default of bypassPermissions refuses a Claude worker started without --mode" eval '[ "$status" -eq 2 ] &&
+  contains "$CLAUDE_CONFIG_DIR/settings.json sets Claude'"'"'s default permission mode to bypassPermissions" && no_worker bypass-claude'
+rm "$CLAUDE_CONFIG_DIR/settings.json"
+mkdir -p "$ANDERTON_CLAUDE_MANAGED_DIR/managed-settings.d"
+printf '{"permissions":{"defaultMode":"bypassPermissions"}}\n' > "$ANDERTON_CLAUDE_MANAGED_DIR/managed-settings.d/50-mode.json"
+in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" -- "$scripts/spawn.sh" --provider claude --effort low bypass-claude
+check "so does a managed settings drop-in" eval '[ "$status" -eq 2 ] && contains "managed-settings.d/50-mode.json sets" &&
+  no_worker bypass-claude'
+in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" -- "$scripts/spawn.sh" --provider claude --effort low --mode bypassPermissions bypass-claude
+check "but --mode bypassPermissions starts it so" eval '[ "$status" -eq 0 ] && mode_arg bypassPermissions'
+drop_worker bypass-claude
+rm -r "$ANDERTON_CLAUDE_MANAGED_DIR"
+in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" -- "$scripts/spawn.sh" --provider claude --effort low --mode auto auto-claude
+check "and --mode auto in auto mode" eval '[ "$status" -eq 0 ] && mode_arg auto && contains "(auto)"'
+drop_worker auto-claude
 agent_in w9:p5 agy
 in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" -- "$scripts/spawn.sh" --provider agy --effort low lead-agy
 jq -c --arg cwd "$ANDERTON_WORKTREES/wt-lead-agy" '.result.agent.cwd = $cwd' "$FAKE/agent-get.w9:p5" > "$FAKE/agent-get.tmp"

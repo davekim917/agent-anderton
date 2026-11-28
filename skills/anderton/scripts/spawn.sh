@@ -11,6 +11,27 @@ set -euo pipefail
 . "$(dirname "$0")/session-lib.sh"
 
 require_tools spawn.sh
+
+# The settings file that would start a Claude session in bypassPermissions mode when no --permission-mode is given.
+# Only user and managed settings can choose that mode. Server-managed settings and MDM profiles are not read here.
+claude_bypass_settings() {
+  local managed f
+  managed=${ANDERTON_CLAUDE_MANAGED_DIR:-}
+  if [ -z "$managed" ]; then
+    case $(uname -s) in
+      Darwin) managed="/Library/Application Support/ClaudeCode" ;;
+      *) managed=/etc/claude-code ;;
+    esac
+  fi
+  for f in "$home/settings.json" "$managed/managed-settings.json" "$managed"/managed-settings.d/*.json; do
+    [ -f "$f" ] || continue
+    if jq -e '.permissions.defaultMode == "bypassPermissions"' "$f" >/dev/null 2>&1; then
+      printf '%s\n' "$f"
+      return 0
+    fi
+  done
+  return 1
+}
 usage="usage: spawn.sh --effort low|medium|high|xhigh|max [--provider claude|codex|agy] [--model M] [--mode MODE] [--speed standard|fast|ultrafast] [--base REF] <name: a-z 0-9 -> [brief-file]"
 model="" effort="" mode="" speed="" base="" provider="" codex_home="" launched_at="" launch_token="" claude_launch=""
 while [ $# -gt 0 ]; do
@@ -178,10 +199,15 @@ if [ -z "$role" ] && { [ "$provider" != claude ] || [ "$caller_provider" != clau
   exit 1
 fi
 
-# A peer in another permission mode holds this session's messages for its user's approval, so the worker
-# runs in this session's mode, which its transcript records on each prompt.
+# A peer in another permission mode holds this session's messages for its user's approval, so a Claude Anderton's
+# worker runs in that session's mode, which its transcript records on each prompt. A Codex or agy Anderton directs
+# its Claude workers through their Stop hook and pane, not those messages: they start in the mode Claude itself
+# picks from its settings, unless that could be bypassPermissions, which only --mode may choose.
 if [ "$provider" = claude ] && [ -z "$mode" ] && [ "$caller_provider" != claude ]; then
-  mode=default
+  if configured=$(claude_bypass_settings); then
+    echo "$configured sets Claude's default permission mode to bypassPermissions. Pass --mode bypassPermissions to start this worker so, or --mode with another mode." >&2
+    exit 2
+  fi
 elif [ "$provider" = claude ] && [ -z "$mode" ]; then
   for t in "$home"/projects/*/"$sid".jsonl; do
     [ -e "$t" ] || continue
@@ -189,13 +215,7 @@ elif [ "$provider" = claude ] && [ -z "$mode" ]; then
     break
   done
 fi
-if [ "$provider" = claude ] && [ "$caller_provider" != claude ]; then
-  case $mode in
-    default | acceptEdits | plan) ;;
-    *) echo "Claude workers under a $caller_provider Anderton use default, acceptEdits, or plan permission mode." >&2; exit 2 ;;
-  esac
-fi
-if [ "$provider" = claude ] && [ -z "$mode" ]; then
+if [ "$provider" = claude ] && [ -z "$mode" ] && [ "$caller_provider" = claude ]; then
   echo "Cannot read this session's permission mode from its transcript; pass --mode." >&2
   exit 1
 fi
@@ -352,7 +372,9 @@ elif [ "$provider" = agy ]; then
   out=$("$anderton_scripts/agy-hooks.sh" check --workspace "$dir" 2>&1) || failed "$out
 agy would run unguarded, so no agy worker was started."
 else
-  set -- -n "$name" --permission-mode "$mode" --effort "$effort" --model "${model:-opus}" --session-id "$claude_launch"
+  set -- -n "$name"
+  if [ -n "$mode" ]; then set -- "$@" --permission-mode "$mode"; else mode="Claude's configured default permission mode"; fi
+  set -- "$@" --effort "$effort" --model "${model:-opus}" --session-id "$claude_launch"
   if [ "$caller_provider" != claude ]; then
     set -- "$@" --plugin-dir "$(cd "$anderton_scripts/../../.." && pwd)"
   fi
