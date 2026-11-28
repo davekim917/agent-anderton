@@ -11,38 +11,6 @@ set -euo pipefail
 . "$(dirname "$0")/session-lib.sh"
 
 require_tools spawn.sh
-
-# Why a Claude session started with no --permission-mode, on Claude home $1, could start in bypassPermissions mode,
-# as far as the user and managed settings files show; fails when they rule it out. Only those files can choose that
-# mode. Server-managed settings and MDM profiles are not read here. A policy helper computes managed settings at
-# startup, so its default cannot be read beforehand. $ANDERTON_TEST_CLAUDE_MANAGED_DIR is read beside the system's
-# managed directory, never instead of it.
-claude_bypass_settings() {
-  local d f dirs
-  case $(uname -s) in
-    Darwin) dirs=("/Library/Application Support/ClaudeCode") ;;
-    *) dirs=(/etc/claude-code) ;;
-  esac
-  [ -z "${ANDERTON_TEST_CLAUDE_MANAGED_DIR:-}" ] || dirs+=("$ANDERTON_TEST_CLAUDE_MANAGED_DIR")
-  if jq -e '.permissions.defaultMode == "bypassPermissions"' "$1/settings.json" >/dev/null 2>&1; then
-    printf '%s sets Claude'"'"'s default permission mode to bypassPermissions\n' "$1/settings.json"
-    return 0
-  fi
-  for d in "${dirs[@]}"; do
-    for f in "$d/managed-settings.json" "$d"/managed-settings.d/*.json; do
-      [ -f "$f" ] || continue
-      if jq -e '.permissions.defaultMode == "bypassPermissions"' "$f" >/dev/null 2>&1; then
-        printf '%s sets Claude'"'"'s default permission mode to bypassPermissions\n' "$f"
-        return 0
-      fi
-      if jq -e 'has("policyHelper") or has("policyHelpers")' "$f" >/dev/null 2>&1; then
-        printf '%s names a policy helper, whose default permission mode cannot be read before Claude starts\n' "$f"
-        return 0
-      fi
-    done
-  done
-  return 1
-}
 usage="usage: spawn.sh --effort low|medium|high|xhigh|max [--provider claude|codex|agy] [--model M] [--mode MODE] [--speed standard|fast|ultrafast] [--base REF] <name: a-z 0-9 -> [brief-file]"
 model="" effort="" mode="" speed="" base="" provider="" codex_home="" launched_at="" launch_token="" claude_launch=""
 while [ $# -gt 0 ]; do
@@ -210,33 +178,15 @@ if [ -z "$role" ] && { [ "$provider" != claude ] || [ "$caller_provider" != clau
   exit 1
 fi
 
-# The Claude home the scripts read, as an absolute path, or empty for Claude's default. A launch passes exactly this, so
-# the worktree a relative path would resolve against picks no other home. Claude reads an empty CLAUDE_CONFIG_DIR as
-# set in places, so the default goes out as an unset variable, never an empty one.
-claude_config=""
-if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  claude_config=$(cd "$CLAUDE_CONFIG_DIR" 2>/dev/null && pwd -P) || {
-    echo "CLAUDE_CONFIG_DIR ($CLAUDE_CONFIG_DIR) is not a directory." >&2
-    exit 1
-  }
-fi
-
 # A peer in another permission mode holds this session's messages for its user's approval, so a Claude Anderton's
 # worker runs in that session's mode, which its transcript records on each prompt. A Codex or agy Anderton directs
-# its Claude workers through their Stop hook and pane, not those messages: they start in the mode Claude itself
-# picks from its settings, or the one --mode names, but never with permissions bypassed.
-settings_mode=""
-if [ "$provider" = claude ] && [ "$caller_provider" != claude ] && [ -n "$mode" ]; then
+# its Claude workers through their Stop hook and pane, not those messages: they start in the mode --mode names, else
+# the one Claude picks from its settings, and Claude itself keeps them out of bypassPermissions mode.
+if [ "$provider" = claude ] && [ "$caller_provider" != claude ]; then
   case $mode in
-    auto | default | manual | acceptEdits | plan) ;;
+    '' | auto | default | manual | acceptEdits | plan) ;;
     *) echo "Claude workers under a $caller_provider Anderton use auto, default, acceptEdits or plan permission mode." >&2; exit 2 ;;
   esac
-elif [ "$provider" = claude ] && [ "$caller_provider" != claude ]; then
-  settings_mode=1
-  if reason=$(claude_bypass_settings "${claude_config:-$HOME/.claude}"); then
-    echo "$reason, which a Claude worker under a $caller_provider Anderton may not use. Pass --mode auto, default, acceptEdits or plan." >&2
-    exit 2
-  fi
 elif [ "$provider" = claude ] && [ -z "$mode" ]; then
   for t in "$home"/projects/*/"$sid".jsonl; do
     [ -e "$t" ] || continue
@@ -361,7 +311,7 @@ if [ -n "$role_scope" ]; then
   label="$(printf '%s' "$me" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9-' '-' | sed 's/^-*//; s/-*$//')/$name"
 fi
 
-config_env="CLAUDE_CONFIG_DIR=$claude_config"
+config_env="CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-}"
 provider_name="Claude Code"
 id="" tab="" pane="" socket="" server=""
 if [ "$provider" = codex ]; then
@@ -405,7 +355,10 @@ else
   if [ -n "$mode" ]; then set -- "$@" --permission-mode "$mode"; else mode="Claude's configured default permission mode"; fi
   set -- "$@" --effort "$effort" --model "${model:-opus}" --session-id "$claude_launch"
   if [ "$caller_provider" != claude ]; then
-    set -- "$@" --plugin-dir "$(cd "$anderton_scripts/../../.." && pwd)"
+    # Settings given on the command line outrank user and project settings, so no profile or settings file can start
+    # this worker with permissions bypassed.
+    set -- "$@" --plugin-dir "$(cd "$anderton_scripts/../../.." && pwd)" \
+      --settings '{"permissions":{"disableBypassPermissionsMode":"disable"}}'
   fi
 fi
 # A tab or window id is unique only within its server, so the record keeps which server it was opened in.
@@ -469,18 +422,6 @@ if [ "$launcher" = herdr ]; then
       esac
     fi
   fi
-  # herdr starts Claude from the tab's shell, whose startup files can set another CLAUDE_CONFIG_DIR. A worker left to
-  # its settings' mode gets the brief only once it is listed on the Claude home whose settings were checked.
-  if [ "$started" -eq 0 ] && [ -n "$settings_mode" ]; then
-    started=1 out="Claude did not register on the Claude home whose settings spawn.sh checked (${claude_config:-$HOME/.claude}), so its permission mode is unchecked."
-    for _ in $(seq 1 20); do
-      if claude agents --json 2>/dev/null | jq -e --arg sid "$claude_launch" 'any(.[]; .sessionId == $sid)' >/dev/null 2>&1; then
-        started=0
-        break
-      fi
-      sleep 0.5
-    done
-  fi
   if [ "$started" -ne 0 ] || ! out=$(herdr agent prompt "$pane" "$brief" 2>&1); then
     screen=$(herdr agent read "$pane" 2>/dev/null | tail -n 20 || true)
     if [ "$provider" = codex ]; then
@@ -522,7 +463,7 @@ else
   # Given as separate arguments, the window's command runs without a shell, so the brief needs no quoting. tmux still
   # parses each argument: one ending in ";" ends the command unless written "\;", and -c expands formats, so "#" is "##".
   set -- "$provider" "$@" "$brief"
-  if [ -n "${config_env#*=}" ]; then set -- -e "$config_env" "$@"; else set -- env -u "${config_env%%=*}" "$@"; fi
+  [ -z "${config_env#*=}" ] || set -- -e "$config_env" "$@"
   for arg; do
     shift
     case $arg in *';') arg="${arg%;}\\;" ;; esac

@@ -116,18 +116,9 @@ done
 # --provider overrides a Codex Anderton's own runtime, the default for its workers.
 printf 'Fixture task.\n' | codex_role env TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 "$script/spawn.sh" --effort low --provider claude codex-lead-claude
 jq -e '(.provider // "claude") == "claude" and .spawnerProvider == "codex" and .spawnerScope == "tools"' "$claims/workers/codex-lead-claude.json" >/dev/null
-# Claude picks the worker's mode from the settings of the Claude home it is handed, the one whose settings were checked.
+# Claude picks the worker's mode from its settings, and is told to refuse bypassPermissions mode.
 if grep -qx -- --permission-mode "$FIXTURE_TMUX_LOG"; then exit 1; fi
-[ "$(grep -A1 -x -- -e "$FIXTURE_TMUX_LOG" | tail -n 1)" = "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR" ]
-# With no CLAUDE_CONFIG_DIR, the window's claude runs with none, whatever the tmux server's environment holds.
-ln -s "$CLAUDE_CONFIG_DIR" "$HOME/.claude"
-printf 'Fixture task.\n' | codex_role env -u CLAUDE_CONFIG_DIR TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 \
-  "$script/spawn.sh" --effort low --provider claude codex-default-home
-[ "$(grep -A3 -x -- env "$FIXTURE_TMUX_LOG" | tr '\n' ' ')" = "env -u CLAUDE_CONFIG_DIR claude " ]
-if grep -qx -- -e "$FIXTURE_TMUX_LOG"; then exit 1; fi
-rm "$claims/workers/codex-default-home.json" "$HOME/.claude"
-git worktree remove --force "$ANDERTON_WORKTREES/wt-codex-default-home"
-# A Codex Anderton's Claude worker runs in auto mode when --mode names it, and never with permissions bypassed.
+[ "$(grep -A1 -x -- --settings "$FIXTURE_TMUX_LOG" | tail -n 1)" = '{"permissions":{"disableBypassPermissionsMode":"disable"}}' ]
 status=0
 printf 'Fixture task.\n' | codex_role env TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 \
   "$script/spawn.sh" --effort low --provider claude --mode bypassPermissions codex-bypass > "$tmp/refused" 2>&1 || status=$?
@@ -137,6 +128,7 @@ grep -q 'use auto, default, acceptEdits or plan permission mode' "$tmp/refused"
 printf 'Fixture task.\n' | codex_role env TMUX=/tmp/fixture-tmux,10,0 ANDERTON_START_WAIT=0 \
   "$script/spawn.sh" --effort low --provider claude --mode auto codex-auto
 [ "$(grep -A1 -x -- --permission-mode "$FIXTURE_TMUX_LOG" | tail -n 1)" = auto ]
+[ "$(grep -A1 -x -- --settings "$FIXTURE_TMUX_LOG" | tail -n 1)" = '{"permissions":{"disableBypassPermissionsMode":"disable"}}' ]
 rm "$claims/workers/codex-auto.json"
 git worktree remove --force "$ANDERTON_WORKTREES/wt-codex-auto"
 if codex_role "$script/role-message.sh" ' ' >/dev/null 2>&1; then exit 1; fi

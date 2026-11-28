@@ -1337,6 +1337,16 @@ check "inside tmux, spawn.sh starts the worker" [ "$status" -eq 0 ]
 check "in a new window, detached, named for it, on its worktree, running claude in the caller's mode" \
   [ "$(head -n 20 "$FAKE_LOG.window" | tr '\n' ' ')" = "new-window -d -P -F #{window_id} #{pane_id} -n tmux-worker -c $work/wt-tmux-worker -e CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR claude -n tmux-worker --permission-mode acceptEdits --effort high --model opus " ]
 check "with the brief and its report-by-name rule as one argument" grep -qF 'Message "lead-session" by SendMessage only when' "$FAKE_LOG.window"
+check "leaving whether it may bypass permissions to the mode it inherits" eval '! grep -qF disableBypassPermissionsMode "$FAKE_LOG.window"'
+# Claude keys a profile's macOS Keychain entry on its path as named, so the window gets the caller's path unresolved.
+ln -s "$CLAUDE_CONFIG_DIR" "$work/claude-link"
+run env TMUX=/tmp/fake-tmux,1,0 FAKE_TMUX_LIVE=1 CLAUDE_CONFIG_DIR="$work/claude-link" "$scripts/spawn.sh" --effort high --mode acceptEdits linked-worker <<'BRIEF'
+Tidy the changelog.
+BRIEF
+check "a Claude Anderton's Claude home reaches the window as the path it names, links unresolved" eval '[ "$status" -eq 0 ] &&
+  grep -qx -- "CLAUDE_CONFIG_DIR=$work/claude-link" "$FAKE_LOG.window"'
+git -C "$(jq -r .root "$CLAUDE_CONFIG_DIR/anderton/workers/linked-worker.json")" worktree remove --force "$work/wt-linked-worker"
+rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/linked-worker.json" "$work/claude-link"
 check "not started in the background" [ ! -e "$FAKE_LOG.bg" ]
 check "recording its pane, by which retire.sh finds a Codex worker" [ "$(jq -r .pane "$CLAUDE_CONFIG_DIR/anderton/workers/tmux-worker.json")" = %70 ]
 check "recording its window and tmux server, which retire.sh kills it in" [ "$(jq -r '"\(.launcher) \(.tab) \(.socket)"' "$CLAUDE_CONFIG_DIR/anderton/workers/tmux-worker.json")" = "tmux @7 /tmp/fake-tmux" ]

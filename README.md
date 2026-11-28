@@ -357,10 +357,9 @@ mode holds incoming messages until you approve them. If that Anderton runs with 
 bypassed, so do its workers. A Codex or agy Anderton directs Claude workers through their Stop hook
 and pane rather than those messages, so they start in the mode your Claude settings give a new
 session (`permissions.defaultMode`), or in the one `--mode auto`, `default`, `acceptEdits` or `plan`
-names. They never run with permissions bypassed: `--mode bypassPermissions` is refused, and so is a
-bypass default, or a policy helper, in the settings files spawn.sh reads (your user `settings.json`
-and the managed `managed-settings.json` and `managed-settings.d/`). It cannot read server-managed
-settings or an MDM profile, so a bypass default set there is not caught. The rule against deploying is in every worker's brief, not a sandbox.
+names. They never run with permissions bypassed: `--mode bypassPermissions` is refused, and each
+starts with `--settings '{"permissions":{"disableBypassPermissionsMode":"disable"}}'`, so Claude itself
+turns down bypassPermissions mode, whatever your settings default to. The rule against deploying is in every worker's brief, not a sandbox.
 
 **What does "deploy" mean here?**
 
@@ -552,8 +551,8 @@ startup details for the operator. Existing background sessions use `claude attac
 - A Claude Code Anderton starts Claude workers in its own permission mode unless `--mode` is
   supplied. A Codex or agy Anderton starts them with no `--permission-mode`, so Claude applies
   your settings' `permissions.defaultMode`, unless `--mode auto`, `default`, `acceptEdits` or `plan`
-  names one. `--mode bypassPermissions` is refused there, and so is a spawn whose user or file-based
-  managed settings default to `bypassPermissions` or name a policy helper. Codex workers use workspace writes and user-reviewed approvals.
+  names one. `--mode bypassPermissions` is refused there, and the worker starts with
+  `disableBypassPermissionsMode` set on its command line, so a settings default of bypass does not apply. Codex workers use workspace writes and user-reviewed approvals.
 - `--effort` is required (`low`, `medium`, `high`, `xhigh` or `max`), so a worker never runs at the
   default just because nobody chose. The Anderton picks it from your request and says so; a level you
   name wins.
