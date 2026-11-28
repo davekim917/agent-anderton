@@ -34,7 +34,7 @@ eventually() { # eventually <command...>: true once it is, within five seconds
 }
 
 export HOME="$tmp/home" CLAUDE_CONFIG_DIR="$tmp/claude" ANDERTON_WORKTREES="$tmp/worktrees" ANDERTON_WATCH_TICK=0.2 \
-  ANDERTON_CLAUDE_MANAGED_DIR="$tmp/managed"
+  ANDERTON_TEST_CLAUDE_MANAGED_DIR="$tmp/managed"
 export FAKE="$tmp/fake"
 unset CLAUDE_PID CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID TMUX ANDERTON_AGY_SESSION ANDERTON_AGY_NAME ANDERTON_AGY_DIR ANDERTON_AGY_PID \
   ANTIGRAVITY_CONVERSATION_ID ANDERTON_AGY_SANDBOXED
@@ -47,8 +47,19 @@ export PATH="$tmp/bin:$PATH"
 cat > "$tmp/bin/herdr" <<'FAKEHERDR'
 #!/usr/bin/env bash
 case "$1 $2" in
-  "tab create") echo '{"result":{"root_pane":{"pane_id":"w9:p5","tab_id":"w9:t5"},"tab":{"tab_id":"w9:t5"}}}' ;;
-  "agent start") printf '%s\n' "$@" > "$FAKE/start" ;;
+  "tab create") printf '%s\n' "$@" > "$FAKE/tab"; echo '{"result":{"root_pane":{"pane_id":"w9:p5","tab_id":"w9:t5"},"tab":{"tab_id":"w9:t5"}}}' ;;
+  "agent start")
+    printf '%s\n' "$@" > "$FAKE/start"
+    # A Claude registers on the home its tab hands it, or on $FAKE_TAB_HOME, as a shell startup file could set.
+    sid=$(grep -A1 -x -- --session-id "$FAKE/start" | tail -n 1)
+    home=${FAKE_TAB_HOME:-$(sed -n 's/^CLAUDE_CONFIG_DIR=//p' "$FAKE/tab")}
+    [ -z "$sid" ] || printf '[{"sessionId":"%s"}]\n' "$sid" > "$FAKE/agents.$(printf '%s' "${home:-$HOME/.claude}" | tr / _)"
+    ;;
+  "tab close") echo "$3" >> "$FAKE/closed" ;;
+  "tab get")
+    if grep -qx "$3" "$FAKE/closed" 2>/dev/null; then echo '{"error":{"code":"tab_not_found"}}'; fi
+    exit 1
+    ;;
   "agent read") printf 'Antigravity CLI example\n? for shortcuts\n' ;;
   "agent prompt") printf '%s %s\n' "$3" "$(printf '%s' "$4" | tr '\n' ' ')" >> "$FAKE/prompts" ;;
   "agent get") cat "$FAKE/agent-get.$3" 2>/dev/null || { echo '{"error":{"code":"agent_not_found"}}' >&2; exit 1; } ;;
@@ -75,7 +86,17 @@ cat > "$tmp/bin/agy" <<'FAKEAGY'
   printf '%s\n' "$@"
 } > "$FAKE/agy-run"
 FAKEAGY
-printf '#!/bin/sh\ncase $1 in agents) echo "[]" ;; *) exit 2 ;; esac\n' > "$tmp/bin/claude"
+# A claude that lists the sessions registered on its Claude home.
+cat > "$tmp/bin/claude" <<'FAKECLAUDE'
+#!/usr/bin/env bash
+case $1 in
+  agents)
+    home=$(cd "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" 2>/dev/null && pwd -P) || home=""
+    cat "$FAKE/agents.$(printf '%s' "$home" | tr / _)" 2>/dev/null || echo "[]"
+    ;;
+  *) exit 2 ;;
+esac
+FAKECLAUDE
 printf '#!/bin/sh\nexit 0\n' > "$tmp/bin/bun"
 printf '#!/bin/sh\nexit 0\n' > "$tmp/guard/plugins/workflow-agents/hooks/agy-guard.sh"
 printf 'export const WATCHDOG_SECONDS = 3630;\n' > "$tmp/guard/plugins/workflow-agents/hooks/agy-supervisor.ts"
@@ -238,7 +259,7 @@ git -C "$repo" worktree remove --force "$ANDERTON_WORKTREES/wt-lead-claude"
 no_worker() { [ ! -e "$FAKE/start" ] && [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/$1.json" ] && [ ! -e "$ANDERTON_WORKTREES/wt-$1" ]; }
 mode_arg() { [ "$(grep -A1 -x -- --permission-mode "$FAKE/start" | tail -n 1)" = "$1" ]; }
 drop_worker() {
-  rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/$1.json"
+  rm -f "$FAKE/start" "$FAKE/closed" "$CLAUDE_CONFIG_DIR/anderton/workers/$1.json"
   git -C "$repo" worktree remove --force "$ANDERTON_WORKTREES/wt-$1"
 }
 printf '{"permissions":{"defaultMode":"bypassPermissions"}}\n' > "$CLAUDE_CONFIG_DIR/settings.json"
@@ -247,15 +268,37 @@ in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" -- "$scripts/spawn.sh" 
 check "a user default of bypassPermissions refuses a Claude worker started without --mode" eval '[ "$status" -eq 2 ] &&
   contains "$CLAUDE_CONFIG_DIR/settings.json sets Claude'"'"'s default permission mode to bypassPermissions" && no_worker bypass-claude'
 rm "$CLAUDE_CONFIG_DIR/settings.json"
-mkdir -p "$ANDERTON_CLAUDE_MANAGED_DIR/managed-settings.d"
-printf '{"permissions":{"defaultMode":"bypassPermissions"}}\n' > "$ANDERTON_CLAUDE_MANAGED_DIR/managed-settings.d/50-mode.json"
+mkdir -p "$ANDERTON_TEST_CLAUDE_MANAGED_DIR/managed-settings.d"
+printf '{"permissions":{"defaultMode":"bypassPermissions"}}\n' > "$ANDERTON_TEST_CLAUDE_MANAGED_DIR/managed-settings.d/50-mode.json"
 in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" -- "$scripts/spawn.sh" --provider claude --effort low bypass-claude
 check "so does a managed settings drop-in" eval '[ "$status" -eq 2 ] && contains "managed-settings.d/50-mode.json sets" &&
   no_worker bypass-claude'
+rm -f "$FAKE/start"
 in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" -- "$scripts/spawn.sh" --provider claude --effort low --mode bypassPermissions bypass-claude
-check "but --mode bypassPermissions starts it so" eval '[ "$status" -eq 0 ] && mode_arg bypassPermissions'
-drop_worker bypass-claude
-rm -r "$ANDERTON_CLAUDE_MANAGED_DIR"
+check "and --mode bypassPermissions does not start it so either" eval '[ "$status" -eq 2 ] &&
+  contains "use auto, default, acceptEdits or plan permission mode" && no_worker bypass-claude'
+printf '{"permissions":{"defaultMode":"bypassPermissions"}}\n' > "$ANDERTON_TEST_CLAUDE_MANAGED_DIR/managed-settings.json"
+rm "$ANDERTON_TEST_CLAUDE_MANAGED_DIR/managed-settings.d/50-mode.json"
+in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" -- "$scripts/spawn.sh" --provider claude --effort low bypass-claude
+check "so does the managed settings file" eval '[ "$status" -eq 2 ] && contains "managed-settings.json sets" && no_worker bypass-claude'
+printf '{"policyHelper":{"path":"/example/policy-helper"}}\n' > "$ANDERTON_TEST_CLAUDE_MANAGED_DIR/managed-settings.json"
+in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" -- "$scripts/spawn.sh" --provider claude --effort low bypass-claude
+check "and a managed policy helper, whose default cannot be read" eval '[ "$status" -eq 2 ] && contains "names a policy helper" &&
+  no_worker bypass-claude'
+rm -r "$ANDERTON_TEST_CLAUDE_MANAGED_DIR"
+# The tab is handed the Claude home whose settings were checked, as an absolute path, and the brief waits for Claude to
+# register there.
+in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" CLAUDE_CONFIG_DIR=../claude -- "$scripts/spawn.sh" --provider claude --effort low rel-claude
+check "a relative Claude home reaches the tab as the absolute path it names here" eval '[ "$status" -eq 0 ] &&
+  grep -qx -- "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR" "$FAKE/tab"'
+drop_worker rel-claude
+mkdir -p "$tmp/other-claude"
+rm -f "$FAKE/start"
+: > "$FAKE/prompts"
+in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" FAKE_TAB_HOME="$tmp/other-claude" -- "$scripts/spawn.sh" --provider claude --effort low other-home
+check "a Claude that registers on another home gets no brief, and the spawn is undone" eval '[ "$status" -eq 1 ] &&
+  contains "did not register on the Claude home whose settings spawn.sh checked" && ! grep -qF "w9:p5 Tidy" "$FAKE/prompts" &&
+  [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/other-home.json" ] && [ ! -e "$ANDERTON_WORKTREES/wt-other-home" ]'
 in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" -- "$scripts/spawn.sh" --provider claude --effort low --mode auto auto-claude
 check "and --mode auto in auto mode" eval '[ "$status" -eq 0 ] && mode_arg auto && contains "(auto)"'
 drop_worker auto-claude
