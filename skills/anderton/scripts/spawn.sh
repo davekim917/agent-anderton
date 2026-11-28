@@ -178,10 +178,15 @@ if [ -z "$role" ] && { [ "$provider" != claude ] || [ "$caller_provider" != clau
   exit 1
 fi
 
-# A peer in another permission mode holds this session's messages for its user's approval, so the worker
-# runs in this session's mode, which its transcript records on each prompt.
-if [ "$provider" = claude ] && [ -z "$mode" ] && [ "$caller_provider" != claude ]; then
-  mode=default
+# A peer in another permission mode holds this session's messages for its user's approval, so a Claude Anderton's
+# worker runs in that session's mode, which its transcript records on each prompt. A Codex or agy Anderton directs
+# its Claude workers through their Stop hook and pane, not those messages: they start in the mode --mode names, else
+# the one Claude picks from its settings, and Claude itself keeps them out of bypassPermissions mode.
+if [ "$provider" = claude ] && [ "$caller_provider" != claude ]; then
+  case $mode in
+    '' | auto | default | manual | acceptEdits | plan) ;;
+    *) echo "Claude workers under a $caller_provider Anderton use auto, default, acceptEdits or plan permission mode." >&2; exit 2 ;;
+  esac
 elif [ "$provider" = claude ] && [ -z "$mode" ]; then
   for t in "$home"/projects/*/"$sid".jsonl; do
     [ -e "$t" ] || continue
@@ -189,13 +194,7 @@ elif [ "$provider" = claude ] && [ -z "$mode" ]; then
     break
   done
 fi
-if [ "$provider" = claude ] && [ "$caller_provider" != claude ]; then
-  case $mode in
-    default | acceptEdits | plan) ;;
-    *) echo "Claude workers under a $caller_provider Anderton use default, acceptEdits, or plan permission mode." >&2; exit 2 ;;
-  esac
-fi
-if [ "$provider" = claude ] && [ -z "$mode" ]; then
+if [ "$provider" = claude ] && [ -z "$mode" ] && [ "$caller_provider" = claude ]; then
   echo "Cannot read this session's permission mode from its transcript; pass --mode." >&2
   exit 1
 fi
@@ -352,9 +351,14 @@ elif [ "$provider" = agy ]; then
   out=$("$anderton_scripts/agy-hooks.sh" check --workspace "$dir" 2>&1) || failed "$out
 agy would run unguarded, so no agy worker was started."
 else
-  set -- -n "$name" --permission-mode "$mode" --effort "$effort" --model "${model:-opus}" --session-id "$claude_launch"
+  set -- -n "$name"
+  if [ -n "$mode" ]; then set -- "$@" --permission-mode "$mode"; else mode="Claude's configured default permission mode"; fi
+  set -- "$@" --effort "$effort" --model "${model:-opus}" --session-id "$claude_launch"
   if [ "$caller_provider" != claude ]; then
-    set -- "$@" --plugin-dir "$(cd "$anderton_scripts/../../.." && pwd)"
+    # Settings given on the command line outrank user and project settings, so no profile or settings file can start
+    # this worker with permissions bypassed.
+    set -- "$@" --plugin-dir "$(cd "$anderton_scripts/../../.." && pwd)" \
+      --settings '{"permissions":{"disableBypassPermissionsMode":"disable"}}'
   fi
 fi
 # A tab or window id is unique only within its server, so the record keeps which server it was opened in.

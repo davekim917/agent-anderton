@@ -229,8 +229,8 @@ records what agy loads hooks, plugins and agents from for the repository, and th
 of it changes.
 
 Workers start from it with `spawn.sh` as from any Anderton. Its default provider is agy, as every Anderton's own
-provider is the default for its workers. A Claude worker under it runs in Claude's default permission mode and reports
-in its final replies, as under a Codex Anderton. A Claude worker it inherits, which still reports with `SendMessage`, has
+provider is the default for its workers. A Claude worker under it starts in the permission mode your Claude settings give a new
+session, and reports in its final replies, as under a Codex Anderton. A Claude worker it inherits, which still reports with `SendMessage`, has
 that send held and read from its transcript, as a Codex Anderton reads one. Known limit: a final reply that restates
 that milestone in other words can be reported twice after a take-over, by a Codex Anderton too; only a reply with the
 same text is dropped.
@@ -352,9 +352,17 @@ reads every diff.
 
 **Is it safe to let it run?**
 
-Workers run in the Anderton's permission mode, because a session in a different mode holds
-incoming messages until you approve them. If your Anderton runs with permissions bypassed, so do
-its workers. The rule against deploying is in every worker's brief, not a sandbox.
+A Claude Code Anderton's workers run in its own permission mode, because a session in a different
+mode holds incoming messages until you approve them. If that Anderton runs with permissions
+bypassed, so do its workers. A Codex or agy Anderton directs Claude workers through their Stop hook
+and pane rather than those messages, so they start in the mode your Claude settings give a new
+session (`permissions.defaultMode`), or in the one `--mode auto`, `default`, `acceptEdits` or `plan`
+names. A worker `spawn.sh` starts for them never runs with permissions bypassed: `--mode
+bypassPermissions` is refused, and each starts with
+`--settings '{"permissions":{"disableBypassPermissionsMode":"disable"}}'`, so Claude itself turns down
+bypassPermissions mode, whatever your settings default to. A Claude session already running with
+permissions bypassed keeps that mode when a Codex or agy Anderton adopts it (`adopt.sh`) or takes over
+the role that holds it. The rule against deploying is in every worker's brief, not a sandbox.
 
 **What does "deploy" mean here?**
 
@@ -544,8 +552,10 @@ startup details for the operator. Existing background sessions use `claude attac
   that closes first fails the spawn, and one still open is kept with a note that it may wait at a
   startup prompt.
 - A Claude Code Anderton starts Claude workers in its own permission mode unless `--mode` is
-  supplied. A Codex Anderton uses Claude Code's default mode for Claude workers unless `--mode`
-  is supplied. Codex workers use workspace writes and user-reviewed approvals.
+  supplied. A Codex or agy Anderton starts them with no `--permission-mode`, so Claude applies
+  your settings' `permissions.defaultMode`, unless `--mode auto`, `default`, `acceptEdits` or `plan`
+  names one. `--mode bypassPermissions` is refused there, and the worker starts with
+  `disableBypassPermissionsMode` set on its command line, so a settings default of bypass does not apply. Codex workers use workspace writes and user-reviewed approvals.
 - `--effort` is required (`low`, `medium`, `high`, `xhigh` or `max`), so a worker never runs at the
   default just because nobody chose. The Anderton picks it from your request and says so; a level you
   name wins.

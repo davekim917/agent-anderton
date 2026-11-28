@@ -227,12 +227,25 @@ rm -f "$HOME/.gemini/hooks.json"
 # The workers it starts report to it the way they report to a Codex Anderton.
 printf 'Tidy the example module.\n' > "$tmp/brief.md"
 in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" -- "$scripts/spawn.sh" --provider claude --effort low lead-claude
-check "an agy Anderton starts a Claude worker in herdr" eval '[ "$status" -eq 0 ] && grep -qx -- default "$FAKE/start" &&
-  grep -qx -- --plugin-dir "$FAKE/start"'
+no_bypass='{"permissions":{"disableBypassPermissionsMode":"disable"}}'
+check "an agy Anderton starts a Claude worker in herdr, in the permission mode Claude's settings give it" eval '[ "$status" -eq 0 ] &&
+  ! grep -qx -- --permission-mode "$FAKE/start" && grep -qx -- --plugin-dir "$FAKE/start"'
+check "with Claude told to refuse bypassPermissions mode" [ "$(grep -A1 -x -- --settings "$FAKE/start" | tail -n 1)" = "$no_bypass" ]
 check "which reports in its final replies, to the agy Anderton" [ "$(jq -r '"\(.reportTransport) \(.spawnerProvider) \(.spawner)"' "$CLAUDE_CONFIG_DIR/anderton/workers/lead-claude.json")" = "transcript agy agy-lead" ]
 check "and the brief says so" grep -qF "w9:p5 Tidy the example module." "$FAKE/prompts"
 mv "$CLAUDE_CONFIG_DIR/anderton/workers/lead-claude.json" "$tmp/lead-claude.json"
 git -C "$repo" worktree remove --force "$ANDERTON_WORKTREES/wt-lead-claude"
+rm -f "$FAKE/start"
+in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" -- "$scripts/spawn.sh" --provider claude --effort low --mode bypassPermissions bypass-claude
+check "--mode bypassPermissions starts no Claude worker" eval '[ "$status" -eq 2 ] &&
+  contains "use auto, default, acceptEdits or plan permission mode" && [ ! -e "$FAKE/start" ] &&
+  [ ! -e "$CLAUDE_CONFIG_DIR/anderton/workers/bypass-claude.json" ] && [ ! -e "$ANDERTON_WORKTREES/wt-bypass-claude" ]'
+in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" -- "$scripts/spawn.sh" --provider claude --effort low --mode auto auto-claude
+check "while --mode auto starts one in auto mode, still refusing bypassPermissions" eval '[ "$status" -eq 0 ] &&
+  [ "$(grep -A1 -x -- --permission-mode "$FAKE/start" | tail -n 1)" = auto ] &&
+  [ "$(grep -A1 -x -- --settings "$FAKE/start" | tail -n 1)" = "$no_bypass" ] && contains "(auto)"'
+rm -f "$CLAUDE_CONFIG_DIR/anderton/workers/auto-claude.json"
+git -C "$repo" worktree remove --force "$ANDERTON_WORKTREES/wt-auto-claude"
 agent_in w9:p5 agy
 in_agy "$lead_jobs" --stdin "$tmp/brief.md" "${lead[@]}" -- "$scripts/spawn.sh" --provider agy --effort low lead-agy
 jq -c --arg cwd "$ANDERTON_WORKTREES/wt-lead-agy" '.result.agent.cwd = $cwd' "$FAKE/agent-get.w9:p5" > "$FAKE/agent-get.tmp"
